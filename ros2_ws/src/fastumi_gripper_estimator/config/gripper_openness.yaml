@@ -1,0 +1,21 @@
+# 该文件保存 FastUMI 夹爪开合度估计节点的默认运行参数。
+gripper_openness_estimator:
+  ros__parameters:
+    image_topic: /xv_sdk/SN250801DR48FB26001253/rgb_fisheye_undistorted/image
+    openness_topic: /gripper/openness
+    debug_image_topic: /gripper/openness/debug_image
+    publish_debug_image: false
+
+    # 夹爪左右两侧标记使用 OpenCV 4x4 字典中的 ID 0 和 ID 1。
+    dictionary_name: DICT_4X4_50
+    left_marker_id: 0
+    right_marker_id: 1
+
+    # 基于 0722 bag 全部 2793 帧统计：有效检测率 99.32%。
+    # 距离分布约为 199~558 px，默认取 200 px 为闭合、557 px 为张开。
+    closed_distance_px: 200.0
+    open_distance_px: 557.0
+    smoothing_alpha: 0.35
+
+    # 相对图像宽高的 [x_min, y_min, x_max, y_max]，覆盖画面下部夹爪区域。
+    roi_ratios: [0.15, 0.58, 0.85, 0.82]
