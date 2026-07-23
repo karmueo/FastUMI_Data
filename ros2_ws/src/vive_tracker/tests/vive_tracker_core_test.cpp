@@ -1,6 +1,6 @@
 /**
  * @file vive_tracker_core_test.cpp
- * @brief 验证 OpenVR 位姿、多级坐标转换和 ROS 2 有界轨迹行为。
+ * @brief 验证 OpenVR 位姿、首帧相对转换、多级 TF 和有界轨迹行为。
  */
 
 #include <cmath>
@@ -73,6 +73,43 @@ vive_tracker::Quaternion
 ConjugateQuaternion(const vive_tracker::Quaternion &quaternion) {
   return vive_tracker::Quaternion{-quaternion.x, -quaternion.y, -quaternion.z,
                                   quaternion.w};
+}
+
+/**
+ * @brief 使用单位四元数旋转三维向量。
+ * @param quaternion 施加到向量上的单位旋转。
+ * @param vector 待旋转的三维向量。
+ * @return 旋转后的三维向量。
+ */
+vive_tracker::Vector3 RotateVector(const vive_tracker::Quaternion &quaternion,
+                                   const vive_tracker::Vector3 &vector) {
+  /** 将三维向量嵌入纯虚四元数。 */
+  const vive_tracker::Quaternion vector_quaternion{vector.x, vector.y, vector.z,
+                                                   0.0};
+  /** 旋转后的纯虚四元数。 */
+  const vive_tracker::Quaternion rotated_quaternion =
+      MultiplyQuaternions(MultiplyQuaternions(quaternion, vector_quaternion),
+                          ConjugateQuaternion(quaternion));
+  return vive_tracker::Vector3{rotated_quaternion.x, rotated_quaternion.y,
+                               rotated_quaternion.z};
+}
+
+/**
+ * @brief 组合父坐标系位姿和相对位姿。
+ * @param parent_pose 相对坐标系在共同父坐标系中的位姿。
+ * @param relative_pose 当前对象在相对坐标系中的位姿。
+ * @return 当前对象在共同父坐标系中的组合位姿。
+ */
+vive_tracker::Pose ComposePoses(const vive_tracker::Pose &parent_pose,
+                                const vive_tracker::Pose &relative_pose) {
+  /** 相对平移旋转到共同父坐标系后的分量。 */
+  const vive_tracker::Vector3 rotated_position =
+      RotateVector(parent_pose.orientation, relative_pose.position);
+  return vive_tracker::Pose{
+      vive_tracker::Vector3{parent_pose.position.x + rotated_position.x,
+                            parent_pose.position.y + rotated_position.y,
+                            parent_pose.position.z + rotated_position.z},
+      MultiplyQuaternions(parent_pose.orientation, relative_pose.orientation)};
 }
 
 /**
@@ -207,6 +244,86 @@ TEST(ViveTrackerPoseMath, ComposesStaticAndDynamicFramesToOriginalPose) {
   EXPECT_NEAR(composed_orientation.z, 0.0, kTolerance);
   EXPECT_NEAR(std::abs(composed_orientation.w), 1.0, kTolerance);
   EXPECT_NEAR(QuaternionNorm(composed_orientation), 1.0, kTolerance);
+}
+
+/**
+ * @brief 验证参考位姿相对于自身得到单位位姿。
+ */
+TEST(ViveTrackerPoseMath, RelativePoseStartsAtIdentity) {
+  /** 具有非零平移和绕 Z 轴旋转的参考位姿。 */
+  const vive_tracker::Pose reference_pose{
+      vive_tracker::Vector3{1.0, -2.0, 3.0},
+      vive_tracker::Quaternion{0.0, 0.0, kSqrtHalf, kSqrtHalf}};
+  /** 参考位姿相对于自身的结果。 */
+  const vive_tracker::Pose relative_pose =
+      vive_tracker::CalculateRelativePose(reference_pose, reference_pose);
+
+  EXPECT_NEAR(relative_pose.position.x, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.position.y, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.position.z, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.x, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.y, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.z, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.w, 1.0, kTolerance);
+}
+
+/**
+ * @brief 验证平移和旋转均表达在首帧坐标轴中。
+ */
+TEST(ViveTrackerPoseMath, RelativePoseUsesReferenceAxes) {
+  /** 绕全局 Z 轴旋转 90 度的首帧位姿。 */
+  const vive_tracker::Pose reference_pose{
+      vive_tracker::Vector3{1.0, 2.0, 3.0},
+      vive_tracker::Quaternion{0.0, 0.0, kSqrtHalf, kSqrtHalf}};
+  /** 沿首帧正 X 移动一米并继续绕 Z 轴旋转 90 度后的位姿。 */
+  const vive_tracker::Pose current_pose{
+      vive_tracker::Vector3{1.0, 3.0, 3.0},
+      vive_tracker::Quaternion{0.0, 0.0, 1.0, 0.0}};
+  /** 当前位姿在首帧坐标系中的相对结果。 */
+  const vive_tracker::Pose relative_pose =
+      vive_tracker::CalculateRelativePose(reference_pose, current_pose);
+
+  EXPECT_NEAR(relative_pose.position.x, 1.0, kTolerance);
+  EXPECT_NEAR(relative_pose.position.y, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.position.z, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.x, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.y, 0.0, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.z, kSqrtHalf, kTolerance);
+  EXPECT_NEAR(relative_pose.orientation.w, kSqrtHalf, kTolerance);
+}
+
+/**
+ * @brief 验证首帧绝对位姿和相对位姿能够还原当前绝对位姿。
+ */
+TEST(ViveTrackerPoseMath, RelativePoseReconstructsCurrentPose) {
+  /** 测试使用的首帧绝对位姿。 */
+  const vive_tracker::Pose reference_pose{
+      vive_tracker::Vector3{-0.5, 0.25, 1.5},
+      vive_tracker::Quaternion{0.0, 0.0, kSqrtHalf, kSqrtHalf}};
+  /** 测试使用的当前绝对位姿。 */
+  const vive_tracker::Pose current_pose{
+      vive_tracker::Vector3{0.25, -0.5, 2.0},
+      vive_tracker::Quaternion{kSqrtHalf, 0.0, 0.0, kSqrtHalf}};
+  /** 根据两帧绝对位姿计算得到的相对位姿。 */
+  const vive_tracker::Pose relative_pose =
+      vive_tracker::CalculateRelativePose(reference_pose, current_pose);
+  /** 将首帧绝对位姿与相对位姿重新组合得到的结果。 */
+  const vive_tracker::Pose reconstructed_pose =
+      ComposePoses(reference_pose, relative_pose);
+  /** 重建四元数和目标四元数的内积，用于忽略等价的整体符号。 */
+  const double orientation_dot =
+      reconstructed_pose.orientation.x * current_pose.orientation.x +
+      reconstructed_pose.orientation.y * current_pose.orientation.y +
+      reconstructed_pose.orientation.z * current_pose.orientation.z +
+      reconstructed_pose.orientation.w * current_pose.orientation.w;
+
+  EXPECT_NEAR(reconstructed_pose.position.x, current_pose.position.x,
+              kTolerance);
+  EXPECT_NEAR(reconstructed_pose.position.y, current_pose.position.y,
+              kTolerance);
+  EXPECT_NEAR(reconstructed_pose.position.z, current_pose.position.z,
+              kTolerance);
+  EXPECT_NEAR(std::abs(orientation_dot), 1.0, kTolerance);
 }
 
 /**

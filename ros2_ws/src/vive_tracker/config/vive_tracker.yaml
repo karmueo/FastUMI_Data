@@ -7,5 +7,6 @@
     tracking_origin: standing
     openvr_frame: steamvr_tracking
     parent_frame: steamvr_tracking_ros
+    odom_frame: vive_tracker_odom
     child_frame: vive_tracker
     max_path_points: 3000

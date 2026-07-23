@@ -1,6 +1,6 @@
 /**
  * @file pose_math.cpp
- * @brief 实现 OpenVR 位姿解析和轴向重排后的 ROS 跟踪坐标转换。
+ * @brief 实现 OpenVR 位姿解析、ROS 跟踪坐标转换和首帧相对位姿。
  */
 
 #include "vive_tracker/pose_math.hpp"
@@ -191,6 +191,54 @@ Pose ConvertOpenVrPoseToRosPose(const Pose &openvr_pose) noexcept {
       ConvertOpenVrRotationToRos(openvr_rotation);
   ros_pose.orientation = RotationMatrixToQuaternion(ros_rotation);
   return ros_pose;
+}
+
+/**
+ * @brief 计算当前位姿相对于参考位姿所定义坐标系的刚体变换。
+ * @param reference_pose 作为相对坐标系原点和轴向的参考位姿。
+ * @param current_pose 与参考位姿表达在同一父坐标系中的当前位姿。
+ * @return 满足 reference_pose × relative_pose = current_pose 的相对位姿。
+ */
+Pose CalculateRelativePose(const Pose &reference_pose,
+                           const Pose &current_pose) noexcept {
+  /** 参考位姿的旋转矩阵，用于将参考坐标系分量变换到共同父坐标系。 */
+  const RotationMatrix reference_rotation =
+      QuaternionToRotationMatrix(reference_pose.orientation);
+  /** 当前位姿的旋转矩阵。 */
+  const RotationMatrix current_rotation =
+      QuaternionToRotationMatrix(current_pose.orientation);
+  /** 当前位置相对参考原点、但仍表达在共同父坐标系中的位移。 */
+  const std::array<double, kRotationDimension> parent_frame_delta{
+      current_pose.position.x - reference_pose.position.x,
+      current_pose.position.y - reference_pose.position.y,
+      current_pose.position.z - reference_pose.position.z};
+  /** 表达在参考位姿坐标轴中的相对位置分量。 */
+  std::array<double, kRotationDimension> relative_position{};
+  /** 当前方向相对于参考方向的旋转矩阵。 */
+  RotationMatrix relative_rotation{};
+
+  for (std::size_t row = 0; row < kRotationDimension; ++row) {
+    for (std::size_t component = 0; component < kRotationDimension;
+         ++component) {
+      relative_position[row] +=
+          reference_rotation[component][row] * parent_frame_delta[component];
+    }
+    for (std::size_t column = 0; column < kRotationDimension; ++column) {
+      for (std::size_t component = 0; component < kRotationDimension;
+           ++component) {
+        relative_rotation[row][column] += reference_rotation[component][row] *
+                                          current_rotation[component][column];
+      }
+    }
+  }
+
+  /** 完整的首帧相对位姿。 */
+  Pose relative_pose{};
+  relative_pose.position.x = relative_position[0];
+  relative_pose.position.y = relative_position[1];
+  relative_pose.position.z = relative_position[2];
+  relative_pose.orientation = RotationMatrixToQuaternion(relative_rotation);
+  return relative_pose;
 }
 
 /**

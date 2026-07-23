@@ -1,6 +1,6 @@
 /**
  * @file vive_tracker_node.cpp
- * @brief 实现 VIVE Tracker 当前位姿、有限轨迹和多级 TF 的 ROS 2 发布节点。
+ * @brief 实现 VIVE Tracker 绝对位姿、首帧里程计、轨迹和多级 TF 发布。
  */
 
 #include <algorithm>
@@ -11,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -18,6 +19,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
@@ -89,7 +91,7 @@ void FillRosPose(const Pose &source, geometry_msgs::msg::Pose *target) {
 }
 
 /**
- * @brief 发布指定 VIVE Tracker 的当前位姿、轨迹与多级 TF。
+ * @brief 发布指定 VIVE Tracker 的绝对位姿、首帧里程计、轨迹与多级 TF。
  */
 class ViveTrackerNode : public rclcpp::Node {
 public:
@@ -108,6 +110,8 @@ public:
         declare_parameter<std::string>("openvr_frame", "steamvr_tracking");
     parent_frame_ =
         declare_parameter<std::string>("parent_frame", "steamvr_tracking_ros");
+    odom_frame_ =
+        declare_parameter<std::string>("odom_frame", "vive_tracker_odom");
     child_frame_ =
         declare_parameter<std::string>("child_frame", "vive_tracker");
     /** 尚未转换为容器长度类型的轨迹点上限。 */
@@ -126,6 +130,8 @@ public:
 
     pose_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(
         "pose", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+    odom_publisher_ = create_publisher<nav_msgs::msg::Odometry>(
+        "odom", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
     /** 确保新启动的 RViz 能立即收到完整轨迹的发布策略。 */
     rclcpp::QoS path_qos(rclcpp::KeepLast(1));
     path_qos.reliable().transient_local();
@@ -166,11 +172,14 @@ private:
     }
     ValidateFrameId(openvr_frame_, "openvr_frame");
     ValidateFrameId(parent_frame_, "parent_frame");
+    ValidateFrameId(odom_frame_, "odom_frame");
     ValidateFrameId(child_frame_, "child_frame");
-    if (openvr_frame_ == parent_frame_ || openvr_frame_ == child_frame_ ||
-        parent_frame_ == child_frame_) {
+    if (openvr_frame_ == parent_frame_ || openvr_frame_ == odom_frame_ ||
+        openvr_frame_ == child_frame_ || parent_frame_ == odom_frame_ ||
+        parent_frame_ == child_frame_ || odom_frame_ == child_frame_) {
       throw std::invalid_argument(
-          "openvr_frame, parent_frame, and child_frame must be different");
+          "openvr_frame, parent_frame, odom_frame, and child_frame must be "
+          "different");
     }
     if (max_path_points_parameter <= 0) {
       throw std::invalid_argument("max_path_points must be greater than zero");
@@ -185,23 +194,52 @@ private:
    * @brief 发布原始 OpenVR 全局坐标系到新 ROS 跟踪坐标系的静态 TF。
    */
   void PublishTrackingFrameTransform() {
-    /** 两个全局坐标系同原点，仅方向不同的静态变换。 */
-    geometry_msgs::msg::TransformStamped transform_message{};
-    transform_message.header.stamp = now();
-    transform_message.header.frame_id = openvr_frame_;
-    transform_message.child_frame_id = parent_frame_;
+    tracking_frame_transform_.header.stamp = now();
+    tracking_frame_transform_.header.frame_id = openvr_frame_;
+    tracking_frame_transform_.child_frame_id = parent_frame_;
     /** 新 ROS 跟踪坐标系在 OpenVR 全局坐标系中的固定方向。 */
     const Quaternion frame_orientation =
         GetRosTrackingFrameOrientationInOpenVr();
-    transform_message.transform.rotation.x = frame_orientation.x;
-    transform_message.transform.rotation.y = frame_orientation.y;
-    transform_message.transform.rotation.z = frame_orientation.z;
-    transform_message.transform.rotation.w = frame_orientation.w;
-    static_tf_broadcaster_->sendTransform(transform_message);
+    tracking_frame_transform_.transform.rotation.x = frame_orientation.x;
+    tracking_frame_transform_.transform.rotation.y = frame_orientation.y;
+    tracking_frame_transform_.transform.rotation.z = frame_orientation.z;
+    tracking_frame_transform_.transform.rotation.w = frame_orientation.w;
+    static_tf_broadcaster_->sendTransform(tracking_frame_transform_);
   }
 
   /**
-   * @brief 读取目标 Tracker，并在位姿有效时发布 Pose、Path 和 TF。
+   * @brief 使用第一条有效位姿初始化里程计坐标系并发布静态 TF。
+   * @param initial_pose Tracker 在 ROS 全局跟踪坐标系中的首帧位姿。
+   * @param stamp 首帧采样时间戳。
+   */
+  void InitializeOdomFrame(const Pose &initial_pose,
+                           const rclcpp::Time &stamp) {
+    initial_pose_ = initial_pose;
+
+    /** ROS 全局跟踪坐标系到首帧里程计坐标系的静态变换。 */
+    geometry_msgs::msg::TransformStamped odom_frame_transform{};
+    odom_frame_transform.header.stamp = stamp;
+    odom_frame_transform.header.frame_id = parent_frame_;
+    odom_frame_transform.child_frame_id = odom_frame_;
+    odom_frame_transform.transform.translation.x = initial_pose.position.x;
+    odom_frame_transform.transform.translation.y = initial_pose.position.y;
+    odom_frame_transform.transform.translation.z = initial_pose.position.z;
+    odom_frame_transform.transform.rotation.x = initial_pose.orientation.x;
+    odom_frame_transform.transform.rotation.y = initial_pose.orientation.y;
+    odom_frame_transform.transform.rotation.z = initial_pose.orientation.z;
+    odom_frame_transform.transform.rotation.w = initial_pose.orientation.w;
+
+    /** 确保晚加入的订阅者能够同时收到完整的两级静态 TF。 */
+    const std::vector<geometry_msgs::msg::TransformStamped> static_transforms{
+        tracking_frame_transform_, odom_frame_transform};
+    static_tf_broadcaster_->sendTransform(static_transforms);
+    RCLCPP_INFO(get_logger(),
+                "Initialized odometry frame %s from the first valid pose",
+                odom_frame_.c_str());
+  }
+
+  /**
+   * @brief 读取目标 Tracker，并在位姿有效时发布 Pose、Odom、Path 和 TF。
    */
   void SampleAndPublish() {
     /** 当前 OpenVR 会话中全部 Generic Tracker 的采样。 */
@@ -241,19 +279,32 @@ private:
     const Pose ros_pose = ConvertOpenVrPoseToRosPose(target_sample->pose);
     FillRosPose(ros_pose, &pose_message.pose);
 
+    if (!initial_pose_.has_value()) {
+      InitializeOdomFrame(ros_pose, pose_message.header.stamp);
+    }
+    /** 当前 Tracker 相对于首帧里程计坐标系的位姿。 */
+    const Pose odom_pose = CalculateRelativePose(*initial_pose_, ros_pose);
+    /** 本次发布的首帧归零里程计消息。 */
+    nav_msgs::msg::Odometry odom_message{};
+    odom_message.header.stamp = pose_message.header.stamp;
+    odom_message.header.frame_id = odom_frame_;
+    odom_message.child_frame_id = child_frame_;
+    FillRosPose(odom_pose, &odom_message.pose.pose);
+
     path_message_.header.stamp = pose_message.header.stamp;
     AppendPoseToBoundedPath(pose_message, max_path_points_, &path_message_);
 
-    /** 与当前位姿具有同一时间戳和坐标数据的 TF 消息。 */
+    /** 与里程计位姿具有相同时间戳和坐标数据的动态 TF。 */
     geometry_msgs::msg::TransformStamped transform_message{};
-    transform_message.header = pose_message.header;
+    transform_message.header = odom_message.header;
     transform_message.child_frame_id = child_frame_;
-    transform_message.transform.translation.x = pose_message.pose.position.x;
-    transform_message.transform.translation.y = pose_message.pose.position.y;
-    transform_message.transform.translation.z = pose_message.pose.position.z;
-    transform_message.transform.rotation = pose_message.pose.orientation;
+    transform_message.transform.translation.x = odom_pose.position.x;
+    transform_message.transform.translation.y = odom_pose.position.y;
+    transform_message.transform.translation.z = odom_pose.position.z;
+    transform_message.transform.rotation = odom_message.pose.pose.orientation;
 
     pose_publisher_->publish(pose_message);
+    odom_publisher_->publish(odom_message);
     path_publisher_->publish(path_message_);
     tf_broadcaster_->sendTransform(transform_message);
   }
@@ -266,25 +317,33 @@ private:
   TrackingOrigin tracking_origin_{TrackingOrigin::kStanding};
   /** OpenVR 返回位姿时使用的原始全局坐标系。 */
   std::string openvr_frame_{};
-  /** Pose、Path 和动态 TF 使用的轴向重排父坐标系。 */
+  /** Pose、Path 和静态里程计原点使用的轴向重排父坐标系。 */
   std::string parent_frame_{};
-  /** TF 使用的 Tracker 子坐标系。 */
+  /** 第一条有效位姿定义的固定里程计坐标系。 */
+  std::string odom_frame_{};
+  /** TF 和 Odometry 使用的 Tracker 子坐标系。 */
   std::string child_frame_{};
   /** 轨迹允许保留的最大点数。 */
   std::size_t max_path_points_{3000};
   /** 管理 OpenVR 会话并读取 Tracker 位姿的对象。 */
   TrackerPoseReader pose_reader_{};
+  /** 本次节点生命周期内用于定义里程计原点的首帧有效位姿。 */
+  std::optional<Pose> initial_pose_{};
   /** 当前已经积累的有限长度轨迹。 */
   nav_msgs::msg::Path path_message_{};
-  /** 当前位姿发布器。 */
+  /** 当前绝对位姿发布器。 */
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
       pose_publisher_{};
+  /** 首帧归零里程计发布器。 */
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_{};
   /** 历史轨迹发布器。 */
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_{};
   /** 当前 Tracker 动态坐标变换发布器。 */
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_{};
   /** 原始 OpenVR 全局坐标系到新 ROS 跟踪坐标系的静态变换发布器。 */
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_{};
+  /** 需要与首帧里程计静态变换一起重发的全局轴变换。 */
+  geometry_msgs::msg::TransformStamped tracking_frame_transform_{};
   /** 周期执行 OpenVR 采样的壁钟定时器。 */
   rclcpp::TimerBase::SharedPtr sample_timer_{};
   /** 限频日志使用、不受 ROS 时间配置影响的稳定时钟。 */

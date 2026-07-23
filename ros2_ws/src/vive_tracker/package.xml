@@ -3,7 +3,7 @@
 <package format="3">
   <name>vive_tracker</name>
   <version>0.1.0</version>
-  <description>Publish a selected VIVE Tracker pose, bounded path, and TF through OpenVR.</description>
+  <description>Publish absolute and first-pose-relative VIVE Tracker motion through OpenVR.</description>
   <maintainer email="karmueo@163.com">scl</maintainer>
   <license>Apache-2.0</license>
 

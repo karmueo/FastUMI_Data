@@ -1,6 +1,6 @@
 /**
  * @file pose_math.hpp
- * @brief 声明 OpenVR 位姿解析和 ROS REP-103 坐标转换接口。
+ * @brief 声明 OpenVR 位姿解析、ROS 坐标转换和首帧相对位姿接口。
  */
 
 #pragma once
@@ -27,6 +27,15 @@ Pose ConvertOpenVrMatrixToPose(const vr::HmdMatrix34_t &matrix) noexcept;
  * 的位姿。
  */
 Pose ConvertOpenVrPoseToRosPose(const Pose &openvr_pose) noexcept;
+
+/**
+ * @brief 计算当前位姿相对于参考位姿所定义坐标系的刚体变换。
+ * @param reference_pose 作为相对坐标系原点和轴向的参考位姿。
+ * @param current_pose 与参考位姿表达在同一父坐标系中的当前位姿。
+ * @return 满足 reference_pose × relative_pose = current_pose 的相对位姿。
+ */
+Pose CalculateRelativePose(const Pose &reference_pose,
+                           const Pose &current_pose) noexcept;
 
 /**
  * @brief 获取轴向重排后的 ROS 跟踪坐标系在 OpenVR 全局坐标系中的方向。
