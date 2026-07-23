@@ -1,0 +1,11 @@
+# 本文件保存 VIVE Tracker ROS 2 位姿发布节点的默认参数。
+
+/vive_tracker/pose_publisher:
+  ros__parameters:
+    serial: LHR-B77A06A7
+    publish_rate_hz: 30.0
+    tracking_origin: standing
+    openvr_frame: steamvr_tracking
+    parent_frame: steamvr_tracking_ros
+    child_frame: vive_tracker
+    max_path_points: 3000
