@@ -1,9 +1,14 @@
-"""实现订阅相机图像并发布夹爪归一化开合度的 ROS 2 节点。"""
+"""订阅原始鱼眼 RGB 图像并发布无量纲夹爪归一化距离。"""
 
 from typing import List, Optional
 
+from ament_index_python.packages import get_package_share_directory
 import cv2
 from cv_bridge import CvBridge
+from fastumi_gripper_estimator.calibration import (
+    load_camera_calibration,
+    validate_gripper_distance_range,
+)
 from fastumi_gripper_estimator.estimator import (
     GripperOpennessEstimator,
     OpennessEstimate,
@@ -15,11 +20,25 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
 
 
+# 默认原始 RGB 图像话题。
+DEFAULT_IMAGE_TOPIC = "/xv_sdk/SN250801DR48FB26001253/rgb/image"
+# 随包安装的默认 Kalibr equidistant 鱼眼标定文件名。
+DEFAULT_CAMERA_CALIBRATION_FILENAME = "camera_calibration.yaml"
+# 默认夹爪编号。
+DEFAULT_GRIPPER_ID = 0
+# 默认左右手指 ArUco 标记编号。
+DEFAULT_LEFT_FINGER_TAG_ID = 0
+DEFAULT_RIGHT_FINGER_TAG_ID = 1
+# 默认闭合和张开标签中心距离，单位为毫米。
+DEFAULT_MIN_MARKER_DIST_MM = 48.31
+DEFAULT_MAX_MARKER_DIST_MM = 129.0
+
+
 class GripperOpennessNode(Node):
-    """从 RGB 图像估计夹爪开合度并发布 ROS 2 话题。"""
+    """从原始 RGB 图像估计并发布无量纲夹爪归一化距离。"""
 
     def __init__(self) -> None:
-        """读取参数并创建订阅器、开合度发布器和调试发布器。"""
+        """加载严格标定参数并创建 ROS 订阅器和发布器。"""
         super().__init__("gripper_openness_estimator")
         self._declare_parameters()
 
@@ -27,6 +46,26 @@ class GripperOpennessNode(Node):
         image_topic = str(self.get_parameter("image_topic").value)
         openness_topic = str(self.get_parameter("openness_topic").value)
         debug_image_topic = str(self.get_parameter("debug_image_topic").value)
+        # 空参数使用包共享目录中的默认标定，也允许 launch 传入外部标定。
+        camera_calibration_path = str(
+            self.get_parameter("camera_calibration_path").value
+        )
+        if not camera_calibration_path.strip():
+            camera_calibration_path = self._default_calibration_path()
+        # 夹爪编号用于区分配置，毫米距离用于最终归一化。
+        gripper_id = int(
+            self.get_parameter("gripper_range.gripper_id").value
+        )
+        min_distance_mm = float(
+            self.get_parameter(
+                "gripper_range.min_marker_dist_mm"
+            ).value
+        )
+        max_distance_mm = float(
+            self.get_parameter(
+                "gripper_range.max_marker_dist_mm"
+            ).value
+        )
         # 是否发布带检测标注的调试图像。
         self._publish_debug_image = bool(
             self.get_parameter("publish_debug_image").value
@@ -35,18 +74,51 @@ class GripperOpennessNode(Node):
         roi_ratios = tuple(
             float(value) for value in self.get_parameter("roi_ratios").value
         )
-        # 视觉估计器保存 ArUco 检测器与平滑状态。
-        self._estimator = GripperOpennessEstimator(
-            closed_distance_px=float(
-                self.get_parameter("closed_distance_px").value
-            ),
-            open_distance_px=float(self.get_parameter("open_distance_px").value),
-            smoothing_alpha=float(self.get_parameter("smoothing_alpha").value),
-            dictionary_name=str(self.get_parameter("dictionary_name").value),
-            left_marker_id=int(self.get_parameter("left_marker_id").value),
-            right_marker_id=int(self.get_parameter("right_marker_id").value),
-            roi_ratios=roi_ratios,
-        )
+
+        try:
+            # 相机标定和夹爪范围均严格校验，失败时阻止节点运行。
+            camera_calibration = load_camera_calibration(
+                camera_calibration_path
+            )
+            # 每帧必须与该宽高一致，才能直接使用标定内参。
+            self._calibration_resolution = camera_calibration.resolution
+            gripper_range = validate_gripper_distance_range(
+                min_distance_mm,
+                max_distance_mm,
+            )
+            self._estimator = GripperOpennessEstimator(
+                camera_matrix=camera_calibration.camera_matrix,
+                distortion_coefficients=(
+                    camera_calibration.distortion_coefficients
+                ),
+                closed_distance_mm=gripper_range.min_distance_mm,
+                open_distance_mm=gripper_range.max_distance_mm,
+                marker_size_mm=float(
+                    self.get_parameter("marker_size_mm").value
+                ),
+                smoothing_alpha=float(
+                    self.get_parameter("smoothing_alpha").value
+                ),
+                dictionary_name=str(
+                    self.get_parameter("dictionary_name").value
+                ),
+                left_marker_id=int(
+                    self.get_parameter(
+                        "gripper_range.left_finger_tag_id"
+                    ).value
+                ),
+                right_marker_id=int(
+                    self.get_parameter(
+                        "gripper_range.right_finger_tag_id"
+                    ).value
+                ),
+                roi_ratios=roi_ratios,
+                image_resolution=camera_calibration.resolution,
+            )
+        except ValueError as error:
+            self.get_logger().error(f"加载三维夹爪估计参数失败: {error}")
+            raise RuntimeError("三维夹爪估计参数无效") from error
+
         # cv_bridge 负责 ROS Image 与 OpenCV 数组互转。
         self._bridge = CvBridge()
         # 图像流采用小队列和 BEST_EFFORT，避免处理延迟持续累积。
@@ -67,69 +139,114 @@ class GripperOpennessNode(Node):
             Image, image_topic, self._image_callback, image_qos
         )
         self.get_logger().info(
-            f"订阅 {image_topic}，发布 {openness_topic}；"
-            "0 表示闭合，1 表示完全张开"
+            f"订阅原始 RGB 话题 {image_topic}，发布 {openness_topic}；"
+            "输出为无量纲归一化距离，0 表示闭合，1 表示完全张开"
+        )
+        self.get_logger().info(
+            f"夹爪配置 ID {gripper_id}，内部三维距离范围: "
+            f"{gripper_range.min_distance_mm:.3f}~"
+            f"{gripper_range.max_distance_mm:.3f} mm"
+        )
+        self.get_logger().info(
+            "相机标定分辨率: "
+            f"{self._calibration_resolution[0]}x"
+            f"{self._calibration_resolution[1]}"
+        )
+
+    @staticmethod
+    def _default_calibration_path() -> str:
+        """返回随 ROS 包安装的默认相机标定文件路径。
+
+        Returns:
+            package share 中默认 Kalibr YAML 的绝对路径。
+        """
+        package_share = get_package_share_directory(
+            "fastumi_gripper_estimator"
+        )
+        return (
+            f"{package_share}/config/"
+            f"{DEFAULT_CAMERA_CALIBRATION_FILENAME}"
         )
 
     def _declare_parameters(self) -> None:
         """声明节点支持的全部 ROS 参数及默认值。"""
-        self.declare_parameter(
-            "image_topic",
-            "/xv_sdk/SN250801DR48FB26001253/"
-            "rgb_fisheye_undistorted/image",
-        )
+        self.declare_parameter("image_topic", DEFAULT_IMAGE_TOPIC)
         self.declare_parameter("openness_topic", "/gripper/openness")
-        self.declare_parameter("debug_image_topic", "/gripper/openness/debug_image")
+        self.declare_parameter(
+            "debug_image_topic", "/gripper/openness/debug_image"
+        )
         self.declare_parameter("publish_debug_image", False)
+        self.declare_parameter("camera_calibration_path", "")
+        self.declare_parameter("marker_size_mm", 16.0)
         self.declare_parameter("dictionary_name", "DICT_4X4_50")
-        self.declare_parameter("left_marker_id", 0)
-        self.declare_parameter("right_marker_id", 1)
-        self.declare_parameter("closed_distance_px", 200.0)
-        self.declare_parameter("open_distance_px", 557.0)
+        self.declare_parameter(
+            "gripper_range.gripper_id", DEFAULT_GRIPPER_ID
+        )
+        self.declare_parameter(
+            "gripper_range.left_finger_tag_id",
+            DEFAULT_LEFT_FINGER_TAG_ID,
+        )
+        self.declare_parameter(
+            "gripper_range.right_finger_tag_id",
+            DEFAULT_RIGHT_FINGER_TAG_ID,
+        )
+        self.declare_parameter(
+            "gripper_range.min_marker_dist_mm",
+            DEFAULT_MIN_MARKER_DIST_MM,
+        )
+        self.declare_parameter(
+            "gripper_range.max_marker_dist_mm",
+            DEFAULT_MAX_MARKER_DIST_MM,
+        )
         self.declare_parameter("smoothing_alpha", 0.35)
         self.declare_parameter("roi_ratios", [0.15, 0.58, 0.85, 0.82])
 
     def _image_callback(self, message: Image) -> None:
-        """处理一帧图像，在检测有效时发布开合度。
+        """处理一帧图像，在三维估计有效时发布无量纲结果。
 
         Args:
-            message: 相机发布的 ROS Image 消息。
+            message: 原始鱼眼 RGB 图像消息。
 
         Side Effects:
-            发布 Float32 开合度；启用调试参数时还会发布标注图像。
+            发布 `[0,1]` Float32；启用调试参数时还会发布标注图像。
         """
         try:
             # BGR 图像同时供估计算法和调试绘图使用。
-            image = self._bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+            image = self._bridge.imgmsg_to_cv2(
+                message, desired_encoding="bgr8"
+            )
             estimate = self._estimator.estimate(image)
-        except (ValueError, RuntimeError) as error:
+        except (ValueError, RuntimeError, cv2.error) as error:
             self.get_logger().error(
-                f"图像转换或估计失败: {error}", throttle_duration_sec=2.0
+                f"图像转换或三维估计失败: {error}",
+                throttle_duration_sec=2.0,
             )
             return
         if estimate is None:
             self.get_logger().warning(
-                "夹爪的两枚 ArUco 标记未同时检出，本帧不发布开合度",
+                "夹爪标记检测或三维 PnP 无效，本帧不发布归一化距离",
                 throttle_duration_sec=2.0,
             )
             return
 
-        # 标准 Float32 消息承载 [0, 1] 归一化结果。
+        # 对外消息只承载无量纲 [0,1] 归一化距离。
         openness_message = Float32()
         openness_message.data = estimate.openness
         self._openness_publisher.publish(openness_message)
         if self._debug_publisher is not None:
             debug_image = self._draw_debug_image(image, estimate)
-            debug_message = self._bridge.cv2_to_imgmsg(debug_image, encoding="bgr8")
+            debug_message = self._bridge.cv2_to_imgmsg(
+                debug_image, encoding="bgr8"
+            )
             debug_message.header = message.header
             self._debug_publisher.publish(debug_message)
 
     @staticmethod
     def _draw_debug_image(image, estimate: OpennessEstimate):
-        """在图像副本上绘制 ROI、标记中心、间距和开合度。
+        """绘制 ROI、标记中心、内部毫米距离和无量纲输出。
 
         Args:
-            image: BGR 输入图像。
+            image: BGR 原始鱼眼图像。
             estimate: 当前帧估计结果。
 
         Returns:
@@ -139,15 +256,23 @@ class GripperOpennessNode(Node):
         debug_image = image.copy()
         x_min, y_min, x_max, y_max = estimate.roi
         left_point = tuple(int(round(value)) for value in estimate.left_center)
-        right_point = tuple(int(round(value)) for value in estimate.right_center)
-        cv2.rectangle(debug_image, (x_min, y_min), (x_max, y_max), (255, 180, 0), 2)
+        right_point = tuple(
+            int(round(value)) for value in estimate.right_center
+        )
+        cv2.rectangle(
+            debug_image,
+            (x_min, y_min),
+            (x_max, y_max),
+            (255, 180, 0),
+            2,
+        )
         cv2.line(debug_image, left_point, right_point, (0, 255, 0), 3)
         cv2.circle(debug_image, left_point, 8, (0, 0, 255), -1)
         cv2.circle(debug_image, right_point, 8, (255, 0, 0), -1)
-        # 调试文字同时展示平滑输出和原始像素距离。
+        # 毫米值只显示在调试画面；ROS Float32 输出保持无量纲。
         label = (
             f"openness={estimate.openness:.3f} "
-            f"distance={estimate.distance_px:.1f}px"
+            f"distance={estimate.distance_mm:.1f}mm"
         )
         cv2.putText(
             debug_image,
@@ -169,15 +294,17 @@ def main(args: Optional[List[str]] = None) -> None:
         args: 可选 ROS 2 命令行参数列表。
     """
     rclpy.init(args=args)
-    # 节点对象需要在 finally 中显式销毁。
-    node = GripperOpennessNode()
+    # 初始化失败时仍需在 finally 中关闭 rclpy。
+    node: Optional[GripperOpennessNode] = None
     try:
+        node = GripperOpennessNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         try:
-            node.destroy_node()
+            if node is not None:
+                node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
         except KeyboardInterrupt:

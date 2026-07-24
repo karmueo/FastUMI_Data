@@ -21,19 +21,27 @@ def generate_launch_description() -> LaunchDescription:
     parameter_file = os.path.join(
         package_share, "config", "gripper_openness.yaml"
     )
-    # 输入话题参数默认选择与标定数据一致的畸变校正图像。
+    # 随包安装的默认相机标定文件路径。
+    default_calibration_file = os.path.join(
+        package_share, "config", "camera_calibration.yaml"
+    )
+    # 输入话题参数默认选择三维鱼眼解算使用的原始 RGB 图像。
     image_topic_argument = DeclareLaunchArgument(
         "image_topic",
-        default_value=(
-            "/xv_sdk/SN250801DR48FB26001253/rgb_fisheye_undistorted/image"
-        ),
-        description="用于夹爪开合度估计的 sensor_msgs/Image 话题",
+        default_value="/xv_sdk/SN250801DR48FB26001253/rgb/image",
+        description="用于三维夹爪距离估计的原始 sensor_msgs/Image 话题",
     )
     # 调试图像开关允许通过 launch 命令行覆盖 YAML 默认值。
     debug_argument = DeclareLaunchArgument(
         "publish_debug_image",
         default_value="false",
         description="是否发布带 ArUco 标注的调试图像",
+    )
+    # 相机标定允许在启动时替换，默认值不依赖源码工作区位置。
+    calibration_argument = DeclareLaunchArgument(
+        "camera_calibration_path",
+        default_value=default_calibration_file,
+        description="Kalibr equidistant 相机标定 YAML 路径",
     )
     # 夹爪估计节点启动动作。
     estimator_node = Node(
@@ -45,7 +53,12 @@ def generate_launch_description() -> LaunchDescription:
             parameter_file,
             {
                 "image_topic": LaunchConfiguration("image_topic"),
-                "publish_debug_image": LaunchConfiguration("publish_debug_image"),
+                "publish_debug_image": LaunchConfiguration(
+                    "publish_debug_image"
+                ),
+                "camera_calibration_path": LaunchConfiguration(
+                    "camera_calibration_path"
+                ),
             },
         ],
     )
@@ -53,6 +66,7 @@ def generate_launch_description() -> LaunchDescription:
         [
             image_topic_argument,
             debug_argument,
+            calibration_argument,
             estimator_node,
         ]
     )

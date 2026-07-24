@@ -1,4 +1,4 @@
-"""提供与 ROS 解耦的双 ArUco 标记夹爪开合度估计算法。"""
+"""提供与 ROS 解耦的双 ArUco 标记三维夹爪开合度估计算法。"""
 
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -9,66 +9,95 @@ import numpy as np
 
 @dataclass(frozen=True)
 class OpennessEstimate:
-    """保存单帧夹爪开合度估计结果。
+    """保存单帧夹爪归一化距离估计结果。
 
     Attributes:
-        openness: 平滑后的归一化开合度，范围为 0 到 1。
-        raw_openness: 当前帧未经平滑的归一化开合度。
-        distance_px: 两枚 ArUco 标记中心之间的像素距离。
-        left_center: ID 0 标记中心在完整图像中的像素坐标。
-        right_center: ID 1 标记中心在完整图像中的像素坐标。
+        openness: 平滑后的无量纲归一化距离，范围为 0 到 1。
+        raw_openness: 当前帧未经平滑的无量纲归一化距离。
+        distance_mm: 两枚 ArUco 标记中心的三维距离，单位为毫米。
+        left_center: 左侧标记中心在原始图像中的像素坐标。
+        right_center: 右侧标记中心在原始图像中的像素坐标。
         roi: 检测区域，顺序为 x_min、y_min、x_max、y_max。
     """
 
     openness: float
     raw_openness: float
-    distance_px: float
+    distance_mm: float
     left_center: Tuple[float, float]
     right_center: Tuple[float, float]
     roi: Tuple[int, int, int, int]
 
 
 class GripperOpennessEstimator:
-    """通过两枚 ArUco 标记的像素间距估计夹爪开合度。
+    """通过两枚 ArUco 标记的三维毫米距离估计无量纲夹爪距离。
 
-    参数中的 ROI 使用相对于图像宽高的比例，便于兼容不同分辨率。
-    估计器有指数平滑状态；只有两枚目标标记同时有效时才会更新该状态。
+    输入角点来自原始鱼眼图像。估计器先按 equidistant 模型校正角点，
+    再用方形标记的 IPPE PnP 计算三维位置。只有两枚目标标记的位姿都
+    有效时才更新指数平滑状态。
 
     Args:
-        closed_distance_px: 夹爪完全闭合时的标记中心距离。
-        open_distance_px: 夹爪完全张开时的标记中心距离。
+        camera_matrix: 形状为 ``(3, 3)`` 的相机内参矩阵。
+        distortion_coefficients: 四个 equidistant 鱼眼畸变系数。
+        closed_distance_mm: 夹爪完全闭合时的三维标记距离，单位为毫米。
+        open_distance_mm: 夹爪完全张开时的三维标记距离，单位为毫米。
+        marker_size_mm: 正方形 ArUco 标记边长，单位为毫米。
         smoothing_alpha: 当前帧在指数平滑中的权重，范围为 (0, 1]。
         dictionary_name: OpenCV ArUco 预定义字典名称。
         left_marker_id: 左侧标记 ID。
         right_marker_id: 右侧标记 ID。
         roi_ratios: ROI 比例，顺序为 x_min、y_min、x_max、y_max。
+        image_resolution: 输入图像的预期宽、高；为空时不限制尺寸。
 
     Raises:
-        ValueError: 标定距离、平滑系数、字典或 ROI 参数无效时抛出。
+        ValueError: 相机参数、距离、标记、平滑系数或 ROI 参数无效时抛出。
     """
 
     def __init__(
         self,
-        closed_distance_px: float,
-        open_distance_px: float,
+        camera_matrix: np.ndarray,
+        distortion_coefficients: np.ndarray,
+        closed_distance_mm: float,
+        open_distance_mm: float,
+        marker_size_mm: float = 16.0,
         smoothing_alpha: float = 0.35,
         dictionary_name: str = "DICT_4X4_50",
         left_marker_id: int = 0,
         right_marker_id: int = 1,
-        roi_ratios: Tuple[float, float, float, float] = (0.15, 0.58, 0.85, 0.82),
+        roi_ratios: Tuple[float, float, float, float] = (
+            0.15,
+            0.58,
+            0.85,
+            0.82,
+        ),
+        image_resolution: Optional[Tuple[int, int]] = None,
     ) -> None:
-        """初始化 ArUco 检测器和归一化参数。"""
-        if closed_distance_px >= open_distance_px:
-            raise ValueError("closed_distance_px 必须小于 open_distance_px")
+        """初始化鱼眼校正、ArUco 检测、PnP 和归一化参数。"""
+        self.camera_matrix = self._validate_camera_matrix(camera_matrix)
+        self.distortion_coefficients = self._validate_distortion(
+            distortion_coefficients
+        )
+        if not np.isfinite(closed_distance_mm) or not np.isfinite(
+            open_distance_mm
+        ):
+            raise ValueError("闭合和张开距离必须为有限数值")
+        if closed_distance_mm < 0.0 or closed_distance_mm >= open_distance_mm:
+            raise ValueError("closed_distance_mm 必须非负且小于 open_distance_mm")
+        if not np.isfinite(marker_size_mm) or marker_size_mm <= 0.0:
+            raise ValueError("marker_size_mm 必须为正的有限数值")
         if not 0.0 < smoothing_alpha <= 1.0:
             raise ValueError("smoothing_alpha 必须在 (0, 1] 范围内")
         if left_marker_id == right_marker_id:
             raise ValueError("left_marker_id 与 right_marker_id 必须不同")
         self._validate_roi(roi_ratios)
+        self.image_resolution = self._validate_image_resolution(
+            image_resolution
+        )
 
-        # 闭合和张开标定距离，用于线性归一化。
-        self.closed_distance_px = float(closed_distance_px)
-        self.open_distance_px = float(open_distance_px)
+        # 闭合和张开的毫米标定距离，仅用于生成无量纲输出。
+        self.closed_distance_mm = float(closed_distance_mm)
+        self.open_distance_mm = float(open_distance_mm)
+        # 正方形标记边长，决定 PnP 平移向量的毫米尺度。
+        self.marker_size_mm = float(marker_size_mm)
         # 指数平滑权重，较大值带来更快响应。
         self.smoothing_alpha = float(smoothing_alpha)
         # 两侧目标标记 ID。
@@ -76,21 +105,74 @@ class GripperOpennessEstimator:
         self.right_marker_id = int(right_marker_id)
         # 相对于输入图像尺寸的检测区域。
         self.roi_ratios = tuple(float(value) for value in roi_ratios)
-        # 上一帧有效的平滑结果；首次估计前为空。
+        # 上一帧有效的无量纲平滑结果。
         self._smoothed_openness: Optional[float] = None
+        # 校正后的角点已处于针孔像素坐标，PnP 使用零畸变系数。
+        self._zero_distortion = np.zeros((4, 1), dtype=np.float64)
 
         if not hasattr(cv2.aruco, dictionary_name):
             raise ValueError(f"未知 ArUco 字典: {dictionary_name}")
-        # OpenCV 预定义字典编号。
-        dictionary_id = getattr(cv2.aruco, dictionary_name)
         # ArUco 字典在节点生命周期内复用，兼容 OpenCV 4.6 的过程式 API。
+        dictionary_id = getattr(cv2.aruco, dictionary_name)
         self._dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
-        # OpenCV 4.7 起可复用面向对象检测器，旧版本在检测时回退到模块函数。
+        # OpenCV 4.7 起可复用面向对象检测器，旧版本回退到模块函数。
         detector_class = getattr(cv2.aruco, "ArucoDetector", None)
-        if callable(detector_class):
-            self._detector = detector_class(self._dictionary)
-        else:
-            self._detector = None
+        self._detector = (
+            detector_class(self._dictionary)
+            if callable(detector_class)
+            else None
+        )
+        # IPPE_SQUARE 要求物点从左上角开始顺时针排列。
+        half_size = self.marker_size_mm * 0.5
+        self._marker_object_points = np.asarray(
+            [
+                [-half_size, half_size, 0.0],
+                [half_size, half_size, 0.0],
+                [half_size, -half_size, 0.0],
+                [-half_size, -half_size, 0.0],
+            ],
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def _validate_camera_matrix(camera_matrix: np.ndarray) -> np.ndarray:
+        """验证并复制相机内参矩阵。
+
+        Args:
+            camera_matrix: 待验证的相机内参矩阵。
+
+        Returns:
+            形状为 ``(3, 3)`` 的双精度矩阵。
+
+        Raises:
+            ValueError: 形状、数值或焦距无效时抛出。
+        """
+        matrix = np.asarray(camera_matrix, dtype=np.float64)
+        if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+            raise ValueError("camera_matrix 必须是包含有限数值的 3x3 矩阵")
+        if matrix[0, 0] <= 0.0 or matrix[1, 1] <= 0.0:
+            raise ValueError("camera_matrix 的焦距必须为正数")
+        return matrix.copy()
+
+    @staticmethod
+    def _validate_distortion(
+        distortion_coefficients: np.ndarray,
+    ) -> np.ndarray:
+        """验证并整理 equidistant 鱼眼畸变系数。
+
+        Args:
+            distortion_coefficients: 待验证的鱼眼畸变系数。
+
+        Returns:
+            形状为 ``(4, 1)`` 的双精度系数矩阵。
+
+        Raises:
+            ValueError: 系数数量或数值无效时抛出。
+        """
+        distortion = np.asarray(distortion_coefficients, dtype=np.float64)
+        if distortion.size != 4 or not np.all(np.isfinite(distortion)):
+            raise ValueError("distortion_coefficients 必须包含四个有限数值")
+        return distortion.reshape(4, 1).copy()
 
     @staticmethod
     def _validate_roi(roi_ratios: Tuple[float, float, float, float]) -> None:
@@ -110,31 +192,101 @@ class GripperOpennessEstimator:
         if x_min >= x_max or y_min >= y_max:
             raise ValueError("ROI 最小边界必须小于最大边界")
 
-    def normalize_distance(self, distance_px: float) -> float:
-        """将标记像素距离线性映射并裁剪到 0 到 1。
+    @staticmethod
+    def _validate_image_resolution(
+        image_resolution: Optional[Tuple[int, int]],
+    ) -> Optional[Tuple[int, int]]:
+        """验证输入图像的预期宽高。
 
         Args:
-            distance_px: 两枚标记中心的像素距离。
+            image_resolution: 输入图像的预期宽、高；为空时不限制尺寸。
 
         Returns:
-            归一化开合度；0 表示闭合，1 表示完全张开。
+            经过验证的宽、高元组，或 ``None``。
+
+        Raises:
+            ValueError: 分辨率不含两个正整数时抛出。
         """
-        calibrated_range = self.open_distance_px - self.closed_distance_px
-        normalized = (float(distance_px) - self.closed_distance_px) / calibrated_range
+        if image_resolution is None:
+            return None
+        if (
+            len(image_resolution) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, np.integer))
+                or value <= 0
+                for value in image_resolution
+            )
+        ):
+            raise ValueError("image_resolution 必须包含两个正整数")
+        return int(image_resolution[0]), int(image_resolution[1])
+
+    def normalize_distance(self, distance_mm: float) -> float:
+        """将内部毫米距离映射为无量纲 0 到 1 数值。
+
+        Args:
+            distance_mm: 两枚标记中心的三维距离，单位为毫米。
+
+        Returns:
+            无量纲归一化距离；0 表示闭合，1 表示完全张开。
+        """
+        calibrated_range = self.open_distance_mm - self.closed_distance_mm
+        normalized = (
+            float(distance_mm) - self.closed_distance_mm
+        ) / calibrated_range
         return float(np.clip(normalized, 0.0, 1.0))
 
     def reset(self) -> None:
         """清除平滑状态，使下一次有效估计直接采用当前帧结果。"""
         self._smoothed_openness = None
 
-    def estimate(self, image: np.ndarray) -> Optional[OpennessEstimate]:
-        """估计单帧图像中的夹爪开合度。
+    def estimate_marker_position(
+        self, distorted_corners: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """从原始鱼眼角点估计标记中心的三维毫米坐标。
 
         Args:
-            image: 灰度、BGR 或 BGRA 图像数组。
+            distorted_corners: 原始图像中的四个角点，顺序遵循 ArUco 输出。
 
         Returns:
-            两枚目标标记均被检测到时返回结果，否则返回 ``None``。
+            形状为 ``(3,)`` 的毫米平移向量；位姿无效时返回 ``None``。
+
+        Raises:
+            ValueError: 角点数量或数值无效时抛出。
+        """
+        corners = np.asarray(distorted_corners, dtype=np.float64)
+        if corners.size != 8 or not np.all(np.isfinite(corners)):
+            raise ValueError("标记角点必须包含四个有限二维坐标")
+        corners = corners.reshape(4, 1, 2)
+        # 将 equidistant 鱼眼角点转换为使用原相机矩阵的针孔像素坐标。
+        undistorted_corners = cv2.fisheye.undistortPoints(
+            corners,
+            self.camera_matrix,
+            self.distortion_coefficients,
+            P=self.camera_matrix,
+        ).reshape(4, 2)
+        success, _, translation = cv2.solvePnP(
+            self._marker_object_points,
+            undistorted_corners,
+            self.camera_matrix,
+            self._zero_distortion,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE,
+        )
+        if not success:
+            return None
+        position_mm = np.asarray(translation, dtype=np.float64).reshape(3)
+        if not np.all(np.isfinite(position_mm)) or position_mm[2] <= 0.0:
+            return None
+        return position_mm
+
+    def estimate(self, image: np.ndarray) -> Optional[OpennessEstimate]:
+        """估计单帧原始鱼眼图像中的无量纲夹爪距离。
+
+        Args:
+            image: 灰度、BGR 或 BGRA 原始鱼眼图像数组。
+
+        Returns:
+            两枚目标标记及其 PnP 位姿均有效时返回结果，否则返回 ``None``。
 
         Raises:
             ValueError: 输入图像为空或通道格式不受支持时抛出。
@@ -144,8 +296,18 @@ class GripperOpennessEstimator:
         gray_image = self._to_grayscale(image)
         # 输入图像尺寸，用于将比例 ROI 转换为像素边界。
         image_height, image_width = gray_image.shape
+        actual_resolution = (image_width, image_height)
+        if (
+            self.image_resolution is not None
+            and actual_resolution != self.image_resolution
+        ):
+            expected_width, expected_height = self.image_resolution
+            raise ValueError(
+                "输入图像分辨率 "
+                f"{image_width}x{image_height} 与相机标定分辨率 "
+                f"{expected_width}x{expected_height} 不一致"
+            )
         x_min_ratio, y_min_ratio, x_max_ratio, y_max_ratio = self.roi_ratios
-        # 像素 ROI 边界。
         roi = (
             int(round(image_width * x_min_ratio)),
             int(round(image_height * y_min_ratio)),
@@ -164,20 +326,36 @@ class GripperOpennessEstimator:
         if marker_ids is None:
             return None
 
-        # 将每个标记中心从 ROI 坐标转换到完整图像坐标。
-        centers = {
-            int(marker_id): marker_corners.reshape(4, 2).mean(axis=0)
-            + np.asarray([x_min, y_min], dtype=np.float32)
-            for marker_corners, marker_id in zip(corners, marker_ids.flatten())
+        # 目标标记的四角点和中心均恢复到原始完整图像坐标。
+        offset = np.asarray([x_min, y_min], dtype=np.float64)
+        marker_corners = {
+            int(marker_id): detected_corners.reshape(4, 2).astype(np.float64)
+            + offset
+            for detected_corners, marker_id in zip(
+                corners, marker_ids.flatten()
+            )
+            if int(marker_id) in (self.left_marker_id, self.right_marker_id)
         }
-        if self.left_marker_id not in centers or self.right_marker_id not in centers:
+        if (
+            self.left_marker_id not in marker_corners
+            or self.right_marker_id not in marker_corners
+        ):
             return None
 
-        # 两侧标记中心及欧氏像素距离。
-        left_center_array = centers[self.left_marker_id]
-        right_center_array = centers[self.right_marker_id]
-        distance_px = float(np.linalg.norm(left_center_array - right_center_array))
-        raw_openness = self.normalize_distance(distance_px)
+        left_corners = marker_corners[self.left_marker_id]
+        right_corners = marker_corners[self.right_marker_id]
+        left_position_mm = self.estimate_marker_position(left_corners)
+        right_position_mm = self.estimate_marker_position(right_corners)
+        if left_position_mm is None or right_position_mm is None:
+            return None
+
+        # PnP 平移向量和距离都使用毫米；对外输出只使用无量纲结果。
+        distance_mm = float(
+            np.linalg.norm(left_position_mm - right_position_mm)
+        )
+        if not np.isfinite(distance_mm):
+            return None
+        raw_openness = self.normalize_distance(distance_mm)
         if self._smoothed_openness is None:
             smoothed_openness = raw_openness
         else:
@@ -185,15 +363,20 @@ class GripperOpennessEstimator:
                 self.smoothing_alpha * raw_openness
                 + (1.0 - self.smoothing_alpha) * self._smoothed_openness
             )
-        self._smoothed_openness = smoothed_openness
+        self._smoothed_openness = float(
+            np.clip(smoothed_openness, 0.0, 1.0)
+        )
 
-        # 不可变坐标元组，供 ROS 节点绘制调试信息。
-        left_center = tuple(float(value) for value in left_center_array)
-        right_center = tuple(float(value) for value in right_center_array)
+        left_center = tuple(
+            float(value) for value in left_corners.mean(axis=0)
+        )
+        right_center = tuple(
+            float(value) for value in right_corners.mean(axis=0)
+        )
         return OpennessEstimate(
-            openness=float(smoothed_openness),
+            openness=self._smoothed_openness,
             raw_openness=raw_openness,
-            distance_px=distance_px,
+            distance_mm=distance_mm,
             left_center=left_center,
             right_center=right_center,
             roi=roi,

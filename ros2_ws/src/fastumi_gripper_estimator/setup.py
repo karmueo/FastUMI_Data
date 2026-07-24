@@ -27,7 +27,7 @@ setup(
     maintainer="FastUMI Maintainer",
     tests_require=["pytest"],
     maintainer_email="maintainer@example.com",
-    description="基于双 ArUco 标记估计夹爪归一化开合度。",
+    description="基于双 ArUco 鱼眼三维位姿发布无量纲夹爪归一化距离。",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [

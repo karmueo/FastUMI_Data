@@ -3,7 +3,7 @@
 <package format="3">
   <name>fastumi_gripper_estimator</name>
   <version>0.1.0</version>
-  <description>基于相机画面中的双 ArUco 标记估计并发布夹爪归一化开合度。</description>
+  <description>基于双 ArUco 鱼眼三维位姿发布无量纲夹爪归一化距离。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 
@@ -15,6 +15,7 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
