@@ -107,6 +107,8 @@ class GripperOpennessEstimator:
         self.roi_ratios = tuple(float(value) for value in roi_ratios)
         # 上一帧有效的无量纲平滑结果。
         self._smoothed_openness: Optional[float] = None
+        # 最近一次估计中检测到的目标标签数量，供节点发布质量信息。
+        self._last_detected_marker_count = 0
         # 校正后的角点已处于针孔像素坐标，PnP 使用零畸变系数。
         self._zero_distortion = np.zeros((4, 1), dtype=np.float64)
 
@@ -240,6 +242,15 @@ class GripperOpennessEstimator:
         """清除平滑状态，使下一次有效估计直接采用当前帧结果。"""
         self._smoothed_openness = None
 
+    @property
+    def last_detected_marker_count(self) -> int:
+        """返回最近一次估计中检测到的目标标签数量。
+
+        Returns:
+            目标标签数量，范围为 0 到 2。
+        """
+        return self._last_detected_marker_count
+
     def estimate_marker_position(
         self, distorted_corners: np.ndarray
     ) -> Optional[np.ndarray]:
@@ -291,6 +302,7 @@ class GripperOpennessEstimator:
         Raises:
             ValueError: 输入图像为空或通道格式不受支持时抛出。
         """
+        self._last_detected_marker_count = 0
         if image is None or image.size == 0:
             raise ValueError("输入图像不能为空")
         gray_image = self._to_grayscale(image)
@@ -336,6 +348,7 @@ class GripperOpennessEstimator:
             )
             if int(marker_id) in (self.left_marker_id, self.right_marker_id)
         }
+        self._last_detected_marker_count = min(len(marker_corners), 2)
         if (
             self.left_marker_id not in marker_corners
             or self.right_marker_id not in marker_corners

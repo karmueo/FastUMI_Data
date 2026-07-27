@@ -9,6 +9,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(fastumi_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -58,6 +59,7 @@ target_compile_features(vive_tracker_node PRIVATE cxx_std_17)
 ament_target_dependencies(
   vive_tracker_node
   geometry_msgs
+  fastumi_interfaces
   nav_msgs
   rclcpp
   tf2_ros

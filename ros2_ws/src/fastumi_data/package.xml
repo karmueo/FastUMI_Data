@@ -1,25 +1,28 @@
 <?xml version="1.0"?>
-<!-- 该文件声明 FastUMI 夹爪开合度估计 ROS 2 包的依赖与元数据。 -->
+<!-- 该文件声明 FastUMI ROS 2 会话采集和离线数据转换包。 -->
 <package format="3">
-  <name>fastumi_gripper_estimator</name>
+  <name>fastumi_data</name>
   <version>0.1.0</version>
-  <description>基于双 ArUco 鱼眼三维位姿发布无量纲夹爪归一化距离。</description>
+  <description>FastUMI MCAP 会话管理、标定、同步和 HDF5 数据生成工具。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>fastumi_interfaces</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>python3-h5py</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
-  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
 
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

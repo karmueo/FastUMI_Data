@@ -4,6 +4,7 @@ gripper_openness_estimator:
     # 原始鱼眼 RGB 图像用于 equidistant 角点校正和三维 PnP。
     image_topic: /xv_sdk/SN250801DR48FB26001253/rgb/image
     openness_topic: /gripper/openness
+    state_topic: /gripper/state
     debug_image_topic: /gripper/openness/debug_image
     publish_debug_image: false
 

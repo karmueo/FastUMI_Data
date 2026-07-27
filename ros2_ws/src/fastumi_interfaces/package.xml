@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!-- 该文件声明 FastUMI 数据采集共享消息包的依赖和元数据。 -->
+<package format="3">
+  <name>fastumi_interfaces</name>
+  <version>0.1.0</version>
+  <description>FastUMI ROS 2 数据采集、质量状态和 episode 事件消息。</description>
+  <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>std_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

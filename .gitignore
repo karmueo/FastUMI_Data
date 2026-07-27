@@ -1,0 +1,24 @@
+__pycache__/
+.pytest_cache/
+.vscode/
+*.pyc
+
+# ROS 2 和 Python 构建产物。
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+build/
+dist/
+*.egg-info/
+
+# 原始采集与派生训练数据。
+dataset/
+*.mcap
+*.db3
+*.hdf5
+*.h5
+*.zarr/
+*.zarr.zip
+*.mp4
+*.avi
+log

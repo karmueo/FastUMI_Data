@@ -1,0 +1,14 @@
+# 该文件定义 MCAP 到 FastUMI HDF5 的默认同步与质量参数。
+sample_rate_hz: 20.0
+max_image_delta_s: 0.03
+max_pose_gap_s: 0.10
+max_gripper_gap_s: 0.20
+minimum_samples: 10
+require_tracker_status: true
+
+topics:
+  image: /xv_sdk/SN250801DR48FB26001253/rgb/image
+  tracker_pose: /vive_tracker/pose
+  tracker_status: /vive_tracker/status
+  gripper_state: /gripper/state
+  episode_event: /fastumi/episode/events

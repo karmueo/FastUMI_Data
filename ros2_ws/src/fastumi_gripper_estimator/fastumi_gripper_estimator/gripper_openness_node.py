@@ -1,10 +1,12 @@
 """订阅原始鱼眼 RGB 图像并发布无量纲夹爪归一化距离。"""
 
+import math
 from typing import List, Optional
 
 from ament_index_python.packages import get_package_share_directory
 import cv2
 from cv_bridge import CvBridge
+from fastumi_interfaces.msg import GripperState
 from fastumi_gripper_estimator.calibration import (
     load_camera_calibration,
     validate_gripper_distance_range,
@@ -45,6 +47,7 @@ class GripperOpennessNode(Node):
         # 输入、输出和调试话题名称。
         image_topic = str(self.get_parameter("image_topic").value)
         openness_topic = str(self.get_parameter("openness_topic").value)
+        state_topic = str(self.get_parameter("state_topic").value)
         debug_image_topic = str(self.get_parameter("debug_image_topic").value)
         # 空参数使用包共享目录中的默认标定，也允许 launch 传入外部标定。
         camera_calibration_path = str(
@@ -130,6 +133,10 @@ class GripperOpennessNode(Node):
         self._openness_publisher = self.create_publisher(
             Float32, openness_topic, 10
         )
+        # 带原图时间戳的状态用于 MCAP 录制、离线同步和质量检查。
+        self._state_publisher = self.create_publisher(
+            GripperState, state_topic, 10
+        )
         self._debug_publisher = None
         if self._publish_debug_image:
             self._debug_publisher = self.create_publisher(
@@ -139,7 +146,8 @@ class GripperOpennessNode(Node):
             Image, image_topic, self._image_callback, image_qos
         )
         self.get_logger().info(
-            f"订阅原始 RGB 话题 {image_topic}，发布 {openness_topic}；"
+            f"订阅原始 RGB 话题 {image_topic}，发布 {openness_topic} "
+            f"和 {state_topic}；"
             "输出为无量纲归一化距离，0 表示闭合，1 表示完全张开"
         )
         self.get_logger().info(
@@ -172,6 +180,7 @@ class GripperOpennessNode(Node):
         """声明节点支持的全部 ROS 参数及默认值。"""
         self.declare_parameter("image_topic", DEFAULT_IMAGE_TOPIC)
         self.declare_parameter("openness_topic", "/gripper/openness")
+        self.declare_parameter("state_topic", "/gripper/state")
         self.declare_parameter(
             "debug_image_topic", "/gripper/openness/debug_image"
         )
@@ -210,6 +219,14 @@ class GripperOpennessNode(Node):
         Side Effects:
             发布 `[0,1]` Float32；启用调试参数时还会发布标注图像。
         """
+        # 每帧都会发布状态；无效数值使用 NaN，避免下游误用历史值。
+        state_message = GripperState()
+        state_message.header = message.header
+        state_message.raw_openness = math.nan
+        state_message.filtered_openness = math.nan
+        state_message.marker_distance_mm = math.nan
+        state_message.detected_marker_count = 0
+        state_message.valid = False
         try:
             # BGR 图像同时供估计算法和调试绘图使用。
             image = self._bridge.imgmsg_to_cv2(
@@ -217,19 +234,31 @@ class GripperOpennessNode(Node):
             )
             estimate = self._estimator.estimate(image)
         except (ValueError, RuntimeError, cv2.error) as error:
+            self._state_publisher.publish(state_message)
             self.get_logger().error(
                 f"图像转换或三维估计失败: {error}",
                 throttle_duration_sec=2.0,
             )
             return
         if estimate is None:
+            state_message.detected_marker_count = (
+                self._estimator.last_detected_marker_count
+            )
+            self._state_publisher.publish(state_message)
             self.get_logger().warning(
-                "夹爪标记检测或三维 PnP 无效，本帧不发布归一化距离",
+                "夹爪标记检测或三维 PnP 无效，本帧状态标记为无效",
                 throttle_duration_sec=2.0,
             )
             return
 
-        # 对外消息只承载无量纲 [0,1] 归一化距离。
+        state_message.raw_openness = estimate.raw_openness
+        state_message.filtered_openness = estimate.openness
+        state_message.marker_distance_mm = estimate.distance_mm
+        state_message.detected_marker_count = 2
+        state_message.valid = True
+        self._state_publisher.publish(state_message)
+
+        # 兼容话题只承载无量纲 [0,1] 归一化距离。
         openness_message = Float32()
         openness_message.data = estimate.openness
         self._openness_publisher.publish(openness_message)

@@ -19,6 +19,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <fastumi_interfaces/msg/tracker_status.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -91,6 +92,32 @@ void FillRosPose(const Pose &source, geometry_msgs::msg::Pose *target) {
 }
 
 /**
+ * @brief 将内部 OpenVR 跟踪状态转换为公共 ROS 消息枚举。
+ * @param state 内部跟踪状态。
+ * @return fastumi_interfaces/TrackerStatus 对应的数值。
+ */
+std::uint8_t ToStatusMessageState(TrackingState state) noexcept {
+  using Status = fastumi_interfaces::msg::TrackerStatus;
+  switch (state) {
+  case TrackingState::kUninitialized:
+    return Status::TRACKING_UNINITIALIZED;
+  case TrackingState::kCalibratingInProgress:
+    return Status::TRACKING_CALIBRATING_IN_PROGRESS;
+  case TrackingState::kCalibratingOutOfRange:
+    return Status::TRACKING_CALIBRATING_OUT_OF_RANGE;
+  case TrackingState::kRunningOk:
+    return Status::TRACKING_RUNNING_OK;
+  case TrackingState::kRunningOutOfRange:
+    return Status::TRACKING_RUNNING_OUT_OF_RANGE;
+  case TrackingState::kFallbackRotationOnly:
+    return Status::TRACKING_FALLBACK_ROTATION_ONLY;
+  case TrackingState::kUnknown:
+  default:
+    return Status::TRACKING_UNKNOWN;
+  }
+}
+
+/**
  * @brief 发布指定 VIVE Tracker 的绝对位姿、首帧里程计、轨迹与多级 TF。
  */
 class ViveTrackerNode : public rclcpp::Node {
@@ -130,6 +157,9 @@ public:
 
     pose_publisher_ = create_publisher<geometry_msgs::msg::PoseStamped>(
         "pose", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+    status_publisher_ =
+        create_publisher<fastumi_interfaces::msg::TrackerStatus>(
+            "status", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
     odom_publisher_ = create_publisher<nav_msgs::msg::Odometry>(
         "odom", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
     /** 确保新启动的 RViz 能立即收到完整轨迹的发布策略。 */
@@ -253,11 +283,34 @@ private:
                      });
 
     if (target_sample == samples.cend()) {
+      /** 设备缺失状态使用当前系统时钟，确保录制端仍能观察到采样。 */
+      fastumi_interfaces::msg::TrackerStatus status_message{};
+      status_message.header.stamp = now();
+      status_message.header.frame_id = parent_frame_;
+      status_message.serial_number = serial_;
+      status_message.device_connected = false;
+      status_message.pose_valid = false;
+      status_message.tracking_state =
+          fastumi_interfaces::msg::TrackerStatus::TRACKING_UNKNOWN;
+      status_publisher_->publish(status_message);
       RCLCPP_WARN_THROTTLE(get_logger(), steady_clock_, kWarningThrottleMs,
                            "Tracker %s was not found; waiting for the device",
                            serial_.c_str());
       return;
     }
+    /** 位姿与状态消息共享一次 OpenVR 采样的 Unix 时间戳。 */
+    const rclcpp::Time sample_stamp(target_sample->sample_time_unix_ns,
+                                    RCL_SYSTEM_TIME);
+    fastumi_interfaces::msg::TrackerStatus status_message{};
+    status_message.header.stamp = sample_stamp;
+    status_message.header.frame_id = parent_frame_;
+    status_message.serial_number = serial_;
+    status_message.device_connected = target_sample->device_connected;
+    status_message.pose_valid = target_sample->pose_valid;
+    status_message.tracking_state =
+        ToStatusMessageState(target_sample->tracking_state);
+    status_publisher_->publish(status_message);
+
     if (!target_sample->pose_valid) {
       /** 用于日志输出的稳定跟踪状态文本。 */
       const std::string tracking_state(
@@ -272,8 +325,7 @@ private:
 
     /** 本次发布使用的当前位姿消息。 */
     geometry_msgs::msg::PoseStamped pose_message{};
-    pose_message.header.stamp =
-        rclcpp::Time(target_sample->sample_time_unix_ns, RCL_SYSTEM_TIME);
+    pose_message.header.stamp = sample_stamp;
     pose_message.header.frame_id = parent_frame_;
     /** 将位姿表达从原始 OpenVR 全局坐标系转换到新 ROS 跟踪坐标系。 */
     const Pose ros_pose = ConvertOpenVrPoseToRosPose(target_sample->pose);
@@ -334,6 +386,9 @@ private:
   /** 当前绝对位姿发布器。 */
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr
       pose_publisher_{};
+  /** 每次 OpenVR 采样的连接和跟踪质量发布器。 */
+  rclcpp::Publisher<fastumi_interfaces::msg::TrackerStatus>::SharedPtr
+      status_publisher_{};
   /** 首帧归零里程计发布器。 */
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_{};
   /** 历史轨迹发布器。 */

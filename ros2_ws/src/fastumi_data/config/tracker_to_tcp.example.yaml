@@ -1,0 +1,11 @@
+# 该文件展示 Tracker 到 UMI TCP 外参的版本化保存格式。
+schema_version: 1
+tracker_serial: LHR-XXXXXXXX
+fixture_version: fastumi-rm75-rigid-v1
+calibrated_at: "2026-01-01T00:00:00Z"
+sample_count: 0
+translation_rmse_mm: 0.0
+rotation_rmse_deg: 0.0
+tracker_to_tcp:
+  translation_m: [0.0, 0.0, 0.0]
+  quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]

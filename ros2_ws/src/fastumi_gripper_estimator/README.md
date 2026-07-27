@@ -19,10 +19,14 @@ ID 1，使用相机鱼眼标定和标记实际边长计算两个标签的三维�
 
 ```text
 /gripper/openness    std_msgs/msg/Float32
+/gripper/state       fastumi_interfaces/msg/GripperState
 ```
 
-`/gripper/openness` 的值没有量纲。节点不会发布毫米距离话题；毫米值仅用于
-内部 PnP、归一化和调试图像。任一标记检测或 PnP 失败时，当前帧不发布结果。
+`/gripper/openness` 的值没有量纲，继续作为历史兼容接口。
+`/gripper/state` 对每张输入图像发布一次并沿用原图 `header`，包含原始开度、
+滤波开度、毫米标签距离、检测数量和 `valid`。任一标记检测或 PnP 失败时，
+状态仍会发布且 `valid=false`，三个浮点结果为 NaN；兼容 Float32 接口当前帧
+不发布。离线数据处理只使用带时间戳的状态接口。
 
 ## 三维计算流程
 
@@ -107,6 +111,7 @@ ros2 bag play <bag_path> \
 ```bash
 source /opt/ros/jazzy/setup.bash
 ros2 topic echo /gripper/openness
+ros2 topic echo /gripper/state
 ```
 
 ## 调试图像

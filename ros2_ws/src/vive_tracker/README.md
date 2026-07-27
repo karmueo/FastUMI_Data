@@ -107,6 +107,7 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 | 类型 | 名称 | 消息或变换 |
 | --- | --- | --- |
 | Topic | `/vive_tracker/pose` | `geometry_msgs/msg/PoseStamped`，在 ROS 全局跟踪坐标系中的当前绝对位姿 |
+| Topic | `/vive_tracker/status` | `fastumi_interfaces/msg/TrackerStatus`，Tracker 序列号、连接状态、6DoF 位姿有效性和 OpenVR 跟踪状态 |
 | Topic | `/vive_tracker/odom` | `nav_msgs/msg/Odometry`，相对于启动后第一条有效位姿的 6DoF 里程计 |
 | Topic | `/vive_tracker/path` | `nav_msgs/msg/Path`，在 ROS 全局跟踪坐标系中的最近有效位姿轨迹 |
 | TF | `/tf_static` | `steamvr_tracking → steamvr_tracking_ros → vive_tracker_odom` 两级静态变换 |
@@ -131,7 +132,11 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 
 ### FastUMI 数采接口边界
 
-本包通过 `/vive_tracker/odom` 为 FastUMI 提供 `nav_msgs/Odometry` 位姿源，其中 `msg.pose.pose` 的字段结构与当前 `data_collection.py` 的读取方式一致。该脚本仍运行在 ROS 1，而本包运行在 ROS 2，因此接入时仍需将数采迁移到 ROS 2，或者配置 ROS1/ROS2 桥接；仅修改话题名称无法跨 ROS 版本直接订阅。
+ROS2 FastUMI 数据链路使用 `/vive_tracker/pose` 的绝对位姿，并通过
+Tracker 到公共 TCP 外参离线合成 TCP 轨迹。`/vive_tracker/status` 让同步器
+识别连接中断、无效 6DoF 和跟踪越界，防止 SLERP 掩盖真实跟踪丢失。
+`/vive_tracker/odom` 只用于首帧归零调试和 RViz 显示。仓库根目录的 ROS1
+脚本继续作为历史数据兼容入口。
 
 ## 使用 rosbag2 录制与回放
 
@@ -153,7 +158,7 @@ source install/setup.bash
 ros2 bag record \
   --storage mcap \
   --output vive_tracker_session \
-  --topics /vive_tracker/pose /vive_tracker/odom /vive_tracker/path /tf /tf_static
+  --topics /vive_tracker/pose /vive_tracker/status /vive_tracker/odom /vive_tracker/path /tf /tf_static
 ```
 
 按 `Ctrl+C` 结束录制。`vive_tracker_session` 是输出目录名，每次录制需要使用一个尚不存在的新目录名。录制完成后可以检查 bag 的时长、消息数量和话题信息：
@@ -247,6 +252,7 @@ ROS 2 节点在 `steamvr_tracking_ros` 中表达 Pose 和 Path，在 `vive_track
 
 ```bash
 ros2 topic echo /vive_tracker/pose
+ros2 topic echo /vive_tracker/status
 ros2 topic hz /vive_tracker/pose
 ros2 topic echo /vive_tracker/odom --once
 ros2 topic echo /vive_tracker/path --once

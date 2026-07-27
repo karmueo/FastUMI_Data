@@ -1,0 +1,12 @@
+# 该文件展示 RM75 TCP 与 Vive Tracker 配对姿态的标定输入格式。
+initial_tracker_to_tcp:
+  translation_m: [0.0, 0.0, 0.0]
+  quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+samples:
+  - base_tcp:
+      translation_m: [0.30, 0.00, 0.40]
+      quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+    vive_tracker:
+      translation_m: [0.00, 0.00, 0.00]
+      quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
