@@ -52,7 +52,7 @@ target_include_directories(
     "${OPENVR_INCLUDE_DIR}"
 )
 ament_target_dependencies(vive_tracker_core geometry_msgs nav_msgs)
-target_link_libraries(vive_tracker_core "${OPENVR_LIBRARY}")
+target_link_libraries(vive_tracker_core "${CMAKE_DL_LIBS}")
 
 add_executable(vive_tracker_node src/vive_tracker_node.cpp)
 target_compile_features(vive_tracker_node PRIVATE cxx_std_17)
@@ -135,6 +135,19 @@ if(BUILD_TESTING)
     vive_tracker_launch_test
     tests/test_vive_tracker_launch.py
   )
+
+  find_program(READELF_EXECUTABLE NAMES readelf)
+  if(READELF_EXECUTABLE)
+    add_test(
+      NAME vive_tracker_openvr_symbol_isolation
+      COMMAND
+        "${CMAKE_COMMAND}"
+        "-DEXECUTABLE_PATH=$<TARGET_FILE:vive_tracker_node>"
+        "-DREADELF_EXECUTABLE=${READELF_EXECUTABLE}"
+        -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_openvr_symbol_isolation.cmake"
+    )
+  endif()
 endif()
 
 ament_package()

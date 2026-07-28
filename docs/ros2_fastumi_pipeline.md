@@ -20,6 +20,8 @@ UMI 平行夹爪、VIVE Tracker 和 RM75。仓库根目录的 ROS1 脚本继续�
 
 ROS2 工作区新增以下包：
 
+- `xv_ros2_msgs`：XV SDK 驱动使用的自定义消息和服务接口。
+- `xv_sdk_ros2`：XV 相机、IMU、ToF、RGB 鱼眼校正和一次性截图节点。
 - `fastumi_interfaces`：`GripperState`、`TrackerStatus` 和
   `EpisodeEvent` 消息。
 - `fastumi_data`：episode 管理、MCAP 会话录制、外参标定、同步、
@@ -40,13 +42,41 @@ ROS2 工作区新增以下包：
 
 ## 2. 构建与环境
 
+### 2.1 安装 XV SDK
+
+XV 驱动构建前必须先安装 XV SDK。当前硬件与节点已在 Ubuntu 24.04、ROS 2
+Jazzy、SDK 3.2.0 的组合下验证；SDK 目录尚未提供 Noble 专用包，因此这里使用
+已验证的 Jammy 安装包：
+
+```bash
+XV_SDK_DEB=/home/scl/work/UMI/FastUMI_Hardware_SDK/xv/sdk/1217/XVSDK_jammy_amd64_1217.deb
+sudo apt install "$XV_SDK_DEB"
+```
+
+安装后确认版本、头文件和运行库。其他机器请将 `XV_SDK_DEB` 改为实际 SDK
+目录中的同一安装包。
+
+```bash
+dpkg-query -W -f='${Status} ${Version}\n' xvsdk
+test -f /usr/include/xvsdk/xv-sdk.h
+ldconfig -p | grep libxvsdk
+```
+
+预期 `dpkg-query` 输出包含 `install ok installed 3.2.0`，运行库解析到
+`/usr/lib/libxvsdk.so`。SDK 未安装或版本不匹配时，`xv_sdk_ros2` 的 CMake
+配置会终止并提示安装路径。
+
+### 2.2 构建 ROS 2 工作区
+
 ROS2 节点使用系统 Python 和 Jazzy 依赖：
 
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install \
+colcon build --symlink-install --cmake-clean-cache \
   --packages-select \
+  xv_ros2_msgs \
+  xv_sdk_ros2 \
   fastumi_interfaces \
   fastumi_gripper_estimator \
   fastumi_data \
@@ -60,13 +90,42 @@ VIVE 包首次构建时仍需按
 部署前，还需要把睿尔曼 Jazzy 驱动及 `rm_ros_interfaces` 放入同一工作区
 并构建。
 
-HDF5 到 Zarr 的离线导出可使用独立 Conda 环境。仓库提供受约束的 Zarr v2
-依赖：
+构建完成后运行导入包的功能测试和工作区回归测试：
 
 ```bash
-conda create -n fastumi-data python=3.8
-conda activate fastumi-data
-pip install -r requirements-data.txt
+colcon test --packages-select \
+  xv_ros2_msgs \
+  xv_sdk_ros2 \
+  fastumi_interfaces \
+  fastumi_gripper_estimator \
+  fastumi_data \
+  fastumi_rm75 \
+  vive_tracker
+colcon test-result --all --verbose
+if ldd install/xv_sdk_ros2/lib/xv_sdk_ros2/xv_cameras | grep -q 'not found'; then
+  exit 1
+fi
+```
+
+`colcon test-result` 应无失败用例，`ldd` 不应输出 `not found`。`xv_sdk_ros2`
+保留图像转换、鱼眼校正、时间戳、截图和 publisher 的 GTest；导入历史 C++ 代码的
+版权、cpplint 与 uncrustify 格式检查已排除，避免与功能无关的大规模重排。
+
+HDF5 到 Zarr 的离线导出可使用项目根目录下独立的 uv 虚拟环境。以下离线导出命令
+均在仓库根目录执行。该环境仅供离线导出使用，ROS2 MCAP 转换仍使用系统 Python 和
+Jazzy 依赖。仓库提供受约束的 Zarr v2 依赖：
+
+如已按旧步骤创建 `.venv`，请先执行以下命令重建环境，再继续执行后续激活和依赖
+安装命令。`--clear` 会清空 `.venv` 中已安装的包：
+
+```bash
+uv venv --clear --python 3.9 .venv
+```
+
+```bash
+uv venv --python 3.9 .venv
+source .venv/bin/activate
+uv pip install -r requirements-data.txt
 ```
 
 ROS2 MCAP 转换需要 `rclpy`、`rosbag2_py` 和消息类型支持，建议留在 ROS2
@@ -115,16 +174,106 @@ ros2 run fastumi_data calibrate_tracker_tcp pivot \
 
 ## 4. 连续 MCAP 会话采集
 
-先启动相机、夹爪估计和 VIVE 节点，并确认所有设备处于同一主机时钟域：
+开始录制前，需要分别启动 XV 相机驱动、夹爪开度估计节点和 VIVE Tracker
+节点。以下命令均从仓库根目录执行；每个节点使用独立终端，所有终端都需要先
+加载 ROS2 和 FastUMI 工作区环境：
 
 ```bash
-ros2 topic hz /xv_sdk/SN250801DR48FB26001253/rgb/image
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+```
+
+终端 1 启动已移植到本仓库工作区的 XV 相机驱动。SDK 已按第 2.1 节安装，所有
+终端都只需要加载本仓库的 `ros2_ws/install/setup.bash`：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py
+```
+
+驱动启动后通过以下命令确认设备序列号。本文以 `SN250801DR48FB26001253`
+为例；实际图像话题为 `/xv_sdk/<设备序列号>/rgb/image`。
+
+```bash
+ros2 topic list | grep '^/xv_sdk/'
+```
+
+默认只发布 IMU、普通 RGB 和对应的 `CameraInfo`，不会创建
+`rgb_fisheye_undistorted` 相关话题。将实际序列号写入当前终端变量后检查图像编码、
+内参和频率：
+
+```bash
+DEVICE_SERIAL=SN250801DR48FB26001253
+ros2 topic echo --once --qos-reliability best_effort \
+  /xv_sdk/${DEVICE_SERIAL}/rgb/image --field encoding
+ros2 topic echo --once --qos-reliability best_effort \
+  /xv_sdk/${DEVICE_SERIAL}/rgb/camera_info --field width
+ros2 topic hz /xv_sdk/${DEVICE_SERIAL}/imu
+ros2 topic hz /xv_sdk/${DEVICE_SERIAL}/rgb/image
+```
+
+每条 `hz` 命令观察数秒后按 `Ctrl+C` 再执行下一条。RGB 话题编码应为 `rgb8`，
+`camera_info` 应返回有效的宽高和内参。可以再保存首帧，验证订阅链路与文件写入：
+
+```bash
+ros2 run xv_sdk_ros2 image_snapshot --ros-args \
+  -p image_topic:=/xv_sdk/${DEVICE_SERIAL}/rgb/image \
+  -p output_dir:=/tmp/xv_sdk_snapshots \
+  -p filename:=rgb.png
+test -s /tmp/xv_sdk_snapshots/rgb.png
+```
+
+需要鱼眼校正图像时显式启用对应参数：
+
+```bash
+ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py \
+  rgb_fisheye_undistort_enable:=true
+```
+
+终端 2 启动 VIVE Tracker。启动命令执行前，应先打开 SteamVR，并确认基站和
+目标 Tracker 已连接。采集时关闭 RViz2 可以减少资源占用：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+ros2 launch vive_tracker vive_tracker.launch.py use_rviz:=false
+```
+
+默认 Tracker 序列号读取自
+`ros2_ws/src/vive_tracker/config/vive_tracker.yaml`。如需临时指定其他设备：
+
+```bash
+ros2 launch vive_tracker vive_tracker.launch.py \
+  use_rviz:=false \
+  serial:=LHR-XXXXXXXX
+```
+
+终端 3 启动夹爪开度估计节点。其输入图像话题必须与相机实际发布的话题一致：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+DEVICE_SERIAL=SN250801DR48FB26001253
+ros2 launch fastumi_gripper_estimator gripper_openness.launch.py \
+  image_topic:=/xv_sdk/${DEVICE_SERIAL}/rgb/image
+```
+
+终端 4 在录制前检查数据。相机、夹爪估计和 Tracker 必须位于同一主机时钟域：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+DEVICE_SERIAL=SN250801DR48FB26001253
+ros2 topic hz /xv_sdk/${DEVICE_SERIAL}/rgb/image
 ros2 topic hz /gripper/state
 ros2 topic hz /vive_tracker/pose
 ros2 topic echo /vive_tracker/status --once
 ```
 
-启动一个连续会话：
+确认三个流式数据话题持续发布，并且 Tracker 状态为
+`device_connected=true`、`pose_valid=true`、`tracking_state=3`
+（`TRACKING_RUNNING_OK`）后，再在终端 4 启动一个连续会话：
 
 ```bash
 ros2 run fastumi_data record_session \
@@ -216,7 +365,7 @@ HDF5 主结构：
 导出一个任务下的全部 session：
 
 ```bash
-conda activate fastumi-data
+source .venv/bin/activate
 python data_processing_tcp_to_dp.py \
   --input dataset/pick_place \
   --output dataset/pick_place/pick_place_dp.zarr \

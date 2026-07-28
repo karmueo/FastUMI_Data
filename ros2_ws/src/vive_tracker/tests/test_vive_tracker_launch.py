@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 from launch import LaunchContext
 
@@ -56,3 +57,55 @@ def test_explicit_serial_overrides_config_file():
 
     assert len(tracker_parameters) == 2
     assert tracker_parameters[1] == {'serial': 'LHR-CUSTOM'}
+
+
+def test_terminal_interrupt_is_forwarded_to_isolated_tracker():
+    """终端 Ctrl+C 应生成一个发往独立 Tracker 会话的信号事件."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟由终端 SIGINT 触发的 launch 关闭事件。
+    shutdown_event = SimpleNamespace(due_to_sigint=True)
+    # 交互模式下 launch 假定子进程已从终端接收 SIGINT。
+    launch_context = SimpleNamespace(noninteractive=False)
+    # 匹配信号目标时使用的占位节点动作。
+    tracker_node = object()
+
+    # 关闭处理器返回的 launch 动作。
+    shutdown_actions = launch_module._forward_terminal_interrupt(
+        shutdown_event, launch_context, tracker_node
+    )
+
+    assert len(shutdown_actions) == 1
+
+
+def test_nonterminal_shutdown_does_not_duplicate_tracker_signal():
+    """程序化关闭应沿用 launch 默认信号，避免向节点重复发送."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟由程序逻辑触发的 launch 关闭事件。
+    shutdown_event = SimpleNamespace(due_to_sigint=False)
+    # 交互状态不影响程序化关闭的默认信号路径。
+    launch_context = SimpleNamespace(noninteractive=False)
+
+    # 程序化关闭不需要附加信号动作。
+    shutdown_actions = launch_module._forward_terminal_interrupt(
+        shutdown_event, launch_context, object()
+    )
+
+    assert shutdown_actions == []
+
+
+def test_noninteractive_interrupt_uses_launch_default_signal():
+    """非交互启动应沿用 launch 已有的 SIGINT 转发，避免重复发送."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟非交互模式收到 SIGINT 的关闭事件和上下文。
+    shutdown_event = SimpleNamespace(due_to_sigint=True)
+    launch_context = SimpleNamespace(noninteractive=True)
+
+    # launch 默认处理器会在非交互模式发送 SIGINT。
+    shutdown_actions = launch_module._forward_terminal_interrupt(
+        shutdown_event, launch_context, object()
+    )
+
+    assert shutdown_actions == []

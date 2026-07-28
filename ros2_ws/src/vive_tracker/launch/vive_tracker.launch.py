@@ -1,8 +1,19 @@
 """同时启动 VIVE Tracker 位姿发布节点与 RViz2."""
 
+import functools
+import signal
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnShutdown
+from launch.events import matches_action
+from launch.events.process import SignalProcess
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -22,6 +33,18 @@ def _build_tracker_parameters(context):
     return tracker_parameters
 
 
+def _forward_terminal_interrupt(event, context, tracker_node):
+    """向独立会话中的 Tracker 节点转发一次终端中断信号."""
+    if not event.due_to_sigint or context.noninteractive:
+        return []
+    # 只匹配当前 Tracker 节点的中断事件。
+    tracker_interrupt = SignalProcess(
+        signal_number=signal.SIGINT,
+        process_matcher=matches_action(tracker_node),
+    )
+    return [EmitEvent(event=tracker_interrupt)]
+
+
 def _create_tracker_node(context):
     """按需应用序列号覆盖并创建 Tracker 节点."""
     # 根据调用者是否显式传入序列号构造节点参数。
@@ -34,9 +57,19 @@ def _create_tracker_node(context):
         namespace='vive_tracker',
         name='pose_publisher',
         output='screen',
+        prefix='setsid',
         parameters=tracker_parameters,
     )
-    return [tracker_node]
+    # 终端中断时主动通知已脱离原终端进程组的 Tracker 节点。
+    terminal_interrupt_handler = RegisterEventHandler(
+        OnShutdown(
+            on_shutdown=functools.partial(
+                _forward_terminal_interrupt,
+                tracker_node=tracker_node,
+            )
+        )
+    )
+    return [tracker_node, terminal_interrupt_handler]
 
 
 def generate_launch_description():

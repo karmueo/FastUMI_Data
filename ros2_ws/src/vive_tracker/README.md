@@ -69,6 +69,8 @@ colcon test-result --verbose
 
 构建过程会将 `libopenvr_api.so` 复制到节点的构建目录和安装目录。仓库不会提交 OpenVR 第三方二进制。
 
+节点在初始化 Tracker 时以局部深度绑定方式加载 `libopenvr_api.so`。该隔离方式用于阻止 SDK 动态库导出的私有 C++ 异常处理符号影响 ROS 2 和 Fast DDS。最终 `vive_tracker_node` 的 ELF 动态依赖表中不应出现 `libopenvr_api.so`，包内测试会检查这一约束。
+
 ## 启动
 
 先启动 SteamVR、基站和 Tracker，再执行：
@@ -91,6 +93,8 @@ ros2 launch vive_tracker vive_tracker.launch.py serial:=LHR-XXXXXXXX
 ```bash
 ros2 launch vive_tracker vive_tracker.launch.py use_rviz:=false
 ```
+
+launch 会将 Tracker 节点放入独立进程会话，并在终端按 `Ctrl+C` 时只转发一次中断信号，确保 OpenVR 会话完成正常关闭。正常停止时应看到 `process has finished cleanly`。
 
 也可以替换完整的节点参数或 RViz2 配置：
 

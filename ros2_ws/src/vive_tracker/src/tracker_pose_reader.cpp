@@ -5,6 +5,8 @@
 
 #include "vive_tracker/tracker_pose_reader.hpp"
 
+#include <dlfcn.h>
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -18,6 +20,202 @@
 
 namespace vive_tracker {
 namespace {
+
+/** 随节点安装、在运行时隔离加载的 OpenVR 客户端库名称。 */
+constexpr char kOpenVrLibraryName[] = "libopenvr_api.so";
+
+/** OpenVR 初始化入口的函数指针类型。 */
+using OpenVrInitFunction = std::uint32_t (*)(vr::EVRInitError *,
+                                             vr::EVRApplicationType,
+                                             const char *);
+/** OpenVR 关闭入口的函数指针类型。 */
+using OpenVrShutdownFunction = void (*)();
+/** OpenVR 通用接口查询入口的函数指针类型。 */
+using OpenVrGetInterfaceFunction = void *(*)(const char *, vr::EVRInitError *);
+/** OpenVR 接口版本检查入口的函数指针类型。 */
+using OpenVrIsInterfaceValidFunction = bool (*)(const char *);
+/** OpenVR 初始化错误说明入口的函数指针类型。 */
+using OpenVrErrorDescriptionFunction = const char *(*)(vr::EVRInitError);
+
+/**
+ * @brief 从动态库解析一个函数入口。
+ * @tparam FunctionType 函数指针类型。
+ * @param library_handle 已打开的动态库句柄。
+ * @param symbol_name 待解析的导出符号名称。
+ * @param function 接收函数地址的指针，不能为空。
+ * @param error_message 解析失败时接收错误信息；允许传入 nullptr。
+ * @return 解析成功返回 true。
+ */
+template <typename FunctionType>
+bool ResolveOpenVrFunction(void *library_handle, const char *symbol_name,
+                           FunctionType *function,
+                           std::string *error_message) {
+  dlerror();
+  /** dlsym 返回的未类型化函数地址。 */
+  void *symbol_address = dlsym(library_handle, symbol_name);
+  /** dlsym 线程局部错误说明。 */
+  const char *dynamic_loader_error = dlerror();
+  if (dynamic_loader_error != nullptr || symbol_address == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "failed to resolve " + std::string(symbol_name) +
+                       " from " + kOpenVrLibraryName + ": " +
+                       (dynamic_loader_error != nullptr ? dynamic_loader_error
+                                                        : "symbol not found");
+    }
+    return false;
+  }
+  *function = reinterpret_cast<FunctionType>(symbol_address);
+  return true;
+}
+
+/**
+ * @brief 局部加载 OpenVR API，避免其私有 C++ 异常符号污染 ROS 进程。
+ */
+class OpenVrApi {
+public:
+  /**
+   * @brief 创建尚未加载动态库的 API 包装器。
+   */
+  OpenVrApi() = default;
+
+  /**
+   * @brief 关闭尚未结束的 OpenVR 会话并卸载动态库。
+   */
+  ~OpenVrApi() { Unload(); }
+
+  OpenVrApi(const OpenVrApi &) = delete;
+  OpenVrApi &operator=(const OpenVrApi &) = delete;
+
+  /**
+   * @brief 以局部深度绑定方式加载 OpenVR 及所需入口。
+   * @param error_message 加载失败时接收错误信息；允许传入 nullptr。
+   * @return 全部入口加载成功返回 true。
+   */
+  bool Load(std::string *error_message) {
+    if (library_handle_ != nullptr) {
+      return true;
+    }
+
+    /** 限制 OpenVR 符号可见性并优先使用其内部依赖的加载标志。 */
+    int dynamic_loader_flags = RTLD_NOW | RTLD_LOCAL;
+#ifdef RTLD_DEEPBIND
+    dynamic_loader_flags |= RTLD_DEEPBIND;
+#endif
+    library_handle_ = dlopen(kOpenVrLibraryName, dynamic_loader_flags);
+    if (library_handle_ == nullptr) {
+      if (error_message != nullptr) {
+        /** dlopen 线程局部错误说明。 */
+        const char *dynamic_loader_error = dlerror();
+        *error_message =
+            "failed to load " + std::string(kOpenVrLibraryName) + ": " +
+            (dynamic_loader_error != nullptr ? dynamic_loader_error
+                                             : "unknown dynamic loader error");
+      }
+      return false;
+    }
+
+    if (!ResolveOpenVrFunction(library_handle_, "VR_InitInternal2",
+                               &init_function_, error_message) ||
+        !ResolveOpenVrFunction(library_handle_, "VR_ShutdownInternal",
+                               &shutdown_function_, error_message) ||
+        !ResolveOpenVrFunction(library_handle_, "VR_GetGenericInterface",
+                               &get_interface_function_, error_message) ||
+        !ResolveOpenVrFunction(library_handle_, "VR_IsInterfaceVersionValid",
+                               &is_interface_valid_function_, error_message) ||
+        !ResolveOpenVrFunction(
+            library_handle_, "VR_GetVRInitErrorAsEnglishDescription",
+            &error_description_function_, error_message)) {
+      Unload();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * @brief 初始化后台 OpenVR 会话并取得系统接口。
+   * @param init_error 接收 OpenVR 初始化错误码，不能为空。
+   * @return 初始化成功时返回系统接口，否则返回 nullptr。
+   */
+  vr::IVRSystem *Initialize(vr::EVRInitError *init_error) {
+    /** OpenVR 内部会话令牌，仅用于确认初始化入口已经执行。 */
+    const std::uint32_t session_token =
+        init_function_(init_error, vr::VRApplication_Background, nullptr);
+    (void)session_token;
+    if (*init_error == vr::VRInitError_None &&
+        !is_interface_valid_function_(vr::IVRSystem_Version)) {
+      *init_error = vr::VRInitError_Init_InterfaceNotFound;
+    }
+
+    /** 通过版本化接口名称取得的 OpenVR 系统对象。 */
+    vr::IVRSystem *vr_system = nullptr;
+    if (*init_error == vr::VRInitError_None) {
+      vr_system = static_cast<vr::IVRSystem *>(
+          get_interface_function_(vr::IVRSystem_Version, init_error));
+    }
+    if (*init_error == vr::VRInitError_None && vr_system != nullptr) {
+      *init_error = vr_system->SetSDKVersion(
+          vr::k_nSteamVRVersionMajor, vr::k_nSteamVRVersionMinor,
+          vr::k_nSteamVRVersionBuild);
+    }
+    if (*init_error != vr::VRInitError_None || vr_system == nullptr) {
+      shutdown_function_();
+      return nullptr;
+    }
+    session_active_ = true;
+    return vr_system;
+  }
+
+  /**
+   * @brief 返回 OpenVR 初始化错误的英文说明。
+   * @param init_error OpenVR 初始化错误码。
+   * @return OpenVR 管理的只读说明字符串。
+   */
+  const char *GetErrorDescription(vr::EVRInitError init_error) const {
+    return error_description_function_(init_error);
+  }
+
+  /**
+   * @brief 正常关闭当前 OpenVR 会话。
+   */
+  void Shutdown() {
+    if (session_active_ && shutdown_function_ != nullptr) {
+      shutdown_function_();
+      session_active_ = false;
+    }
+  }
+
+private:
+  /**
+   * @brief 卸载 OpenVR 动态库并清空全部函数入口。
+   */
+  void Unload() {
+    Shutdown();
+    if (library_handle_ != nullptr) {
+      dlclose(library_handle_);
+      library_handle_ = nullptr;
+    }
+    init_function_ = nullptr;
+    shutdown_function_ = nullptr;
+    get_interface_function_ = nullptr;
+    is_interface_valid_function_ = nullptr;
+    error_description_function_ = nullptr;
+  }
+
+  /** OpenVR 动态库句柄。 */
+  void *library_handle_{nullptr};
+  /** OpenVR 初始化入口。 */
+  OpenVrInitFunction init_function_{nullptr};
+  /** OpenVR 关闭入口。 */
+  OpenVrShutdownFunction shutdown_function_{nullptr};
+  /** OpenVR 通用接口查询入口。 */
+  OpenVrGetInterfaceFunction get_interface_function_{nullptr};
+  /** OpenVR 接口版本检查入口。 */
+  OpenVrIsInterfaceValidFunction is_interface_valid_function_{nullptr};
+  /** OpenVR 初始化错误说明入口。 */
+  OpenVrErrorDescriptionFunction error_description_function_{nullptr};
+  /** 当前是否存在需要正常关闭的 OpenVR 会话。 */
+  bool session_active_{false};
+};
 
 /**
  * @brief 将公共跟踪原点转换为 OpenVR 枚举。
@@ -96,6 +294,8 @@ std::string ReadSerialNumber(vr::IVRSystem *vr_system,
  */
 class TrackerPoseReader::Impl {
 public:
+  /** 隔离加载并调用 OpenVR API 的包装器。 */
+  OpenVrApi openvr_api{};
   /** 已初始化的 OpenVR 系统接口。 */
   vr::IVRSystem *vr_system{nullptr};
 };
@@ -110,7 +310,7 @@ TrackerPoseReader::TrackerPoseReader() : impl_(std::make_unique<Impl>()) {}
  */
 TrackerPoseReader::~TrackerPoseReader() {
   if (impl_->vr_system != nullptr) {
-    vr::VR_Shutdown();
+    impl_->openvr_api.Shutdown();
     impl_->vr_system = nullptr;
   }
 }
@@ -125,15 +325,19 @@ bool TrackerPoseReader::Initialize(std::string *error_message) {
     return true;
   }
 
+  if (!impl_->openvr_api.Load(error_message)) {
+    return false;
+  }
+
   /** OpenVR 初始化错误码。 */
   vr::EVRInitError init_error = vr::VRInitError_None;
-  impl_->vr_system = vr::VR_Init(&init_error, vr::VRApplication_Background);
+  impl_->vr_system = impl_->openvr_api.Initialize(&init_error);
   if (init_error != vr::VRInitError_None || impl_->vr_system == nullptr) {
     impl_->vr_system = nullptr;
     if (error_message != nullptr) {
       /** OpenVR 对初始化错误的英文说明。 */
       const char *error_description =
-          vr::VR_GetVRInitErrorAsEnglishDescription(init_error);
+          impl_->openvr_api.GetErrorDescription(init_error);
       *error_message = error_description != nullptr ? error_description
                                                     : "Unknown OpenVR error";
     }
