@@ -4,8 +4,6 @@
  */
 
 #include "rgbd_image_utils.h"
-#include "timestamp_utils.h"
-
 #include <sensor_msgs/image_encodings.hpp>
 
 #include <cstdint>
@@ -30,14 +28,16 @@ namespace rgbd
  * @brief 将 SDK RGBD 帧中的 RGB 字节拆分为 ROS RGB8 图像。
  * @param xvDepthColorImage SDK RGBD 图像。
  * @param frame_id ROS 图像坐标系。
+ * @param stamp 已转换到 Unix 时间域的 ROS 时间戳。
  * @return RGB8 编码的 ROS 图像。
  */
 sensor_msgs::msg::Image toRosRGBDColorImage(const xv::DepthColorImage &xvDepthColorImage,
-                                            const std::string &frame_id)
+                                            const std::string &frame_id,
+                                            const builtin_interfaces::msg::Time &stamp)
 {
     /** 转换后的 ROS RGB 图像。 */
     sensor_msgs::msg::Image rosImage;
-    rosImage.header.stamp = timestamp::hostTimestampToRosTime(xvDepthColorImage.hostTimestamp);
+    rosImage.header.stamp = stamp;
     rosImage.header.frame_id = frame_id;
     rosImage.height = static_cast<std::uint32_t>(xvDepthColorImage.height);
     rosImage.width = static_cast<std::uint32_t>(xvDepthColorImage.width);
@@ -74,14 +74,16 @@ sensor_msgs::msg::Image toRosRGBDColorImage(const xv::DepthColorImage &xvDepthCo
  * @brief 将 SDK RGBD 帧中的 float 深度拆分为 ROS 32FC1 图像。
  * @param xvDepthColorImage SDK RGBD 图像。
  * @param frame_id ROS 图像坐标系。
+ * @param stamp 已转换到 Unix 时间域的 ROS 时间戳。
  * @return 32FC1 编码的 ROS 深度图，单位为米。
  */
 sensor_msgs::msg::Image toRosRGBDDepthImage(const xv::DepthColorImage &xvDepthColorImage,
-                                            const std::string &frame_id)
+                                            const std::string &frame_id,
+                                            const builtin_interfaces::msg::Time &stamp)
 {
     /** 转换后的 ROS 深度图像。 */
     sensor_msgs::msg::Image rosImage;
-    rosImage.header.stamp = timestamp::hostTimestampToRosTime(xvDepthColorImage.hostTimestamp);
+    rosImage.header.stamp = stamp;
     rosImage.header.frame_id = frame_id;
     rosImage.height = static_cast<std::uint32_t>(xvDepthColorImage.height);
     rosImage.width = static_cast<std::uint32_t>(xvDepthColorImage.width);

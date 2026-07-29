@@ -4,6 +4,7 @@
  */
 
 #include "rgbd_image_utils.h"
+#include "timestamp_utils.h"
 
 #include <gtest/gtest.h>
 #include <sensor_msgs/image_encodings.hpp>
@@ -74,8 +75,12 @@ TEST(RgbdImageUtilsTest, ConvertsDepthColorImageToRgb8Image)
     image.hostTimestamp = 42.25;
     image.data = std::shared_ptr<const std::uint8_t>(data, data->data());
 
+    /** 测试帧使用的 ROS 时间戳。 */
+    const builtin_interfaces::msg::Time stamp =
+        xv_ros2::timestamp::hostTimestampToRosTime(image.hostTimestamp);
     /** 转换后的 ROS RGB 图像。 */
-    const sensor_msgs::msg::Image ros_image = xv_ros2::rgbd::toRosRGBDColorImage(image, "rgbd_frame");
+    const sensor_msgs::msg::Image ros_image =
+        xv_ros2::rgbd::toRosRGBDColorImage(image, "rgbd_frame", stamp);
 
     EXPECT_EQ("rgbd_frame", ros_image.header.frame_id);
     EXPECT_EQ(42, ros_image.header.stamp.sec);
@@ -105,8 +110,12 @@ TEST(RgbdImageUtilsTest, ConvertsDepthColorImageTo32FloatDepthImage)
     image.hostTimestamp = 42.25;
     image.data = std::shared_ptr<const std::uint8_t>(data, data->data());
 
+    /** 测试帧使用的 ROS 时间戳。 */
+    const builtin_interfaces::msg::Time stamp =
+        xv_ros2::timestamp::hostTimestampToRosTime(image.hostTimestamp);
     /** 转换后的 ROS 深度图像。 */
-    const sensor_msgs::msg::Image ros_image = xv_ros2::rgbd::toRosRGBDDepthImage(image, "rgbd_frame");
+    const sensor_msgs::msg::Image ros_image =
+        xv_ros2::rgbd::toRosRGBDDepthImage(image, "rgbd_frame", stamp);
 
     EXPECT_EQ("rgbd_frame", ros_image.header.frame_id);
     EXPECT_EQ(42, ros_image.header.stamp.sec);

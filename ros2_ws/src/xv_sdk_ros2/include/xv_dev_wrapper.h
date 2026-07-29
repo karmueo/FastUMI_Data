@@ -176,13 +176,15 @@ private:
 
   rosImage changeFEGrayScaleImage2RosImage(
     const GrayScaleImage & xvGrayImage,
-    double timestamp,
+    const builtin_interfaces::msg::Time & stamp,
     const std::string & frame_id);
   void getFECalibration();
   double get_sec(const builtin_interfaces::msg::Duration & prediction) const;
   double get_sec(const builtin_interfaces::msg::Time & timestamp) const;
   geometry_msgs::msg::PoseStamped
-  to_ros_poseStamped(const Pose & xvPose, const std::string & frame_id);
+  to_ros_poseStamped(
+    const Pose & xvPose, const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp);
   geometry_msgs::msg::PoseStamped
   to_ros_poseEdgeStamped(const Pose & xvPose, const std::string & frame_id);
   builtin_interfaces::msg::Time get_stamp_from_sec(double sec) const;
@@ -191,11 +193,13 @@ private:
   nav_msgs::msg::Path toRosPoseStampedRetNavmsgs(
     const Pose & xvPose,
     const std::string & frame_id,
-    nav_msgs::msg::Path & path);
+    nav_msgs::msg::Path & path,
+    const builtin_interfaces::msg::Time & stamp);
   geometry_msgs::msg::TransformStamped
   toRosTransformStamped(
     const Pose & pose, const std::string & parent_frame_id,
-    const std::string & frame_id);
+    const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp);
   rosImage toRosImage(
     const DepthImage & xvDepthImage,
     const std::string & frame_id);
@@ -204,7 +208,8 @@ private:
     const std::string & frame_id);
   rosImage toRosImage(
     const SgbmImage & xvSgbmDepthImage,
-    const std::string & frame_id);
+    const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp);
   rosImage toRosImage(
     const DepthColorImage & xvDepthColorImage,
     const std::string & frame_id);
@@ -244,6 +249,7 @@ private:
    * @param xvDepthImage ToF 深度图。
    * @param xvColorImage RGB 图像，用于确定输出尺寸和时间戳。
    * @param frame_id ROS 图像坐标系。
+   * @param stamp 已转换到 Unix 时间域的关联帧时间戳。
    * @param rosImage 输出的 32FC1 深度图，单位为米。
    * @return 投影成功返回 true；标定不可用时返回 false。
    */
@@ -251,14 +257,15 @@ private:
     const DepthImage & xvDepthImage,
     const ColorImage & xvColorImage,
     const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp,
     rosImage & rosImage);
   /**
    * @brief 将 RGB、深度和 IR 采样到 ToF 坐标系公共虚拟网格。
    * @param xvDepthImage ToF 深度图。
    * @param xvIrImage 同分辨率 ToF IR 图。
-   * @param xvColorImage RGB 图像，用于统一输出时间戳。
    * @param undistortedRgb Kalibr 校正 RGB 图。
    * @param frame_id 输出 ToF 光学坐标系。
+   * @param stamp 已转换到 Unix 时间域的三路公共时间戳。
    * @param rgbImage 输出虚拟网格 RGB8 图。
    * @param depthImage 输出 32FC1 米制深度图。
    * @param irImage 输出 mono16 IR 强度图。
@@ -267,9 +274,9 @@ private:
   bool toRosRgbdOnVirtualGrid(
     const DepthImage & xvDepthImage,
     const DepthImage & xvIrImage,
-    const ColorImage & xvColorImage,
     const cv::Mat & undistortedRgb,
     const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp,
     rosImage & rgbImage,
     rosImage & depthImage,
     rosImage & irImage);
@@ -343,7 +350,8 @@ private:
 
   rosImage sgbmRawDepthtoRosImage(
     const SgbmImage & xvSgbmDepthImage,
-    const std::string & frame_id);
+    const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp);
   cv::Mat toCvMatRGB(const ColorImage & xvColorImage);
   cv::Mat toCvMatRGBD(const DepthColorImage & rgbd);
   void toRosOrientationStamped(
@@ -357,10 +365,12 @@ private:
   // std::string& frame_id);
   void toRosEventStamped(
     rosEventData & event, Event const & xvEvent,
-    const std::string & frame_id);
+    const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp);
   void toRosButtonStamped(
     rosButtonMsg & button, xv::Event const & xvEvent,
-    const std::string & frame_id);
+    const std::string & frame_id,
+    const builtin_interfaces::msg::Time & stamp);
 
   rosPointCloud2 toRosPointCloud(
     const DepthImage & xvDepthImage,

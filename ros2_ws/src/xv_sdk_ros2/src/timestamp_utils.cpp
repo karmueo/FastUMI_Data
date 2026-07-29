@@ -6,6 +6,7 @@
 #include "timestamp_utils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -43,6 +44,97 @@ hostTimestampToRosTime(double host_timestamp_seconds) {
       (safe_seconds - static_cast<double>(stamp.sec)) * kNanosecondsPerSecond);
 
   return stamp;
+}
+
+double steadyTimestampToSystemSeconds(double steady_timestamp_seconds,
+                                      double steady_now_seconds,
+                                      double system_now_seconds) {
+  if (!std::isfinite(system_now_seconds)) {
+    return steady_timestamp_seconds;
+  }
+  if (!std::isfinite(steady_timestamp_seconds) ||
+      steady_timestamp_seconds <= kMinimumSafeHostTimestampSeconds ||
+      !std::isfinite(steady_now_seconds)) {
+    return system_now_seconds;
+  }
+
+  /** 当前主机 system_clock 与 steady_clock 的时间原点偏移。 */
+  const double clock_epoch_offset_seconds =
+      system_now_seconds - steady_now_seconds;
+  /** 映射到 Unix system_clock 时间域的事件时间戳。 */
+  const double system_timestamp_seconds =
+      steady_timestamp_seconds + clock_epoch_offset_seconds;
+  return std::isfinite(system_timestamp_seconds) &&
+                 system_timestamp_seconds > 0.0
+             ? system_timestamp_seconds
+             : system_now_seconds;
+}
+
+builtin_interfaces::msg::Time
+steadyTimestampToRosTime(double steady_timestamp_seconds) {
+  /** system_clock 采样前的 steady_clock 时刻。 */
+  const auto steady_before = std::chrono::steady_clock::now();
+  /** 与当前 steady_clock 采样相邻的 Unix system_clock 时刻。 */
+  const auto system_now = std::chrono::system_clock::now();
+  /** system_clock 采样后的 steady_clock 时刻。 */
+  const auto steady_after = std::chrono::steady_clock::now();
+  /** 两次 steady_clock 采样的中点秒数。 */
+  const double steady_now_seconds =
+      std::chrono::duration<double>(
+          steady_before.time_since_epoch() +
+          (steady_after - steady_before) / 2)
+          .count();
+  /** 当前 Unix system_clock 秒数。 */
+  const double system_now_seconds =
+      std::chrono::duration<double>(system_now.time_since_epoch()).count();
+  /** 映射后的 Unix 秒级时间戳。 */
+  const double system_timestamp_seconds = steadyTimestampToSystemSeconds(
+      steady_timestamp_seconds, steady_now_seconds, system_now_seconds);
+  return hostTimestampToRosTime(system_timestamp_seconds);
+}
+
+double systemTimestampToSteadySeconds(double system_timestamp_seconds,
+                                      double steady_now_seconds,
+                                      double system_now_seconds) {
+  if (!std::isfinite(steady_now_seconds)) {
+    return system_timestamp_seconds;
+  }
+  if (!std::isfinite(system_timestamp_seconds) ||
+      system_timestamp_seconds <= kMinimumSafeHostTimestampSeconds ||
+      !std::isfinite(system_now_seconds)) {
+    return steady_now_seconds;
+  }
+
+  /** 当前主机 steady_clock 与 system_clock 的时间原点偏移。 */
+  const double clock_epoch_offset_seconds =
+      steady_now_seconds - system_now_seconds;
+  /** 映射到 steady_clock 时间域的事件时间戳。 */
+  const double steady_timestamp_seconds =
+      system_timestamp_seconds + clock_epoch_offset_seconds;
+  return std::isfinite(steady_timestamp_seconds) &&
+                 steady_timestamp_seconds > 0.0
+             ? steady_timestamp_seconds
+             : steady_now_seconds;
+}
+
+double systemTimestampToSteadySeconds(double system_timestamp_seconds) {
+  /** system_clock 采样前的 steady_clock 时刻。 */
+  const auto steady_before = std::chrono::steady_clock::now();
+  /** 与当前 steady_clock 采样相邻的 Unix system_clock 时刻。 */
+  const auto system_now = std::chrono::system_clock::now();
+  /** system_clock 采样后的 steady_clock 时刻。 */
+  const auto steady_after = std::chrono::steady_clock::now();
+  /** 两次 steady_clock 采样的中点秒数。 */
+  const double steady_now_seconds =
+      std::chrono::duration<double>(
+          steady_before.time_since_epoch() +
+          (steady_after - steady_before) / 2)
+          .count();
+  /** 当前 Unix system_clock 秒数。 */
+  const double system_now_seconds =
+      std::chrono::duration<double>(system_now.time_since_epoch()).count();
+  return systemTimestampToSteadySeconds(
+      system_timestamp_seconds, steady_now_seconds, system_now_seconds);
 }
 
 StreamTimestampAligner::StreamTimestampAligner(

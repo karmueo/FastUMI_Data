@@ -19,6 +19,9 @@
 namespace
 {
 
+/** 高带宽图像发布队列只保留的最新帧数量。 */
+constexpr long kLatestImageFrameQueueDepth = 1;
+
 /**
  * @brief 从标定中选择与图像尺寸匹配的 SDK 相机模型。
  * @param calibration SDK 相机标定。
@@ -119,7 +122,17 @@ xv_dev_wrapper::xv_dev_wrapper(
   std::shared_ptr<xv::Device> device,
   std::string sn, int type)
 : m_node(node), m_device(device), m_sn(sn), m_type(type),
-  m_rgbd_rect_pool(4), m_imu_pool(2)
+  m_rgbd_rect_pool(4), m_imu_pool(2),
+  m_depthColorImage_deque(kLatestImageFrameQueueDepth),
+  m_colorImage_deque(kLatestImageFrameQueueDepth),
+  m_rectification_colorImage_deque(kLatestImageFrameQueueDepth),
+  m_rgbFisheyeUndistortImage_deque(kLatestImageFrameQueueDepth),
+  m_depthImage_deque(kLatestImageFrameQueueDepth),
+  m_tofIrImage_deque(kLatestImageFrameQueueDepth),
+  m_rgbRegisteredImage_deque(kLatestImageFrameQueueDepth),
+  m_rgbdRegisteredImage_deque(kLatestImageFrameQueueDepth),
+  m_factoryRGBDImage_deque(kLatestImageFrameQueueDepth),
+  m_pointcloud_deque(kLatestImageFrameQueueDepth)
 {
   m_rgb_enable = m_node->getConfig("rgb_enable");
   m_tof_enable = m_node->getConfig("tof_enable");
@@ -203,12 +216,15 @@ void xv_dev_wrapper::publishSlamFunc()
     while (!m_stopRequested.load()) {
       Pose pose;
       if (m_slam_pose_deque.try_pop(pose)) {
+        /** 当前 SLAM Pose 及其 TF 共用的 Unix 时间戳。 */
+        const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+          pose.hostTimestamp() > 0.1 ? pose.hostTimestamp() : 0.1);
         geometry_msgs::msg::PoseStamped poseSteamped = to_ros_poseStamped(
-            pose, this->m_node->getFrameID("map_optical_frame"));
+            pose, this->m_node->getFrameID("map_optical_frame"), stamp);
         this->m_node->publishSlamPose(m_sn, poseSteamped);
         this->m_node->broadcasterTfTransform(toRosTransformStamped(
             pose, this->m_node->getFrameID("map_optical_frame"),
-            this->m_node->getFrameID("imu_optical_frame")));
+            this->m_node->getFrameID("imu_optical_frame"), stamp));
       }
 
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -229,16 +245,18 @@ void xv_dev_wrapper::publishSlamPathFunc()
       Pose pose;
       if (m_slam_path_pose_deque.try_pop(pose)) {
         if (m_slam_path_enable) {
-          this->m_path_msgs.header.stamp =
-            get_stamp_from_sec(steady_clock_now());
+          /** 当前路径 Pose 及其 TF 共用的 Unix 时间戳。 */
+          const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+            pose.hostTimestamp() > 0.1 ? pose.hostTimestamp() : 0.1);
+          this->m_path_msgs.header.stamp = stamp;
           this->m_path_msgs.header.frame_id = this->m_node->getFrameID("odom");
           this->m_node->publishSlamTrajectory(
               m_sn,
               toRosPoseStampedRetNavmsgs(pose, this->m_node->getFrameID("odom"),
-                                         this->m_path_msgs));
+                                         this->m_path_msgs, stamp));
           this->m_node->broadcasterTfTransform(
               toRosTransformStamped(pose, this->m_node->getFrameID("base_link"),
-                                    this->m_node->getFrameID("odom")));
+                                    this->m_node->getFrameID("odom"), stamp));
         }
       }
 
@@ -325,8 +343,8 @@ void xv_dev_wrapper::publishRGBDCameraImageFunc()
         /** 公共虚拟网格 IR 图。 */
         rosImage ir_img;
         if (!toRosRgbdOnVirtualGrid(
-            frame_set.depth, frame_set.ir, frame_set.color,
-            undistorted_mat, frame_id, rgb_img, depth_img, ir_img))
+            frame_set.depth, frame_set.ir, undistorted_mat, frame_id, stamp,
+            rgb_img, depth_img, ir_img))
         {
           continue;
         }
@@ -563,7 +581,7 @@ void xv_dev_wrapper::publishRGBRegisteredCameraImageFunc()
         rosImage depth_img;
 
         if (!toRosRegisteredDepthImage(image_pair.first, image_pair.second,
-                                       frame_id, depth_img))
+                                       frame_id, stamp, depth_img))
         {
           continue;
         }
@@ -708,6 +726,10 @@ void xv_dev_wrapper::publishFEImageFunc()
     while (!m_stopRequested.load()) {
       FisheyeImages fisheye_image_tmp;
       if (m_fisheyeimages_deque.try_pop(fisheye_image_tmp)) {
+        /** 同组鱼眼图像共用的 Unix 时间戳。 */
+        const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+          fisheye_image_tmp.hostTimestamp > 0.1 ?
+          fisheye_image_tmp.hostTimestamp : 0.1);
         for (int i = 0; i < int(fisheye_image_tmp.images.size()); ++i) {
           const auto & xvGrayImage = fisheye_image_tmp.images[i];
 
@@ -723,7 +745,7 @@ void xv_dev_wrapper::publishFEImageFunc()
           }
 
           auto img = changeFEGrayScaleImage2RosImage(
-              xvGrayImage, fisheye_image_tmp.hostTimestamp, "");
+              xvGrayImage, stamp, "");
 
           std::string frame_id = "";
           enum FE_IMAGE_TYPE image_type;
@@ -773,10 +795,15 @@ void xv_dev_wrapper::publishSGBMImageFunc()
     while (!m_stopRequested.load()) {
       xv::SgbmImage sgbimage_tmp;
       if (m_sgbmImage_deque.try_pop(sgbimage_tmp)) {
+        /** SGBM 可视化图和原始深度图共用的 Unix 时间戳。 */
+        const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+          sgbimage_tmp.hostTimestamp > 0.1 ?
+          sgbimage_tmp.hostTimestamp : 0.1);
         auto img =
-          toRosImage(sgbimage_tmp, this->m_node->getFrameID("sgbm_frame"));
+          toRosImage(
+            sgbimage_tmp, this->m_node->getFrameID("sgbm_frame"), stamp);
         auto imgRaw = sgbmRawDepthtoRosImage(
-            sgbimage_tmp, this->m_node->getFrameID("sgbm_raw_frame"));
+            sgbimage_tmp, this->m_node->getFrameID("sgbm_raw_frame"), stamp);
 
         this->m_sgbmCamInfo.header.frame_id = img.header.frame_id;
         this->m_sgbmCamInfo.header.stamp = img.header.stamp;
@@ -801,14 +828,19 @@ void xv_dev_wrapper::publishEventFunc()
     while (!m_stopRequested.load()) {
       Event event_tmp;
       if (m_event_deque.try_pop(event_tmp)) {
+        /** 同一 SDK 事件派生消息共用的 Unix 时间戳。 */
+        const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+          std::max(event_tmp.hostTimestamp, 0.1));
         rosEventData eventMsg;
         toRosEventStamped(eventMsg, event_tmp,
-                          this->m_node->getFrameID("imu_optical_frame"));
+                          this->m_node->getFrameID("imu_optical_frame"),
+                          stamp);
         this->m_node->publisheEvent(m_sn, eventMsg);
 
         rosButtonMsg buttonMsg;
         toRosButtonStamped(buttonMsg, event_tmp,
-                           this->m_node->getFrameID("imu_optical_frame"));
+                           this->m_node->getFrameID("imu_optical_frame"),
+                           stamp);
         this->m_node->publisheButton(m_sn, (int)event_tmp.type, buttonMsg);
       }
 
@@ -967,7 +999,10 @@ bool xv_dev_wrapper::getImuOriAt(
   const builtin_interfaces::msg::Time & time)
 {
   Orientation ori;
-  bool ok = m_device->orientationStream()->getAt(ori, time.sec);
+  /** ROS Unix 请求时间映射到 SDK steady_clock 时间域后的秒数。 */
+  const double steady_timestamp_seconds = get_sec(time);
+  bool ok = m_device->orientationStream()->getAt(
+    ori, steady_timestamp_seconds);
   if (ok) {
     formatXvOriToRosOriStamped(oriStamped, ori,
                                m_node->getFrameID("map_optical_frame"));
@@ -1003,8 +1038,12 @@ bool xv_dev_wrapper::slam_get_pose(
   xv::Pose pose;
   bool ok = this->m_device->slam()->getPose(pose, get_sec(prediction));
   if (ok) {
+    /** 查询结果对应的 Unix ROS 时间戳。 */
+    const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+      pose.hostTimestamp() > 0.1 ? pose.hostTimestamp() : 0.1);
     poseSteamped =
-      to_ros_poseStamped(pose, this->m_node->getFrameID("map_optical_frame"));
+      to_ros_poseStamped(
+        pose, this->m_node->getFrameID("map_optical_frame"), stamp);
   }
   return ok;
 }
@@ -1016,8 +1055,12 @@ bool xv_dev_wrapper::slam_get_pose_at(
   Pose pose;
   bool ok = m_device->slam()->getPoseAt(pose, get_sec(time));
   if (ok) {
+    /** 查询结果对应的 Unix ROS 时间戳。 */
+    const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+      pose.hostTimestamp() > 0.1 ? pose.hostTimestamp() : 0.1);
     poseSteamped =
-      to_ros_poseStamped(pose, this->m_node->getFrameID("map_optical_frame"));
+      to_ros_poseStamped(
+        pose, this->m_node->getFrameID("map_optical_frame"), stamp);
   }
 
   return ok;
@@ -1392,14 +1435,17 @@ void xv_dev_wrapper::initEvent()
   m_device->eventStream()->registerCallback([this](const xv::Event & event) {
       m_event_deque.push(event);
 
+      /** 同一 SDK 事件派生消息共用的 Unix 时间戳。 */
+      const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+        std::max(event.hostTimestamp, 0.1));
       rosEventData eventMsg;
       toRosEventStamped(eventMsg, event,
-                      this->m_node->getFrameID("imu_optical_frame"));
+                      this->m_node->getFrameID("imu_optical_frame"), stamp);
       this->m_node->publisheEvent(m_sn, eventMsg);
 
       rosButtonMsg buttonMsg;
       toRosButtonStamped(buttonMsg, event,
-                       this->m_node->getFrameID("imu_optical_frame"));
+                       this->m_node->getFrameID("imu_optical_frame"), stamp);
       this->m_node->publisheButton(m_sn, (int)event.type, buttonMsg);
   });
 }
@@ -1413,14 +1459,15 @@ void xv_dev_wrapper::initClamp()
 void xv_dev_wrapper::toRosEventStamped(
   rosEventData & event,
   xv::Event const & xvEvent,
-  const std::string & frame_id)
+  const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp)
 {
   if (xvEvent.hostTimestamp < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosEventStamped() Error: "
                                 "negative Orientation host-timestamp");
   }
 
-  event.header.stamp = get_stamp_from_sec(std::max(xvEvent.hostTimestamp, 0.1));
+  event.header.stamp = stamp;
   event.header.frame_id = frame_id;
 
   event.type = xvEvent.type;
@@ -1430,15 +1477,15 @@ void xv_dev_wrapper::toRosEventStamped(
 void xv_dev_wrapper::toRosButtonStamped(
   rosButtonMsg & button,
   xv::Event const & xvEvent,
-  const std::string & frame_id)
+  const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp)
 {
   if (xvEvent.hostTimestamp < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosButtonStamped() Error: "
                                 "negative Orientation host-timestamp");
   }
 
-  button.header.stamp =
-    get_stamp_from_sec(std::max(xvEvent.hostTimestamp, 0.1));
+  button.header.stamp = stamp;
   button.header.frame_id = frame_id;
   button.state = (bool)xvEvent.state;
 }
@@ -1660,16 +1707,12 @@ void xv_dev_wrapper::registerSGBMCallbackFunc(void)
 }
 
 rosImage xv_dev_wrapper::changeFEGrayScaleImage2RosImage(
-  const GrayScaleImage & xvGrayImage, double timestamp,
+  const GrayScaleImage & xvGrayImage,
+  const builtin_interfaces::msg::Time & stamp,
   const std::string & frame_id)
 {
-  if (timestamp < 0) {
-    m_node->printInfoMsg(
-        "XVSDK-ROS-WRAPPER toRosImage() Error: negative timestamp");
-  }
-
   rosImage rosImage;
-  rosImage.header.stamp = get_stamp_from_sec(timestamp);
+  rosImage.header.stamp = stamp;
   rosImage.header.frame_id = frame_id;
   rosImage.height = xvGrayImage.height;
   rosImage.width = xvGrayImage.width;
@@ -1732,27 +1775,26 @@ double xv_dev_wrapper::get_sec(
 double
 xv_dev_wrapper::get_sec(const builtin_interfaces::msg::Time & timestamp) const
 {
-  return (double)timestamp.sec + 1e-9 * (double)timestamp.nanosec;
+  /** 请求中的 Unix system_clock 秒级时间戳。 */
+  const double system_timestamp_seconds =
+    static_cast<double>(timestamp.sec) +
+    1e-9 * static_cast<double>(timestamp.nanosec);
+  return xv_ros2::timestamp::systemTimestampToSteadySeconds(
+    system_timestamp_seconds);
 }
 
 geometry_msgs::msg::PoseStamped
 xv_dev_wrapper::to_ros_poseStamped(
   const Pose & xvPose,
-  const std::string & frame_id)
+  const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp)
 {
   geometry_msgs::msg::PoseStamped ps;
-  static double old_timeStamp = steady_clock_now();
   if (xvPose.hostTimestamp() < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosPoseStamped() Error: "
                                 "negative Pose host-timestamp");
   }
-  try {
-    double currentTimestamp = std::max(xvPose.hostTimestamp(), 0.1);
-    ps.header.stamp = get_stamp_from_sec(currentTimestamp);
-    old_timeStamp = currentTimestamp;
-  } catch (std::runtime_error & ex) {
-    ps.header.stamp = get_stamp_from_sec(old_timeStamp);
-  }
+  ps.header.stamp = stamp;
   ps.header.frame_id = frame_id;
 
   ps.pose.position.x = xvPose.x();
@@ -1805,22 +1847,21 @@ xv_dev_wrapper::to_ros_poseEdgeStamped(
 builtin_interfaces::msg::Time
 xv_dev_wrapper::get_stamp_from_sec(double seconds) const
 {
-  return xv_ros2::timestamp::hostTimestampToRosTime(seconds);
+  return xv_ros2::timestamp::steadyTimestampToRosTime(seconds);
 }
 
 builtin_interfaces::msg::Time
 xv_dev_wrapper::get_stamp_from_microsec(double microsec) const
 {
-  builtin_interfaces::msg::Time stamp;
-  stamp.sec = (int32_t)(microsec / 1000000);
-  stamp.nanosec = microsec * 1000 - stamp.sec * 1000000000;
-  return stamp;
+  /** 将 SDK 微秒级 steady_clock 时间戳转换为秒。 */
+  const double seconds = microsec * 1e-6;
+  return xv_ros2::timestamp::steadyTimestampToRosTime(seconds);
 }
 
 builtin_interfaces::msg::Time
 xv_dev_wrapper::getHeaderStamp(double hostTimesStamp)
 {
-  return xv_ros2::timestamp::hostTimestampToRosTime(hostTimesStamp);
+  return xv_ros2::timestamp::steadyTimestampToRosTime(hostTimesStamp);
 }
 
 double xv_dev_wrapper::steady_clock_now() const
@@ -1835,7 +1876,8 @@ nav_msgs::msg::Path
 xv_dev_wrapper::toRosPoseStampedRetNavmsgs(
   const Pose & xvPose,
   const std::string & frame_id,
-  nav_msgs::msg::Path & path)
+  nav_msgs::msg::Path & path,
+  const builtin_interfaces::msg::Time & stamp)
 {
   if (xvPose.hostTimestamp() < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosPoseStamped() Error: "
@@ -1844,8 +1886,7 @@ xv_dev_wrapper::toRosPoseStampedRetNavmsgs(
 
   geometry_msgs::msg::PoseStamped this_ps;
   this_ps.header.frame_id = frame_id;
-  this_ps.header.stamp = get_stamp_from_sec(
-      xvPose.hostTimestamp() > 0.1 ? xvPose.hostTimestamp() : 0.1);
+  this_ps.header.stamp = stamp;
   this_ps.pose.position.x = xvPose.x();
   this_ps.pose.position.y = xvPose.y();
   this_ps.pose.position.z = xvPose.z();
@@ -1865,23 +1906,15 @@ geometry_msgs::msg::TransformStamped
 xv_dev_wrapper::toRosTransformStamped(
   const Pose & pose,
   const std::string & parent_frame_id,
-  const std::string & frame_id)
+  const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp)
 {
   geometry_msgs::msg::TransformStamped tf;
-  static double old_timeStamp = steady_clock_now();
   if (pose.hostTimestamp() < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosTransformStamped() "
                                 "Error: negative Pose host-timestamp");
   }
-
-  try {
-    double currentTimestamp =
-      pose.hostTimestamp() > 0.1 ? pose.hostTimestamp() : 0.1;
-    tf.header.stamp = get_stamp_from_sec(currentTimestamp);
-    old_timeStamp = currentTimestamp;
-  } catch (std::runtime_error & ex) {
-    tf.header.stamp = get_stamp_from_sec(old_timeStamp);
-  }
+  tf.header.stamp = stamp;
   tf.header.frame_id = parent_frame_id;
   tf.child_frame_id = frame_id;
 
@@ -2024,6 +2057,7 @@ bool xv_dev_wrapper::toRosRegisteredDepthImage(
   const DepthImage & xvDepthImage,
   const ColorImage & xvColorImage,
   const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp,
   rosImage & rosImage)
 {
   /** 是否收集 RGB registered 投影诊断信息。 */
@@ -2053,8 +2087,7 @@ bool xv_dev_wrapper::toRosRegisteredDepthImage(
     return false;
   }
 
-  rosImage.header.stamp = get_stamp_from_sec(
-    xvColorImage.hostTimestamp > 0.1 ? xvColorImage.hostTimestamp : 0.1);
+  rosImage.header.stamp = stamp;
   rosImage.header.frame_id = frame_id;
   rosImage.height = static_cast<std::uint32_t>(registered_images.height);
   rosImage.width = static_cast<std::uint32_t>(registered_images.width);
@@ -2099,9 +2132,9 @@ bool xv_dev_wrapper::toRosRegisteredDepthImage(
 bool xv_dev_wrapper::toRosRgbdOnVirtualGrid(
   const DepthImage &xvDepthImage,
   const DepthImage &xvIrImage,
-  const ColorImage &xvColorImage,
   const cv::Mat &undistortedRgb,
   const std::string &frame_id,
+  const builtin_interfaces::msg::Time &stamp,
   rosImage &rgbImage,
   rosImage &depthImage,
   rosImage &irImage)
@@ -2181,9 +2214,6 @@ bool xv_dev_wrapper::toRosRgbdOnVirtualGrid(
     return false;
   }
 
-  /** 三路统一 RGB 时间戳。 */
-  const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
-    xvColorImage.hostTimestamp > 0.1 ? xvColorImage.hostTimestamp : 0.1);
   rgbImage.header.stamp = stamp;
   rgbImage.header.frame_id = frame_id;
   rgbImage.height = static_cast<std::uint32_t>(registered_images.height);
@@ -2771,7 +2801,8 @@ cv::Mat convDepthToMat(
 
 rosImage xv_dev_wrapper::toRosImage(
   const SgbmImage & xvSgbmDepthImage,
-  const std::string & frame_id)
+  const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp)
 {
   if (xvSgbmDepthImage.hostTimestamp < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosImage() Error: "
@@ -2784,9 +2815,7 @@ rosImage xv_dev_wrapper::toRosImage(
     this->m_node->printErrorMsg(
         "XVSDK-ROS-WRAPPER toRosImage()s Error: wrong sgbm type:Disparity");
   } else {
-    rosImage.header.stamp = get_stamp_from_sec(
-        xvSgbmDepthImage.hostTimestamp > 0.1 ? xvSgbmDepthImage.hostTimestamp :
-                                               0.1);
+    rosImage.header.stamp = stamp;
     rosImage.header.frame_id = frame_id;
     rosImage.height = xvSgbmDepthImage.height;
     rosImage.width = xvSgbmDepthImage.width;
@@ -2812,7 +2841,8 @@ rosImage xv_dev_wrapper::toRosImage(
 rosImage
 xv_dev_wrapper::sgbmRawDepthtoRosImage(
   const SgbmImage & xvSgbmDepthImage,
-  const std::string & frame_id)
+  const std::string & frame_id,
+  const builtin_interfaces::msg::Time & stamp)
 {
   if (xvSgbmDepthImage.hostTimestamp < 0) {
     this->m_node->printErrorMsg("XVSDK-ROS-WRAPPER toRosImage() Error: "
@@ -2825,9 +2855,7 @@ xv_dev_wrapper::sgbmRawDepthtoRosImage(
     this->m_node->printErrorMsg(
         "XVSDK-ROS-WRAPPER toRosImage()s Error: wrong sgbm type:Disparity");
   } else {
-    rosImage.header.stamp = get_stamp_from_sec(
-        xvSgbmDepthImage.hostTimestamp > 0.1 ? xvSgbmDepthImage.hostTimestamp :
-                                               0.1);
+    rosImage.header.stamp = stamp;
     rosImage.header.frame_id = frame_id;
 
     rosImage.height = xvSgbmDepthImage.height;
@@ -2988,7 +3016,12 @@ xv_dev_wrapper::toRosRGBDColorImage(
   const DepthColorImage & xvDepthColorImage,
   const std::string & frame_id)
 {
-  return xv_ros2::rgbd::toRosRGBDColorImage(xvDepthColorImage, frame_id);
+  /** RGBD 帧对应的 Unix ROS 时间戳。 */
+  const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+      xvDepthColorImage.hostTimestamp > 0.1 ?
+      xvDepthColorImage.hostTimestamp : 0.1);
+  return xv_ros2::rgbd::toRosRGBDColorImage(
+      xvDepthColorImage, frame_id, stamp);
 }
 
 /**
@@ -3002,7 +3035,12 @@ xv_dev_wrapper::toRosRGBDDepthImage(
   const DepthColorImage & xvDepthColorImage,
   const std::string & frame_id)
 {
-  return xv_ros2::rgbd::toRosRGBDDepthImage(xvDepthColorImage, frame_id);
+  /** RGBD 帧对应的 Unix ROS 时间戳。 */
+  const builtin_interfaces::msg::Time stamp = get_stamp_from_sec(
+      xvDepthColorImage.hostTimestamp > 0.1 ?
+      xvDepthColorImage.hostTimestamp : 0.1);
+  return xv_ros2::rgbd::toRosRGBDDepthImage(
+      xvDepthColorImage, frame_id, stamp);
 }
 
 rosImage xv_dev_wrapper::toRosImageRaw(

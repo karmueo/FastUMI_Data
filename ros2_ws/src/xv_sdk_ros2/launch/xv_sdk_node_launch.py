@@ -39,7 +39,7 @@ def generate_launch_description():
     # 默认 bag 输出目录，使用时间戳避免覆盖已有录制结果。
     bag_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     default_bag_output_dir = str(
-        Path.home() / 'ros2_bags' / f'xv_sdk_ros2_{bag_timestamp}')
+        Path('/home/scl/datasets/ros2bag') / f'xv_sdk_ros2_{bag_timestamp}')
     # bag 输出目录，可通过 bag_output_dir:=... 覆盖。
     bag_output_dir = LaunchConfiguration('bag_output_dir', default=default_bag_output_dir)
     # 一次性截图节点开关，默认关闭。

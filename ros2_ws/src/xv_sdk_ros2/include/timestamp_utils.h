@@ -22,6 +22,43 @@ builtin_interfaces::msg::Time
 hostTimestampToRosTime(double host_timestamp_seconds);
 
 /**
+ * @brief 将 steady_clock 时间戳映射到 Unix system_clock 时间域。
+ * @param steady_timestamp_seconds 待转换的 steady_clock 秒级时间戳。
+ * @param steady_now_seconds 采样时刻的 steady_clock 秒数。
+ * @param system_now_seconds 同一采样时刻的 Unix system_clock 秒数。
+ * @return 映射后的 Unix 秒级时间戳；输入无效时回退到 system_now_seconds。
+ */
+double steadyTimestampToSystemSeconds(double steady_timestamp_seconds,
+                                      double steady_now_seconds,
+                                      double system_now_seconds);
+
+/**
+ * @brief 将 steady_clock 秒级时间戳转换为 Unix 时间域的 ROS Time。
+ * @param steady_timestamp_seconds steady_clock 秒级时间戳。
+ * @return Unix system_clock 时间域的 ROS Time。
+ */
+builtin_interfaces::msg::Time
+steadyTimestampToRosTime(double steady_timestamp_seconds);
+
+/**
+ * @brief 将 Unix system_clock 时间戳映射回 steady_clock 时间域。
+ * @param system_timestamp_seconds 待转换的 Unix 秒级时间戳。
+ * @param steady_now_seconds 采样时刻的 steady_clock 秒数。
+ * @param system_now_seconds 同一采样时刻的 Unix system_clock 秒数。
+ * @return 映射后的 steady_clock 秒数；输入无效时回退到 steady_now_seconds。
+ */
+double systemTimestampToSteadySeconds(double system_timestamp_seconds,
+                                      double steady_now_seconds,
+                                      double system_now_seconds);
+
+/**
+ * @brief 将 Unix system_clock 秒级时间戳转换为 steady_clock 秒数。
+ * @param system_timestamp_seconds Unix system_clock 秒级时间戳。
+ * @return steady_clock 时间域的秒数。
+ */
+double systemTimestampToSteadySeconds(double system_timestamp_seconds);
+
+/**
  * @brief 将具有独立时间原点的数据流时间戳映射到主机 steady_clock。
  *
  * 对已经位于主机时间基准的数据流保持透传。检测到明显的时间原点偏差后，

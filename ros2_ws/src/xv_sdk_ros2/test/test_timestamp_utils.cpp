@@ -64,6 +64,120 @@ TEST(TimestampUtilsTest, SameInputProducesSameStamp) {
 }
 
 /**
+ * @brief steady_clock 时间戳应按两个主机时钟的原点差映射到 Unix 时间。
+ */
+TEST(TimestampUtilsTest, MapsSteadyTimestampToUnixSystemTime) {
+  /** 待转换的 steady_clock 事件时间。 */
+  const double steady_timestamp_seconds = 1063685.25;
+  /** 转换时的 steady_clock 当前时间。 */
+  const double steady_now_seconds = 1063686.0;
+  /** 转换时的 Unix system_clock 当前时间。 */
+  const double system_now_seconds = 1785314481.0;
+  /** 映射后的 Unix 秒级时间戳。 */
+  const double mapped_timestamp_seconds =
+      xv_ros2::timestamp::steadyTimestampToSystemSeconds(
+          steady_timestamp_seconds, steady_now_seconds, system_now_seconds);
+
+  EXPECT_DOUBLE_EQ(1785314480.25, mapped_timestamp_seconds);
+}
+
+/**
+ * @brief 使用相同时钟原点偏移转换连续事件时应保持时间戳顺序。
+ */
+TEST(TimestampUtilsTest, KeepsConvertedTimestampOrder) {
+  /** 第一个 steady_clock 事件时间。 */
+  const double first_steady_timestamp_seconds = 1063685.25;
+  /** 第二个 steady_clock 事件时间。 */
+  const double second_steady_timestamp_seconds = 1063685.251;
+  /** 转换时的 steady_clock 当前时间。 */
+  const double steady_now_seconds = 1063686.0;
+  /** 转换时的 Unix system_clock 当前时间。 */
+  const double system_now_seconds = 1785314481.0;
+  /** 第一个事件映射后的 Unix 时间。 */
+  const double first_system_timestamp_seconds =
+      xv_ros2::timestamp::steadyTimestampToSystemSeconds(
+          first_steady_timestamp_seconds, steady_now_seconds,
+          system_now_seconds);
+  /** 第二个事件映射后的 Unix 时间。 */
+  const double second_system_timestamp_seconds =
+      xv_ros2::timestamp::steadyTimestampToSystemSeconds(
+          second_steady_timestamp_seconds, steady_now_seconds,
+          system_now_seconds);
+
+  EXPECT_GT(second_system_timestamp_seconds, first_system_timestamp_seconds);
+  EXPECT_NEAR(0.001,
+              second_system_timestamp_seconds -
+                  first_system_timestamp_seconds,
+              1e-7);
+}
+
+/**
+ * @brief 无效 steady_clock 时间戳应回退到当前 Unix 系统时间。
+ */
+TEST(TimestampUtilsTest, InvalidSteadyTimestampFallsBackToSystemTime) {
+  /** 当前 steady_clock 秒数。 */
+  const double steady_now_seconds = 1063686.0;
+  /** 当前 Unix system_clock 秒数。 */
+  const double system_now_seconds = 1785314481.0;
+
+  EXPECT_DOUBLE_EQ(
+      system_now_seconds,
+      xv_ros2::timestamp::steadyTimestampToSystemSeconds(
+          -1.0, steady_now_seconds, system_now_seconds));
+  EXPECT_DOUBLE_EQ(
+      system_now_seconds,
+      xv_ros2::timestamp::steadyTimestampToSystemSeconds(
+          0.1, steady_now_seconds, system_now_seconds));
+}
+
+/**
+ * @brief Unix 时间戳应按两个主机时钟的原点差映射回 steady_clock。
+ */
+TEST(TimestampUtilsTest, MapsUnixSystemTimestampToSteadyTime) {
+  /** 待转换的 Unix system_clock 事件时间。 */
+  const double system_timestamp_seconds = 1785314480.25;
+  /** 转换时的 steady_clock 当前时间。 */
+  const double steady_now_seconds = 1063686.0;
+  /** 转换时的 Unix system_clock 当前时间。 */
+  const double system_now_seconds = 1785314481.0;
+  /** 映射后的 steady_clock 秒级时间戳。 */
+  const double mapped_timestamp_seconds =
+      xv_ros2::timestamp::systemTimestampToSteadySeconds(
+          system_timestamp_seconds, steady_now_seconds, system_now_seconds);
+
+  EXPECT_DOUBLE_EQ(1063685.25, mapped_timestamp_seconds);
+}
+
+/**
+ * @brief 无效 Unix 时间戳应回退到当前 steady_clock 时间。
+ */
+TEST(TimestampUtilsTest, InvalidSystemTimestampFallsBackToSteadyTime) {
+  /** 当前 steady_clock 秒数。 */
+  const double steady_now_seconds = 1063686.0;
+  /** 当前 Unix system_clock 秒数。 */
+  const double system_now_seconds = 1785314481.0;
+
+  EXPECT_DOUBLE_EQ(
+      steady_now_seconds,
+      xv_ros2::timestamp::systemTimestampToSteadySeconds(
+          0.1, steady_now_seconds, system_now_seconds));
+}
+
+/**
+ * @brief Unix 大数值秒数转换为 ROS Time 时应保留亚微秒精度。
+ */
+TEST(TimestampUtilsTest, ConvertsUnixEpochSecondsWithSubmicrosecondPrecision) {
+  /** Unix 秒级测试时间戳。 */
+  const double unix_timestamp_seconds = 1785314480.25;
+  /** 转换后的 ROS 时间戳。 */
+  const builtin_interfaces::msg::Time stamp =
+      xv_ros2::timestamp::hostTimestampToRosTime(unix_timestamp_seconds);
+
+  EXPECT_EQ(1785314480, stamp.sec);
+  EXPECT_NEAR(250000000U, stamp.nanosec, 1000U);
+}
+
+/**
  * @brief 已使用主机 steady_clock 的数据流应保持原始时间戳。
  */
 TEST(StreamTimestampAlignerTest, PassesThroughHostClockTimestamp) {

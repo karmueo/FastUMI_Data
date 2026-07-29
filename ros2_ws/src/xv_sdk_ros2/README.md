@@ -64,6 +64,13 @@ ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py
 /xv_sdk/SN<设备序列号>/rgb/camera_info
 ```
 
+驱动内部继续使用 `steady_clock` 对齐 RGB、IMU 和 ToF 数据。发布到 ROS2 的
+`header.stamp` 会转换为 Unix `system_clock` 时间，便于与其他传感器按时间戳
+同步；同帧图像与 `CameraInfo` 使用完全相同的时间戳。高带宽图像发布队列只
+保留最新帧，处理速度低于设备帧率时会丢弃旧帧，避免延迟随运行时间持续增长。
+绝对时间查询服务中的 `timestamp` 同样使用 Unix 时间，驱动会在调用 XV SDK
+前将其映射回内部 `steady_clock` 时间域。
+
 查看当前 launch 文件支持的参数及默认值：
 
 ```bash
@@ -79,7 +86,7 @@ ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py --show-args
 | `rgb_fisheye_undistort_enable` | `bool` | `false` | 发布基于 Kalibr 标定校正后的 RGB 图像和对应 `CameraInfo`。 |
 | `rgb_fisheye_calibration_path` | `string` | 包内 `config/kalibr_data-camchain-imucam.yaml` | RGB 鱼眼校正使用的 Kalibr camchain 文件，可传入绝对路径覆盖。 |
 | `record_bag` | `bool` | `false` | 随驱动启动 `ros2 bag record -a`，录制当前所有 ROS 2 话题。 |
-| `bag_output_dir` | `string` | `~/ros2_bags/xv_sdk_ros2_<时间戳>` | `record_bag:=true` 时使用的 bag 输出目录。 |
+| `bag_output_dir` | `string` | `/home/scl/datasets/ros2bag/xv_sdk_ros2_<时间戳>` | `record_bag:=true` 时使用的 bag 输出目录。 |
 | `snapshot_enable` | `bool` | `false` | 随驱动启动一次性截图节点。 |
 | `snapshot_topic` | `string` | 空 | 截图节点订阅的完整图像话题，必须以 `/` 开头。 |
 | `snapshot_output_dir` | `string` | `/tmp/xv_sdk_snapshots` | 截图文件输出目录。 |
