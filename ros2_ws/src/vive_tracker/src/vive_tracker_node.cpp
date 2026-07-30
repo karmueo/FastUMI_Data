@@ -17,15 +17,16 @@
 #include <utility>
 #include <vector>
 
+#include <fastumi_interfaces/msg/tracker_status.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <fastumi_interfaces/msg/tracker_status.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "vive_tracker/frame_validation.hpp"
 #include "vive_tracker/path_history.hpp"
 #include "vive_tracker/pose_math.hpp"
 #include "vive_tracker/tracker_pose_reader.hpp"
@@ -57,23 +58,6 @@ TrackingOrigin ParseTrackingOrigin(const std::string &value) {
   }
   throw std::invalid_argument(
       "tracking_origin must be standing, seated, or raw");
-}
-
-/**
- * @brief 验证 TF 坐标系参数适合作为未带前导斜杠的 frame ID。
- * @param value 待验证的 frame ID。
- * @param parameter_name 对应的 ROS 参数名称。
- * @throws std::invalid_argument frame ID 为空或带前导斜杠时抛出。
- */
-void ValidateFrameId(const std::string &value,
-                     const std::string &parameter_name) {
-  if (value.empty()) {
-    throw std::invalid_argument(parameter_name + " must not be empty");
-  }
-  if (value.front() == '/') {
-    throw std::invalid_argument(parameter_name +
-                                " must not start with a slash");
-  }
 }
 
 /**
@@ -133,6 +117,7 @@ public:
     /** 尚未解析的 OpenVR 跟踪原点参数。 */
     const std::string tracking_origin_text =
         declare_parameter<std::string>("tracking_origin", "standing");
+    reorder_pose_axes_ = declare_parameter<bool>("reorder_pose_axes", false);
     openvr_frame_ =
         declare_parameter<std::string>("openvr_frame", "steamvr_tracking");
     parent_frame_ =
@@ -148,6 +133,7 @@ public:
     ValidateParameters(max_path_points_parameter);
     tracking_origin_ = ParseTrackingOrigin(tracking_origin_text);
     max_path_points_ = static_cast<std::size_t>(max_path_points_parameter);
+    absolute_frame_ = reorder_pose_axes_ ? parent_frame_ : openvr_frame_;
 
     /** OpenVR 初始化失败时返回的可读说明。 */
     std::string openvr_error{};
@@ -169,9 +155,11 @@ public:
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     static_tf_broadcaster_ =
         std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
-    PublishTrackingFrameTransform();
+    if (reorder_pose_axes_) {
+      PublishTrackingFrameTransform();
+    }
 
-    path_message_.header.frame_id = parent_frame_;
+    path_message_.header.frame_id = absolute_frame_;
     /** 根据发布频率计算得到的壁钟采样周期。 */
     const auto sample_period =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -180,10 +168,11 @@ public:
         sample_period, std::bind(&ViveTrackerNode::SampleAndPublish, this));
 
     RCLCPP_INFO(get_logger(),
-                "Publishing Tracker %s at %.3f Hz in frame %s converted "
-                "from %s; path limit is %zu points",
-                serial_.c_str(), publish_rate_hz_, parent_frame_.c_str(),
-                openvr_frame_.c_str(), max_path_points_);
+                "Publishing Tracker %s at %.3f Hz with %s pose axes in frame "
+                "%s; path limit is %zu points",
+                serial_.c_str(), publish_rate_hz_,
+                reorder_pose_axes_ ? "reordered" : "original",
+                absolute_frame_.c_str(), max_path_points_);
   }
 
 private:
@@ -200,17 +189,8 @@ private:
         publish_rate_hz_ > kMaximumPublishRateHz) {
       throw std::invalid_argument("publish_rate_hz must be in (0, 1000]");
     }
-    ValidateFrameId(openvr_frame_, "openvr_frame");
-    ValidateFrameId(parent_frame_, "parent_frame");
-    ValidateFrameId(odom_frame_, "odom_frame");
-    ValidateFrameId(child_frame_, "child_frame");
-    if (openvr_frame_ == parent_frame_ || openvr_frame_ == odom_frame_ ||
-        openvr_frame_ == child_frame_ || parent_frame_ == odom_frame_ ||
-        parent_frame_ == child_frame_ || odom_frame_ == child_frame_) {
-      throw std::invalid_argument(
-          "openvr_frame, parent_frame, odom_frame, and child_frame must be "
-          "different");
-    }
+    ValidateFrameConfiguration(openvr_frame_, parent_frame_, odom_frame_,
+                               child_frame_, reorder_pose_axes_);
     if (max_path_points_parameter <= 0) {
       throw std::invalid_argument("max_path_points must be greater than zero");
     }
@@ -249,7 +229,7 @@ private:
     /** ROS 全局跟踪坐标系到首帧里程计坐标系的静态变换。 */
     geometry_msgs::msg::TransformStamped odom_frame_transform{};
     odom_frame_transform.header.stamp = stamp;
-    odom_frame_transform.header.frame_id = parent_frame_;
+    odom_frame_transform.header.frame_id = absolute_frame_;
     odom_frame_transform.child_frame_id = odom_frame_;
     odom_frame_transform.transform.translation.x = initial_pose.position.x;
     odom_frame_transform.transform.translation.y = initial_pose.position.y;
@@ -259,9 +239,12 @@ private:
     odom_frame_transform.transform.rotation.z = initial_pose.orientation.z;
     odom_frame_transform.transform.rotation.w = initial_pose.orientation.w;
 
-    /** 确保晚加入的订阅者能够同时收到完整的两级静态 TF。 */
-    const std::vector<geometry_msgs::msg::TransformStamped> static_transforms{
-        tracking_frame_transform_, odom_frame_transform};
+    /** 确保晚加入的订阅者能够收到当前坐标模式下的完整静态 TF。 */
+    std::vector<geometry_msgs::msg::TransformStamped> static_transforms{};
+    if (reorder_pose_axes_) {
+      static_transforms.push_back(tracking_frame_transform_);
+    }
+    static_transforms.push_back(odom_frame_transform);
     static_tf_broadcaster_->sendTransform(static_transforms);
     RCLCPP_INFO(get_logger(),
                 "Initialized odometry frame %s from the first valid pose",
@@ -286,7 +269,7 @@ private:
       /** 设备缺失状态使用当前系统时钟，确保录制端仍能观察到采样。 */
       fastumi_interfaces::msg::TrackerStatus status_message{};
       status_message.header.stamp = now();
-      status_message.header.frame_id = parent_frame_;
+      status_message.header.frame_id = absolute_frame_;
       status_message.serial_number = serial_;
       status_message.device_connected = false;
       status_message.pose_valid = false;
@@ -303,7 +286,7 @@ private:
                                     RCL_SYSTEM_TIME);
     fastumi_interfaces::msg::TrackerStatus status_message{};
     status_message.header.stamp = sample_stamp;
-    status_message.header.frame_id = parent_frame_;
+    status_message.header.frame_id = absolute_frame_;
     status_message.serial_number = serial_;
     status_message.device_connected = target_sample->device_connected;
     status_message.pose_valid = target_sample->pose_valid;
@@ -326,16 +309,18 @@ private:
     /** 本次发布使用的当前位姿消息。 */
     geometry_msgs::msg::PoseStamped pose_message{};
     pose_message.header.stamp = sample_stamp;
-    pose_message.header.frame_id = parent_frame_;
-    /** 将位姿表达从原始 OpenVR 全局坐标系转换到新 ROS 跟踪坐标系。 */
-    const Pose ros_pose = ConvertOpenVrPoseToRosPose(target_sample->pose);
-    FillRosPose(ros_pose, &pose_message.pose);
+    pose_message.header.frame_id = absolute_frame_;
+    /** 按配置选择原始 OpenVR 位姿或轴向重排后的位姿。 */
+    const Pose published_pose =
+        SelectPublishedPose(target_sample->pose, reorder_pose_axes_);
+    FillRosPose(published_pose, &pose_message.pose);
 
     if (!initial_pose_.has_value()) {
-      InitializeOdomFrame(ros_pose, pose_message.header.stamp);
+      InitializeOdomFrame(published_pose, pose_message.header.stamp);
     }
     /** 当前 Tracker 相对于首帧里程计坐标系的位姿。 */
-    const Pose odom_pose = CalculateRelativePose(*initial_pose_, ros_pose);
+    const Pose odom_pose =
+        CalculateRelativePose(*initial_pose_, published_pose);
     /** 本次发布的首帧归零里程计消息。 */
     nav_msgs::msg::Odometry odom_message{};
     odom_message.header.stamp = pose_message.header.stamp;
@@ -367,10 +352,14 @@ private:
   double publish_rate_hz_{30.0};
   /** SteamVR 查询使用的跟踪原点。 */
   TrackingOrigin tracking_origin_{TrackingOrigin::kStanding};
+  /** 是否将 OpenVR 全局坐标轴重排为 ROS 跟踪坐标轴。 */
+  bool reorder_pose_axes_{false};
   /** OpenVR 返回位姿时使用的原始全局坐标系。 */
   std::string openvr_frame_{};
   /** Pose、Path 和静态里程计原点使用的轴向重排父坐标系。 */
   std::string parent_frame_{};
+  /** 当前坐标模式下 Pose、Path 和静态里程计原点使用的全局坐标系。 */
+  std::string absolute_frame_{};
   /** 第一条有效位姿定义的固定里程计坐标系。 */
   std::string odom_frame_{};
   /** TF 和 Odometry 使用的 Tracker 子坐标系。 */

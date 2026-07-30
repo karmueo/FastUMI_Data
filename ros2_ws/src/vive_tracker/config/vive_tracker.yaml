@@ -5,6 +5,7 @@
     serial: LHR-B77A06A7
     publish_rate_hz: 30.0
     tracking_origin: standing
+    reorder_pose_axes: false
     openvr_frame: steamvr_tracking
     parent_frame: steamvr_tracking_ros
     odom_frame: vive_tracker_odom

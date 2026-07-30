@@ -59,6 +59,63 @@ def test_explicit_serial_overrides_config_file():
     assert tracker_parameters[1] == {'serial': 'LHR-CUSTOM'}
 
 
+def test_empty_reorder_override_preserves_config_file():
+    """未传入坐标重排开关时应保留参数文件中的设置."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟仅使用自定义参数文件的 launch 上下文。
+    launch_context = LaunchContext()
+    launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
+    launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['reorder_pose_axes'] = ''
+
+    # 节点最终收到的参数来源列表。
+    tracker_parameters = launch_module._build_tracker_parameters(
+        launch_context
+    )
+
+    assert len(tracker_parameters) == 1
+    assert tracker_parameters[0].perform(launch_context) == '/tmp/custom.yaml'
+
+
+def test_explicit_true_enables_pose_axis_reordering():
+    """显式传入 true 时应使用布尔值启用坐标重排."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟显式启用坐标重排的 launch 上下文。
+    launch_context = LaunchContext()
+    launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
+    launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['reorder_pose_axes'] = 'true'
+
+    # 节点最终收到的参数来源列表。
+    tracker_parameters = launch_module._build_tracker_parameters(
+        launch_context
+    )
+
+    assert len(tracker_parameters) == 2
+    assert tracker_parameters[1] == {'reorder_pose_axes': True}
+
+
+def test_explicit_false_disables_configured_pose_axis_reordering():
+    """显式传入 false 时应使用布尔值覆盖参数文件设置."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟显式关闭坐标重排的 launch 上下文。
+    launch_context = LaunchContext()
+    launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
+    launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['reorder_pose_axes'] = 'false'
+
+    # 节点最终收到的参数来源列表。
+    tracker_parameters = launch_module._build_tracker_parameters(
+        launch_context
+    )
+
+    assert len(tracker_parameters) == 2
+    assert tracker_parameters[1] == {'reorder_pose_axes': False}
+
+
 def test_terminal_interrupt_is_forwarded_to_isolated_tracker():
     """终端 Ctrl+C 应生成一个发往独立 Tracker 会话的信号事件."""
     # 待测试的 launch 模块。

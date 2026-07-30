@@ -109,7 +109,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: steamvr_tracking_ros
+    Fixed Frame: steamvr_tracking
     Frame Rate: 30
   Name: root
   Tools:

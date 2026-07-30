@@ -39,6 +39,7 @@ endif()
 
 add_library(
   vive_tracker_core STATIC
+  src/frame_validation.cpp
   src/path_history.cpp
   src/pose_math.cpp
   src/tracker_pose_reader.cpp

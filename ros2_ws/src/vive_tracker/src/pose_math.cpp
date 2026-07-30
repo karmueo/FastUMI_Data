@@ -194,6 +194,18 @@ Pose ConvertOpenVrPoseToRosPose(const Pose &openvr_pose) noexcept {
 }
 
 /**
+ * @brief 根据发布配置选择 OpenVR 原始位姿或轴向重排位姿。
+ * @param openvr_pose 使用 OpenVR 原始坐标定义的 Tracker 位姿。
+ * @param reorder_pose_axes 是否将全局坐标轴重排为 ROS 跟踪坐标。
+ * @return 关闭重排时返回原始位姿，开启时返回 ROS 跟踪坐标位姿。
+ */
+Pose SelectPublishedPose(const Pose &openvr_pose,
+                         bool reorder_pose_axes) noexcept {
+  return reorder_pose_axes ? ConvertOpenVrPoseToRosPose(openvr_pose)
+                           : openvr_pose;
+}
+
+/**
  * @brief 计算当前位姿相对于参考位姿所定义坐标系的刚体变换。
  * @param reference_pose 作为相对坐标系原点和轴向的参考位姿。
  * @param current_pose 与参考位姿表达在同一父坐标系中的当前位姿。

@@ -25,11 +25,19 @@ def _build_tracker_parameters(context):
     config_file = LaunchConfiguration('config_file')
     # 非空值表示调用者明确要求覆盖参数文件中的序列号。
     serial_override = LaunchConfiguration('serial').perform(context)
+    # 非空值表示调用者明确要求覆盖参数文件中的坐标重排开关。
+    reorder_override = LaunchConfiguration(
+        'reorder_pose_axes', default=''
+    ).perform(context)
 
     # 节点参数默认完全沿用参数文件。
     tracker_parameters = [config_file]
     if serial_override:
         tracker_parameters.append({'serial': serial_override})
+    if reorder_override:
+        tracker_parameters.append(
+            {'reorder_pose_axes': reorder_override == 'true'}
+        )
     return tracker_parameters
 
 
@@ -99,6 +107,16 @@ def generate_launch_description():
             'from config_file.'
         ),
     )
+    # Tracker 位姿全局坐标轴重排开关声明。
+    reorder_pose_axes_argument = DeclareLaunchArgument(
+        'reorder_pose_axes',
+        default_value='',
+        choices=['', 'true', 'false'],
+        description=(
+            'Whether to reorder OpenVR pose axes. Leave empty to use the '
+            'value from config_file.'
+        ),
+    )
     # 节点参数文件路径声明。
     config_file_argument = DeclareLaunchArgument(
         'config_file',
@@ -133,6 +151,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             serial_argument,
+            reorder_pose_axes_argument,
             config_file_argument,
             rviz_config_argument,
             use_rviz_argument,

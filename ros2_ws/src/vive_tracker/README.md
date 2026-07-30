@@ -88,6 +88,18 @@ ros2 launch vive_tracker vive_tracker.launch.py
 ros2 launch vive_tracker vive_tracker.launch.py serial:=LHR-XXXXXXXX
 ```
 
+默认直接发布 OpenVR 原始坐标定义的 Tracker 位姿。需要启用 ROS 跟踪坐标轴重排时执行：
+
+```bash
+ros2 launch vive_tracker vive_tracker.launch.py reorder_pose_axes:=true
+```
+
+`reorder_pose_axes` 留空时沿用 `config_file` 中的设置。显式传入 `true` 或 `false` 时覆盖参数文件：
+
+```bash
+ros2 launch vive_tracker vive_tracker.launch.py reorder_pose_axes:=false
+```
+
 只启动位姿节点、不启动 RViz2：
 
 ```bash
@@ -110,11 +122,11 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 
 | 类型 | 名称 | 消息或变换 |
 | --- | --- | --- |
-| Topic | `/vive_tracker/pose` | `geometry_msgs/msg/PoseStamped`，在 ROS 全局跟踪坐标系中的当前绝对位姿 |
+| Topic | `/vive_tracker/pose` | `geometry_msgs/msg/PoseStamped`，在当前所选全局跟踪坐标系中的绝对位姿 |
 | Topic | `/vive_tracker/status` | `fastumi_interfaces/msg/TrackerStatus`，Tracker 序列号、连接状态、6DoF 位姿有效性和 OpenVR 跟踪状态 |
 | Topic | `/vive_tracker/odom` | `nav_msgs/msg/Odometry`，相对于启动后第一条有效位姿的 6DoF 里程计 |
-| Topic | `/vive_tracker/path` | `nav_msgs/msg/Path`，在 ROS 全局跟踪坐标系中的最近有效位姿轨迹 |
-| TF | `/tf_static` | `steamvr_tracking → steamvr_tracking_ros → vive_tracker_odom` 两级静态变换 |
+| Topic | `/vive_tracker/path` | `nav_msgs/msg/Path`，在当前所选全局跟踪坐标系中的最近有效位姿轨迹 |
+| TF | `/tf_static` | 当前全局跟踪坐标系到 `vive_tracker_odom` 的静态变换；重排模式额外发布全局坐标重排关系 |
 | TF | `/tf` | `vive_tracker_odom → vive_tracker` 的动态变换 |
 
 节点参数保存在 `config/vive_tracker.yaml`：
@@ -124,8 +136,9 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 | `serial` | `LHR-B77A06A7` | 目标 Tracker 序列号 |
 | `publish_rate_hz` | `30.0` | 采样与发布频率，范围为 `(0, 1000]` Hz |
 | `tracking_origin` | `standing` | OpenVR 原点，可选 `standing`、`seated`、`raw` |
-| `openvr_frame` | `steamvr_tracking` | OpenVR 原始全局坐标系，也是静态 TF 的父坐标系 |
-| `parent_frame` | `steamvr_tracking_ros` | Pose、Path 和里程计静态原点使用的新全局坐标系 |
+| `reorder_pose_axes` | `false` | 是否将 OpenVR 全局坐标轴重排为 ROS 跟踪坐标轴 |
+| `openvr_frame` | `steamvr_tracking` | OpenVR 原始全局坐标系；关闭重排时供 Pose、Path 和里程计静态原点使用 |
+| `parent_frame` | `steamvr_tracking_ros` | 开启重排时供 Pose、Path 和里程计静态原点使用的新全局坐标系 |
 | `odom_frame` | `vive_tracker_odom` | 第一条有效位姿定义的固定里程计坐标系 |
 | `child_frame` | `vive_tracker` | Odometry 和动态 TF 使用的 Tracker 子坐标系 |
 | `max_path_points` | `3000` | 轨迹保留的最大点数，必须为正整数 |
@@ -213,7 +226,21 @@ ros2 bag play vive_tracker_session --clock 30 --start-paused
 
 ## 坐标系
 
-节点保留 OpenVR 原始全局坐标系 `steamvr_tracking`，并创建同原点的新全局坐标系 `steamvr_tracking_ros`。两者通过 `/tf_static` 连接，RViz2、Pose、Path 和 Tracker 动态 TF 默认使用新坐标系。
+节点通过 `reorder_pose_axes` 选择绝对位姿使用的全局坐标定义。两种模式共享 SteamVR 保存的 universe 原点，均不能直接当作机器人基座、UMI 机体或相机坐标系。Tracker 子坐标系始终保持 OpenVR 原始定义。
+
+### 默认 OpenVR 原始坐标
+
+`reorder_pose_axes=false` 时，节点不修改 OpenVR 返回的位置和四元数。Pose、Path 和 Status 的 `frame_id` 为 `openvr_frame`，默认是 `steamvr_tracking`。第一条有效位姿在同一坐标定义下创建首帧归零里程计，TF 树为：
+
+```text
+steamvr_tracking → vive_tracker_odom → vive_tracker
+```
+
+OpenVR standing 空间通常以正 Y 为竖直向上方向，X 和 Z 位于水平面；具体水平方向由 SteamVR 保存的房间朝向确定。
+
+### ROS 跟踪坐标轴重排
+
+`reorder_pose_axes=true` 时，节点创建同原点的新全局坐标系 `steamvr_tracking_ros`，并通过 `/tf_static` 将其连接到 `steamvr_tracking`。Pose、Path 和 Status 使用 `parent_frame`，默认是 `steamvr_tracking_ros`。
 
 新坐标系参考 HTC 官方《VIVE Tracker (3.0) Developer Guidelines》中的右手坐标系定义，将原始正 Y 映射为新正 Z、原始正 Z 映射为新正 X；为保持右手系，原始正 X 映射为新正 Y。
 
@@ -225,7 +252,7 @@ y_ros =  x_openvr
 z_ros =  y_openvr
 ```
 
-Tracker 子坐标系保持 OpenVR 原始定义，只转换位姿的全局表达。静态和动态旋转关系为：
+该模式只转换位姿的全局表达。静态和动态旋转关系为：
 
 ```text
 p_ros = C × p_openvr
@@ -236,17 +263,17 @@ C = [[ 0, 0, 1],
      [ 0, 1, 0]]
 ```
 
-第一条有效 Tracker 位姿还会创建 `vive_tracker_odom`。该坐标系的原点和轴向与首帧 Tracker 完全重合，并在本次节点生命周期内保持固定。后续里程计按以下关系计算：
+两种模式下，第一条有效 Tracker 位姿都会创建 `vive_tracker_odom`。该坐标系的原点和轴向与首帧 Tracker 完全重合，并在本次节点生命周期内保持固定。后续里程计按以下关系计算：
 
 ```text
-T_odom_tracker(t) = inverse(T_ros_tracker(0)) × T_ros_tracker(t)
+T_odom_tracker(t) = inverse(T_global_tracker(0)) × T_global_tracker(t)
 ```
 
-因此 TF 树为 `steamvr_tracking → steamvr_tracking_ros → vive_tracker_odom → vive_tracker`。前两级是静态变换，最后一级是 Tracker 首帧归零后的实时动态位姿；完整 TF 链组合后仍等于 OpenVR 原始 Tracker 位姿。
+重排模式的 TF 树为 `steamvr_tracking → steamvr_tracking_ros → vive_tracker_odom → vive_tracker`。前两级是静态变换，最后一级是 Tracker 首帧归零后的实时动态位姿；完整 TF 链组合后仍等于 OpenVR 原始 Tracker 位姿。
 
-转换后，原始正 Y 运动对应新全局蓝色 `+Z`，原始正 Z 运动对应新全局红色 `+X`，RViz2 的 Grid 位于 `steamvr_tracking_ros` 的 XY 平面。两个全局坐标系的原点都来自 SteamVR 保存的 universe，不能直接当作机器人基座、UMI 机体或相机坐标系。
+转换后，原始正 Y 运动对应新全局蓝色 `+Z`，原始正 Z 运动对应新全局红色 `+X`。RViz2 默认固定帧为 `steamvr_tracking`，可同时显示原始模式数据和通过静态 TF 连接的重排模式数据。
 
-ROS 2 节点在 `steamvr_tracking_ros` 中表达 Pose 和 Path，在 `vive_tracker_odom` 中表达 Odometry，同时保留 `vive_tracker` 的原始局部轴。节点当前不提供运行时重新归零、安装外参或多 Tracker 自动发布。
+ROS 2 节点在当前所选全局坐标系中表达 Pose 和 Path，在 `vive_tracker_odom` 中表达 Odometry。节点当前不提供运行时切换坐标模式、重新归零、安装外参或多 Tracker 自动发布。
 
 旧 bag（例如 `/tmp/vive_tracker_session`）没有新增的 `/vive_tracker/odom` 和 `vive_tracker_odom` 帧，无法直接还原首帧归零里程计。需要新里程计接口时应重新录制，或者对旧 bag 进行离线转换。
 

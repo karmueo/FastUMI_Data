@@ -13,6 +13,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 
+#include "vive_tracker/frame_validation.hpp"
 #include "vive_tracker/path_history.hpp"
 #include "vive_tracker/pose_math.hpp"
 #include "vive_tracker/tracker_pose_types.hpp"
@@ -113,6 +114,33 @@ vive_tracker::Pose ComposePoses(const vive_tracker::Pose &parent_pose,
 }
 
 /**
+ * @brief 验证原始坐标模式允许未使用的父坐标系为空。
+ */
+TEST(ViveTrackerFrameValidation, AllowsEmptyUnusedParentFrame) {
+  EXPECT_NO_THROW(vive_tracker::ValidateFrameConfiguration(
+      "steamvr_tracking", "", "vive_tracker_odom", "vive_tracker", false));
+}
+
+/**
+ * @brief 验证原始坐标模式允许未使用的父坐标系与全局坐标系同名。
+ */
+TEST(ViveTrackerFrameValidation, AllowsDuplicateUnusedParentFrame) {
+  EXPECT_NO_THROW(vive_tracker::ValidateFrameConfiguration(
+      "steamvr_tracking", "steamvr_tracking", "vive_tracker_odom",
+      "vive_tracker", false));
+}
+
+/**
+ * @brief 验证轴向重排模式仍拒绝重名的两个全局坐标系。
+ */
+TEST(ViveTrackerFrameValidation, RejectsDuplicateActiveGlobalFrames) {
+  EXPECT_THROW(vive_tracker::ValidateFrameConfiguration(
+                   "steamvr_tracking", "steamvr_tracking", "vive_tracker_odom",
+                   "vive_tracker", true),
+               std::invalid_argument);
+}
+
+/**
  * @brief 验证单位旋转和平移提取。
  */
 TEST(ViveTrackerPoseMath, ConvertsIdentityAndTranslation) {
@@ -172,6 +200,49 @@ TEST(ViveTrackerPoseMath, ConvertsOpenVrPositionToRosTrackingFrame) {
   EXPECT_NEAR(ros_pose.orientation.y, 0.5, kTolerance);
   EXPECT_NEAR(ros_pose.orientation.z, 0.5, kTolerance);
   EXPECT_NEAR(ros_pose.orientation.w, 0.5, kTolerance);
+}
+
+/**
+ * @brief 验证关闭轴向重排时完整保留 OpenVR 原始位姿。
+ */
+TEST(ViveTrackerPoseMath, SelectsOriginalPoseWhenAxisReorderingIsDisabled) {
+  /** 包含非零位置和旋转的 OpenVR 原始位姿。 */
+  const vive_tracker::Pose openvr_pose{
+      vive_tracker::Vector3{1.0, -2.0, 3.0},
+      vive_tracker::Quaternion{0.1, -0.2, 0.3, 0.9}};
+
+  /** 关闭轴向重排后用于发布的位姿。 */
+  const vive_tracker::Pose published_pose =
+      vive_tracker::SelectPublishedPose(openvr_pose, false);
+
+  EXPECT_DOUBLE_EQ(published_pose.position.x, openvr_pose.position.x);
+  EXPECT_DOUBLE_EQ(published_pose.position.y, openvr_pose.position.y);
+  EXPECT_DOUBLE_EQ(published_pose.position.z, openvr_pose.position.z);
+  EXPECT_DOUBLE_EQ(published_pose.orientation.x, openvr_pose.orientation.x);
+  EXPECT_DOUBLE_EQ(published_pose.orientation.y, openvr_pose.orientation.y);
+  EXPECT_DOUBLE_EQ(published_pose.orientation.z, openvr_pose.orientation.z);
+  EXPECT_DOUBLE_EQ(published_pose.orientation.w, openvr_pose.orientation.w);
+}
+
+/**
+ * @brief 验证开启轴向重排时沿用现有 ROS 跟踪坐标转换。
+ */
+TEST(ViveTrackerPoseMath, SelectsReorderedPoseWhenAxisReorderingIsEnabled) {
+  /** 使用单位方向和不同位置分量的 OpenVR 原始位姿。 */
+  const vive_tracker::Pose openvr_pose{vive_tracker::Vector3{1.0, 2.0, 3.0},
+                                       vive_tracker::Quaternion{}};
+
+  /** 开启轴向重排后用于发布的位姿。 */
+  const vive_tracker::Pose published_pose =
+      vive_tracker::SelectPublishedPose(openvr_pose, true);
+
+  EXPECT_NEAR(published_pose.position.x, 3.0, kTolerance);
+  EXPECT_NEAR(published_pose.position.y, 1.0, kTolerance);
+  EXPECT_NEAR(published_pose.position.z, 2.0, kTolerance);
+  EXPECT_NEAR(published_pose.orientation.x, 0.5, kTolerance);
+  EXPECT_NEAR(published_pose.orientation.y, 0.5, kTolerance);
+  EXPECT_NEAR(published_pose.orientation.z, 0.5, kTolerance);
+  EXPECT_NEAR(published_pose.orientation.w, 0.5, kTolerance);
 }
 
 /**
@@ -265,6 +336,33 @@ TEST(ViveTrackerPoseMath, RelativePoseStartsAtIdentity) {
   EXPECT_NEAR(relative_pose.orientation.y, 0.0, kTolerance);
   EXPECT_NEAR(relative_pose.orientation.z, 0.0, kTolerance);
   EXPECT_NEAR(relative_pose.orientation.w, 1.0, kTolerance);
+}
+
+/**
+ * @brief 验证两种坐标模式的首帧相对位姿均为单位变换。
+ */
+TEST(ViveTrackerPoseMath, RelativePoseStartsAtIdentityInBothAxisModes) {
+  /** 测试使用的 OpenVR 原始首帧位姿。 */
+  const vive_tracker::Pose openvr_pose{
+      vive_tracker::Vector3{1.0, -2.0, 3.0},
+      vive_tracker::Quaternion{0.0, 0.0, kSqrtHalf, kSqrtHalf}};
+
+  for (const bool reorder_pose_axes : {false, true}) {
+    /** 当前坐标模式下用于发布的首帧绝对位姿。 */
+    const vive_tracker::Pose published_pose =
+        vive_tracker::SelectPublishedPose(openvr_pose, reorder_pose_axes);
+    /** 首帧相对于自身计算得到的里程计位姿。 */
+    const vive_tracker::Pose relative_pose =
+        vive_tracker::CalculateRelativePose(published_pose, published_pose);
+
+    EXPECT_NEAR(relative_pose.position.x, 0.0, kTolerance);
+    EXPECT_NEAR(relative_pose.position.y, 0.0, kTolerance);
+    EXPECT_NEAR(relative_pose.position.z, 0.0, kTolerance);
+    EXPECT_NEAR(relative_pose.orientation.x, 0.0, kTolerance);
+    EXPECT_NEAR(relative_pose.orientation.y, 0.0, kTolerance);
+    EXPECT_NEAR(relative_pose.orientation.z, 0.0, kTolerance);
+    EXPECT_NEAR(relative_pose.orientation.w, 1.0, kTolerance);
+  }
 }
 
 /**
