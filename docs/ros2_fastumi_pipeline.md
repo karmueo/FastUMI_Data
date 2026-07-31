@@ -172,6 +172,34 @@ ros2 run fastumi_data calibrate_tracker_tcp pivot \
 降级结果缺少独立旋转残差，只适合试验数据。录制命令默认拒绝未通过
 2 mm、1° 验收的外参。
 
+### 3.1 临时单位外参
+
+仓库内的 `config/calibration/tracker_to_tcp.yaml` 当前保存未验证的单位外参：
+
+```text
+T_tracker_tcp = I
+```
+
+该文件仅用于采集链路联调和机器人 dry-run，禁止用于正式数据采集或真实机器人
+运动。其坐标语义为 `T_world_tcp = T_world_tracker × T_tracker_tcp`；使用单位
+外参时，Tracker 的世界位姿直接作为 TCP 的世界位姿输入。转换器仍按既有逻辑
+计算 `inverse(T_world_tcp_start) × T_world_tcp(t)`，因此输出首帧为零平移和
+单位四元数，后续帧保留 Tracker 相对首帧的运动。
+
+单位外参不会额外调整 VIVE 坐标轴。当前
+`ros2_ws/src/vive_tracker/config/vive_tracker.yaml` 保持
+`reorder_pose_axes: false`，录制和转换沿用 OpenVR 原始全局坐标定义。
+
+该文件的平移、旋转残差均为 `null`，录制器会将其识别为未验证标定。使用该文件
+启动会话时必须显式添加：
+
+```bash
+--allow-unverified-calibration
+```
+
+真实 Tracker 到 TCP 标定完成后，应使用验收合格的结果覆盖该文件，删除录制命令
+中的 `--allow-unverified-calibration`，恢复 2 mm、1° 的正式标定验收门禁。
+
 ## 4. 连续 MCAP 会话采集
 
 开始录制前，需要分别启动 XV 相机驱动、夹爪开度估计节点和 VIVE Tracker
@@ -275,19 +303,64 @@ ros2 topic echo /vive_tracker/status --once
 `device_connected=true`、`pose_valid=true`、`tracking_state=3`
 （`TRACKING_RUNNING_OK`）后，再在终端 4 启动一个连续会话：
 
+### 4.1 `record_session` 参数
+
+基本用法：
+
 ```bash
 ros2 run fastumi_data record_session \
   --task pick_place \
   --dataset-root dataset \
   --extrinsic config/calibration/tracker_to_tcp.yaml \
+  --allow-unverified-calibration \
   --snapshot ros2_ws/src/fastumi_gripper_estimator/config/gripper_openness.yaml \
   --snapshot ros2_ws/src/vive_tracker/config/vive_tracker.yaml
 ```
 
+支持的参数如下：
+
+| 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `-h`、`--help` | 否 | 无 | 显示命令帮助并退出。 |
+| `--task <名称>` | 是 | 无 | 设置任务名称，并作为 `<dataset-root>/<task>/<session>` 中的任务目录名。 |
+| `--session-id <标识>` | 否 | 空 | 设置会话标识；未指定或传入空字符串时，按当前 UTC 时间生成 `YYYYmmddTHHMMSSZ`。 |
+| `--dataset-root <目录>` | 否 | `dataset` | 设置所有任务和 session 的采集根目录。相对路径会先按当前工作目录解析，再写入绝对 session 路径。 |
+| `--extrinsic <YAML>` | 是 | 无 | 指定 Tracker 到 TCP 外参。默认要求平移 RMSE 不超过 2 mm、旋转 RMSE 不超过 1°，文件会复制为 `calibration_snapshot/tracker_to_tcp.yaml`。 |
+| `--processing-config <YAML>` | 否 | `fastumi_data/config/processing.yaml` | 指定 MCAP 转 HDF5 的同步与质量配置；未指定时使用已安装 `fastumi_data` 包内的配置，文件会复制为 `calibration_snapshot/processing.yaml`。 |
+| `--allow-unverified-calibration` | 否 | `false` | 允许使用残差缺失或超过正式门限的外参，仅用于降级试验、链路联调和 dry-run。 |
+| `--topic <话题>` | 否，可重复 | 未指定时使用内置话题 | 完整覆盖默认录制话题。只要提供一次，内置列表就不再自动加入；需要录制多个话题时必须为每个话题重复传入。 |
+| `--snapshot <文件>` | 否，可重复 | 空列表 | 将额外配置或标定文件复制到 `calibration_snapshot/`，并在 `session.yaml` 中记录相对路径和 SHA-256。该参数只负责留档，不会加载或修改 ROS2 节点参数。 |
+
+未使用 `--topic` 时录制以下内置话题：
+
+```text
+/xv_sdk/SN250801DR48FB26001253/rgb/image
+/gripper/state
+/vive_tracker/pose
+/vive_tracker/status
+/fastumi/episode/events
+/tf_static
+```
+
+`record_session` 还会固定向 `ros2 bag record` 传入
+`--storage-preset-profile zstd_fast`，使用 MCAP 原生 Zstandard 快速块压缩。
+该设置优先保证实时写入速度；rosbag2 回放和 `convert_mcap` 转换时会自动解压，
+无需添加额外参数。
+
+以上命令当前使用第 3.1 节的临时单位外参；真实标定文件通过验收后需移除
+`--allow-unverified-calibration`。
+
 录制器自动启动 `episode_manager` 和 MCAP rosbag2。外参、同步配置和额外
 配置会复制到 session，`session.yaml` 保存每个快照的 SHA-256。
 
-另开终端控制 episode：
+`record_session` 启动并显示快捷键提示后，直接在该录制终端按下 `s` 开始
+一次示范，按下 `e` 正常结束；按键会立即生效，无需按 Enter：
+
+```text
+[s] 开始、[e] 结束、[Ctrl+C] 结束会话
+```
+
+标准输入不是交互终端时，或当前示范需要放弃时，可在另一终端使用备用命令：
 
 ```bash
 ros2 run fastumi_data episode_command start
@@ -299,7 +372,7 @@ ros2 run fastumi_data episode_command abort
 ```
 
 整个 session 只启动一次 rosbag。完成全部示范后，在录制终端按 `Ctrl+C`。
-默认目录如下：
+默认采集根目录为 `dataset`，session 目录如下：
 
 ```text
 dataset/<task>/<session>/

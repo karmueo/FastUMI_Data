@@ -1,0 +1,12 @@
+# 本文件提供仅用于采集链路联调和机器人 dry-run 的未验证 Tracker 到 TCP 单位外参。
+schema_version: 1
+tracker_serial: LHR-B77A06A7
+fixture_version: uncalibrated-identity-v1
+method: identity_passthrough_unverified
+calibrated_at: null
+sample_count: 0
+translation_rmse_mm: null
+rotation_rmse_deg: null
+tracker_to_tcp:
+  translation_m: [0.0, 0.0, 0.0]
+  quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]

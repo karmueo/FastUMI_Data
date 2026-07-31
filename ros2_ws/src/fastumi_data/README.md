@@ -20,9 +20,13 @@ ros2 run fastumi_data record_session \
   --task pick_place \
   --extrinsic /path/to/tracker_to_tcp.yaml
 
-# 3. 在另一终端切分 episode
+# 3. 在录制终端按 s 开始示范，按 e 正常结束示范
+# Ctrl+C 结束整个连续录制 session。
+
+# 非交互终端或放弃当前示范时，使用备用命令：
 ros2 run fastumi_data episode_command start
 ros2 run fastumi_data episode_command stop
+ros2 run fastumi_data episode_command abort
 
 # 4. 离线转换
 ros2 run fastumi_data convert_mcap \
