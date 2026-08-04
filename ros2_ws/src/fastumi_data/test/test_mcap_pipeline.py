@@ -143,7 +143,7 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
     stop_event.event_type = EpisodeEvent.STOP
     records.append((stop_ns, topics["episode_event"], stop_event))
     for timestamp_ns, topic, message in sorted(
-        records, key=lambda record: (record[0], record[1])
+        records, key=lambda record: record[0]
     ):
         writer.write(topic, serialize_message(message), timestamp_ns)
     del writer
