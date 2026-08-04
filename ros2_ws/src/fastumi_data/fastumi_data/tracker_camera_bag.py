@@ -1,0 +1,261 @@
+"""以两遍流式方式读取标定 MCAP，并提供 Tracker 时间插值。"""
+
+from __future__ import annotations
+
+from bisect import bisect_left
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, Sequence
+
+from cv_bridge import CvBridge
+import numpy as np
+from rclpy.serialization import deserialize_message
+import rosbag2_py
+from rosidl_runtime_py.utilities import get_message
+
+from fastumi_data.models import PoseSample, TrackerStatusSample
+from fastumi_data.pose_math import interpolate_pose, pose_to_matrix
+
+
+@dataclass(frozen=True)
+class ImageFrame:
+    """保存图像 header 时间、bag 写入时间和 BGR 像素数组。"""
+
+    timestamp_ns: int
+    bag_timestamp_ns: int
+    image: np.ndarray
+
+
+@dataclass(frozen=True)
+class TrackerTimeline:
+    """保存按 header 时间递增排列的 Tracker 位姿和状态样本。"""
+
+    poses: tuple[PoseSample, ...]
+    statuses: tuple[TrackerStatusSample, ...]
+
+
+def _stamp_to_ns(stamp: object) -> int:
+    """把 ROS builtin_interfaces/Time 转换为纳秒整数。"""
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+
+def _open_reader(bag_uri: str) -> rosbag2_py.SequentialReader:
+    """按 MCAP 存储格式打开顺序读取器。"""
+    bag_path = Path(bag_uri)
+    if not bag_path.exists():
+        raise ValueError(f"MCAP 路径不存在: {bag_path}")
+    reader = rosbag2_py.SequentialReader()
+    try:
+        reader.open(
+            rosbag2_py.StorageOptions(uri=str(bag_path), storage_id="mcap"),
+            rosbag2_py.ConverterOptions("", ""),
+        )
+    except RuntimeError as error:
+        raise ValueError(f"无法打开 MCAP {bag_path}: {error}") from error
+    return reader
+
+
+def _topic_message_types(
+    reader: rosbag2_py.SequentialReader,
+    required_topics: Sequence[str],
+) -> dict[str, type]:
+    """解析 bag 话题消息类并检查所有必需话题存在。"""
+    topic_types = {
+        metadata.name: metadata.type
+        for metadata in reader.get_all_topics_and_types()
+    }
+    missing_topics = [
+        topic for topic in required_topics if topic not in topic_types
+    ]
+    if missing_topics:
+        raise ValueError(f"MCAP 缺少话题: {', '.join(missing_topics)}")
+    return {
+        topic: get_message(topic_types[topic]) for topic in required_topics
+    }
+
+
+def _check_monotonic(
+    previous_ns: int | None, current_ns: int, topic: str
+) -> None:
+    """要求单个话题的 header 时间严格递增。"""
+    if previous_ns is not None and current_ns <= previous_ns:
+        raise ValueError(f"话题 {topic} 的 header 时间戳不是严格递增")
+
+
+def image_message_to_frame(
+    message: object,
+    bag_timestamp_ns: int,
+    bridge: CvBridge | None = None,
+) -> ImageFrame:
+    """使用 Image.header.stamp 构造 BGR 图像帧并保留 bag 时间诊断。"""
+    converter = bridge if bridge is not None else CvBridge()
+    image = converter.imgmsg_to_cv2(message, desired_encoding="bgr8")
+    pixels = np.asarray(image).copy()
+    return ImageFrame(
+        timestamp_ns=_stamp_to_ns(message.header.stamp),
+        bag_timestamp_ns=int(bag_timestamp_ns),
+        image=pixels,
+    )
+
+
+def read_tracker_timeline(
+    bag_uri: str,
+    tracker_topic: str = "/vive_tracker/pose",
+    status_topic: str = "/vive_tracker/status",
+) -> TrackerTimeline:
+    """第一遍流式读取 Tracker pose/status 并返回 header 时间线。"""
+    reader = _open_reader(bag_uri)
+    message_types = _topic_message_types(
+        reader, (tracker_topic, status_topic)
+    )
+    poses = []
+    statuses = []
+    previous_timestamps: dict[str, int | None] = {
+        tracker_topic: None,
+        status_topic: None,
+    }
+    while reader.has_next():
+        topic, serialized, _ = reader.read_next()
+        if topic not in message_types:
+            continue
+        message = deserialize_message(serialized, message_types[topic])
+        timestamp_ns = _stamp_to_ns(message.header.stamp)
+        _check_monotonic(previous_timestamps[topic], timestamp_ns, topic)
+        previous_timestamps[topic] = timestamp_ns
+        if topic == tracker_topic:
+            pose = message.pose
+            poses.append(
+                PoseSample(
+                    timestamp_ns=timestamp_ns,
+                    position_m=np.asarray(
+                        [pose.position.x, pose.position.y, pose.position.z],
+                        dtype=np.float64,
+                    ),
+                    quaternion_xyzw=np.asarray(
+                        [
+                            pose.orientation.x,
+                            pose.orientation.y,
+                            pose.orientation.z,
+                            pose.orientation.w,
+                        ],
+                        dtype=np.float64,
+                    ),
+                )
+            )
+        else:
+            statuses.append(
+                TrackerStatusSample(
+                    timestamp_ns=timestamp_ns,
+                    device_connected=bool(message.device_connected),
+                    pose_valid=bool(message.pose_valid),
+                    tracking_state=int(message.tracking_state),
+                )
+            )
+    if len(poses) < 2:
+        raise ValueError("Tracker pose 话题至少需要两个样本")
+    if not statuses:
+        raise ValueError("Tracker status 话题没有样本")
+    return TrackerTimeline(tuple(poses), tuple(statuses))
+
+
+def iter_image_frames(
+    bag_uri: str,
+    image_topic: str,
+    frame_stride: int = 1,
+    bridge: CvBridge | None = None,
+) -> Iterator[ImageFrame]:
+    """第二遍重新打开 MCAP，并按步长流式解码目标图像。"""
+    if frame_stride <= 0:
+        raise ValueError("frame_stride 必须为正整数")
+    reader = _open_reader(bag_uri)
+    message_types = _topic_message_types(reader, (image_topic,))
+    converter = bridge if bridge is not None else CvBridge()
+    image_index = 0
+    previous_timestamp_ns = None
+    while reader.has_next():
+        topic, serialized, bag_timestamp_ns = reader.read_next()
+        if topic != image_topic:
+            continue
+        message = deserialize_message(serialized, message_types[image_topic])
+        timestamp_ns = _stamp_to_ns(message.header.stamp)
+        _check_monotonic(previous_timestamp_ns, timestamp_ns, image_topic)
+        previous_timestamp_ns = timestamp_ns
+        selected = image_index % frame_stride == 0
+        image_index += 1
+        if selected:
+            yield image_message_to_frame(
+                message, bag_timestamp_ns, bridge=converter
+            )
+
+
+def interpolate_world_from_tracker(
+    samples: Sequence[PoseSample], target_ns: int, max_gap_ms: float
+) -> tuple[np.ndarray, float] | None:
+    """在相邻 Tracker 样本之间插值 ``^world T_tracker``。
+
+    平移使用线性插值，姿态使用最短路径 SLERP。返回值中的间隔单位为毫秒。
+    时间边界外、样本未递增或包围间隔超过门限时返回 ``None``。
+    """
+    if len(samples) < 2:
+        return None
+    if max_gap_ms <= 0.0:
+        raise ValueError("max_gap_ms 必须为正数")
+    timestamps = [sample.timestamp_ns for sample in samples]
+    if any(
+        second <= first
+        for first, second in zip(timestamps[:-1], timestamps[1:])
+    ):
+        raise ValueError("Tracker pose 时间戳必须严格递增")
+    insertion = bisect_left(timestamps, target_ns)
+    if insertion == 0 or insertion >= len(samples):
+        return None
+    first, second = samples[insertion - 1], samples[insertion]
+    gap_ns = second.timestamp_ns - first.timestamp_ns
+    if gap_ns > int(max_gap_ms * 1.0e6):
+        return None
+    ratio = (target_ns - first.timestamp_ns) / gap_ns
+    position, quaternion = interpolate_pose(
+        first.position_m,
+        first.quaternion_xyzw,
+        second.position_m,
+        second.quaternion_xyzw,
+        ratio,
+    )
+    return pose_to_matrix(position, quaternion), gap_ns / 1.0e6
+
+
+def tracker_status_valid_at(
+    samples: Sequence[TrackerStatusSample],
+    target_ns: int,
+    maximum_delta_ms: float,
+) -> bool:
+    """返回最近 Tracker 状态是否足够接近且满足 6DoF 有效条件。"""
+    if maximum_delta_ms < 0.0:
+        raise ValueError("maximum_delta_ms 不能为负数")
+    if not samples:
+        return False
+    timestamps = [sample.timestamp_ns for sample in samples]
+    if any(
+        second <= first
+        for first, second in zip(timestamps[:-1], timestamps[1:])
+    ):
+        raise ValueError("Tracker status 时间戳必须严格递增")
+    insertion = bisect_left(timestamps, target_ns)
+    candidates = []
+    if insertion < len(samples):
+        candidates.append(insertion)
+    if insertion > 0:
+        candidates.append(insertion - 1)
+    nearest_index = min(
+        candidates, key=lambda index: abs(timestamps[index] - target_ns)
+    )
+    if abs(timestamps[nearest_index] - target_ns) > int(
+        maximum_delta_ms * 1.0e6
+    ):
+        return False
+    sample = samples[nearest_index]
+    return (
+        sample.device_connected
+        and sample.pose_valid
+        and sample.tracking_state == 3
+    )
