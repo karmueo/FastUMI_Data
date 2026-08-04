@@ -250,9 +250,13 @@ def _run_detection_only(
         _reservoir_add(
             reservoir, (frame, observation), len(observations), 20, generator
         )
-    validate_tag_family(observations, target, minimum_probe_frames=5)
+    failures = []
+    try:
+        validate_tag_family(observations, target, minimum_probe_frames=5)
+    except DetectionRejected as error:
+        failures.append(str(error))
     if len(reservoir) < 20:
-        raise DetectionRejected(
+        failures.append(
             f"检测预检只得到 {len(reservoir)} 帧，至少需要 20 帧"
         )
     paths = {}
@@ -264,14 +268,15 @@ def _run_detection_only(
         paths[f"overlay_{index:03d}"] = path
     tag_ids = [tag for item in observations for tag in item.tag_ids]
     summary = {
-        "accepted": True,
+        "accepted": not failures,
+        "failures": failures,
         "decoded_frames": decoded,
         "valid_frames": len(observations),
         "rejected_frames": rejected,
         "probe_frames": len(reservoir),
         "tag_family": target.tag_family,
-        "tag_id_min": min(tag_ids),
-        "tag_id_max": max(tag_ids),
+        "tag_id_min": min(tag_ids) if tag_ids else None,
+        "tag_id_max": max(tag_ids) if tag_ids else None,
     }
     summary_path = output_dir / "detection_summary.json"
     summary_path.write_text(
@@ -280,7 +285,7 @@ def _run_detection_only(
     )
     paths["detection_summary"] = summary_path
     print(json.dumps(summary, ensure_ascii=False))
-    return PipelineOutcome(True, paths)
+    return PipelineOutcome(not failures, paths)
 
 
 def _motion_diverse_indices(transforms: Sequence[np.ndarray]) -> list[int]:

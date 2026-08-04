@@ -2,15 +2,21 @@
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from fastumi_data.tracker_camera_bag import ImageFrame
+from fastumi_data.tracker_camera_config import AprilGridSpec
 from fastumi_data.tracker_camera_cli import (
     PipelineOutcome,
+    _run_detection_only,
     apply_settings_file,
     build_argument_parser,
     main,
 )
+from fastumi_data.tracker_camera_detection import RawTagDetection
 
 
 def minimum_arguments(extra: list[str] | None = None) -> list[str]:
@@ -103,3 +109,53 @@ def test_apply_settings_rejects_unknown_keys(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="未知设置"):
         apply_settings_file(arguments, parser)
+
+
+def test_detect_only_failure_still_writes_diagnostics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """有效帧不足时也应保存统计和已有叠加图供补采判断。"""
+    frames = [
+        ImageFrame(index, index, np.full((40, 40, 3), 255, np.uint8))
+        for index in range(3)
+    ]
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.iter_image_frames",
+        lambda *args, **kwargs: iter(frames),
+    )
+    detector = SimpleNamespace(
+        detect=lambda image: [
+            RawTagDetection(
+                0,
+                np.asarray(
+                    [
+                        [5.0, 5.0],
+                        [20.0, 5.0],
+                        [20.0, 20.0],
+                        [5.0, 20.0],
+                    ]
+                ),
+                None,
+                None,
+            )
+        ]
+    )
+    arguments = SimpleNamespace(
+        output_dir=str(tmp_path),
+        bag="unused",
+        image_topic="/camera/image",
+        frame_stride=1,
+        min_tags=1,
+    )
+    outcome = _run_detection_only(
+        arguments,
+        detector,
+        AprilGridSpec(6, 6, 0.055, 0.3, "tag36h11"),
+    )
+    assert outcome.accepted is False
+    summary = outcome.output_paths["detection_summary"].read_text(
+        encoding="utf-8"
+    )
+    assert '"valid_frames": 3' in summary
+    assert "至少 5 帧" in summary
+    assert outcome.output_paths["overlay_000"].exists()
