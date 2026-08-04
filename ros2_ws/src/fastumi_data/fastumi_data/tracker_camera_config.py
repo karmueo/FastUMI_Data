@@ -81,7 +81,10 @@ class FisheyeCameraModel:
 
 @dataclass(frozen=True)
 class AprilGridSpec:
-    """保存 Kalibr AprilGrid 的行列、米制尺寸和标签族。"""
+    """保存 Kalibr AprilGrid 的行列、米制尺寸和标签族。
+
+    板坐标系以 Tag 0 左下检测角为原点，x 向右、y 向上。
+    """
 
     tag_cols: int
     tag_rows: int
@@ -234,8 +237,9 @@ def load_aprilgrid(
 def tag_object_corners(spec: AprilGridSpec, tag_id: int) -> np.ndarray:
     """按行优先 ID 生成单个标签的四个米制检测角。
 
-    返回形状为 ``(4, 3)`` 的 ``^board p``，顺序为左上、右上、右下、
-    左下，坐标单位为米。
+    板坐标系以 Tag 0 左下检测角为原点，x 向右、y 向上。返回形状为
+    ``(4, 3)`` 的 ``^board p``，顺序为左下、右下、右上、左上，坐标
+    单位为米。
     """
     if tag_id < 0 or tag_id >= spec.tag_cols * spec.tag_rows:
         raise ValueError(f"Tag ID {tag_id} 超出目标板范围")

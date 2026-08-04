@@ -22,6 +22,16 @@ def test_aprilgrid_tag_corners_use_kalibr_spacing() -> None:
     """标签间距应按 tagSpacing 与 tagSize 的乘积解释。"""
     spec = AprilGridSpec(6, 6, 0.055, 0.3, "tag36h11")
     np.testing.assert_allclose(
+        tag_object_corners(spec, 0),
+        [
+            [0.0, 0.0, 0.0],
+            [0.055, 0.0, 0.0],
+            [0.055, 0.055, 0.0],
+            [0.0, 0.055, 0.0],
+        ],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
         tag_object_corners(spec, 1),
         [
             [0.0715, 0.0, 0.0],
@@ -32,7 +42,14 @@ def test_aprilgrid_tag_corners_use_kalibr_spacing() -> None:
         atol=1.0e-12,
     )
     np.testing.assert_allclose(
-        tag_object_corners(spec, 6)[0], [0.0, 0.0715, 0.0]
+        tag_object_corners(spec, 6),
+        [
+            [0.0, 0.0715, 0.0],
+            [0.055, 0.0715, 0.0],
+            [0.055, 0.1265, 0.0],
+            [0.0, 0.1265, 0.0],
+        ],
+        atol=1.0e-12,
     )
     assert spec.board_extent_m == pytest.approx((0.4125, 0.4125))
 
