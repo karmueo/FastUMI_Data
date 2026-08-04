@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -24,6 +24,19 @@ from fastumi_data.tracker_camera_handeye import (
     solve_handeye_candidates,
 )
 from fastumi_data.tracker_camera_pnp import project_fisheye_points
+
+
+ProgressCallback = Callable[[str, Mapping[str, object]], None]
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    stage: str,
+    **details: object,
+) -> None:
+    """在调用方提供回调时发出结构化进度事件。"""
+    if callback is not None:
+        callback(stage, details)
 
 
 @dataclass(frozen=True)
@@ -267,11 +280,13 @@ def scan_time_offset(
     samples: Sequence[CalibrationSample],
     timeline: TrackerTimeline,
     options: OptimizationOptions,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[TimeOffsetScanPoint], HandEyeCandidate, float]:
     """逐粗网格偏移重插值并以固定板闭环选择 Hand-Eye 初值。"""
     scan_points = []
     successful: list[tuple[TimeOffsetScanPoint, HandEyeCandidate]] = []
-    for offset_ms in _offset_values(options):
+    offset_values = _offset_values(options)
+    for completed, offset_ms in enumerate(offset_values, start=1):
         world_from_tracker = []
         camera_from_board = []
         offset_ns = int(round(offset_ms * 1.0e6))
@@ -287,10 +302,24 @@ def scan_time_offset(
             world_from_tracker.append(interpolation[0])
             camera_from_board.append(sample.camera_from_board)
         if len(world_from_tracker) != len(samples):
-            scan_points.append(
-                TimeOffsetScanPoint(
-                    float(offset_ms), float("inf"), float("inf"), "", False
-                )
+            point = TimeOffsetScanPoint(
+                float(offset_ms), float("inf"), float("inf"), "", False
+            )
+            scan_points.append(point)
+            _emit_progress(
+                progress_callback,
+                "time_offset_scan",
+                completed=completed,
+                total=len(offset_values),
+                offset_ms=float(offset_ms),
+                valid=False,
+                best_offset_ms=(
+                    min(successful, key=lambda item: item[0].translation_rmse_mm)[
+                        0
+                    ].time_offset_ms
+                    if successful
+                    else None
+                ),
             )
             continue
         try:
@@ -300,10 +329,24 @@ def scan_time_offset(
                 )
             )
         except (HandEyeEstimationError, ValueError):
-            scan_points.append(
-                TimeOffsetScanPoint(
-                    float(offset_ms), float("inf"), float("inf"), "", False
-                )
+            point = TimeOffsetScanPoint(
+                float(offset_ms), float("inf"), float("inf"), "", False
+            )
+            scan_points.append(point)
+            _emit_progress(
+                progress_callback,
+                "time_offset_scan",
+                completed=completed,
+                total=len(offset_values),
+                offset_ms=float(offset_ms),
+                valid=False,
+                best_offset_ms=(
+                    min(successful, key=lambda item: item[0].translation_rmse_mm)[
+                        0
+                    ].time_offset_ms
+                    if successful
+                    else None
+                ),
             )
             continue
         point = TimeOffsetScanPoint(
@@ -315,6 +358,23 @@ def scan_time_offset(
         )
         scan_points.append(point)
         successful.append((point, candidate))
+        current_best = min(
+            successful,
+            key=lambda item: (
+                item[0].translation_rmse_mm,
+                item[0].rotation_rmse_deg,
+                abs(item[0].time_offset_ms),
+            ),
+        )[0]
+        _emit_progress(
+            progress_callback,
+            "time_offset_scan",
+            completed=completed,
+            total=len(offset_values),
+            offset_ms=float(offset_ms),
+            valid=True,
+            best_offset_ms=current_best.time_offset_ms,
+        )
     if not successful:
         raise HandEyeEstimationError("时间粗扫描没有产生有效 Hand-Eye 候选")
     best_point, best_candidate = min(
@@ -425,6 +485,7 @@ def optimize_spatiotemporal(
     handeye_seed: np.ndarray,
     board_seed: np.ndarray,
     options: OptimizationOptions,
+    progress_callback: ProgressCallback | None = None,
 ) -> OptimizationResult:
     """粗扫时间后联合优化 ``^tracker T_camera``、固定板和时间偏移。"""
     if len(samples) < 8:
@@ -444,7 +505,7 @@ def optimize_spatiotemporal(
     if len(training_samples) < 4 or not validation_samples:
         raise ValueError("时间块划分后训练或验证样本不足")
     scan_points, scan_seed, scan_time_ms = scan_time_offset(
-        training_samples, timeline, options
+        training_samples, timeline, options, progress_callback
     )
     initial_handeye = scan_seed.tracker_from_camera
     initial_board = scan_seed.world_from_board
@@ -466,8 +527,38 @@ def optimize_spatiotemporal(
     context = ResidualContext(
         tuple(training_samples), timeline, camera, options
     )
+    max_nfev = 2000
+    residual_calls = 0
+
+    def tracked_residuals(
+        parameters: np.ndarray, residual_context: ResidualContext
+    ) -> np.ndarray:
+        """计算残差并按数值差分规模发出近似评估进度。"""
+        nonlocal residual_calls
+        residuals = parameter_residuals(parameters, residual_context)
+        residual_calls += 1
+        if residual_calls == 1 or residual_calls % 14 == 0:
+            _emit_progress(
+                progress_callback,
+                "joint_optimization_evaluation",
+                residual_calls=residual_calls,
+                approx_nfev=(residual_calls + 13) // 14,
+                max_nfev=max_nfev,
+                residual_rms_px=float(
+                    np.sqrt(np.mean(np.square(residuals)))
+                ),
+            )
+        return residuals
+
+    _emit_progress(
+        progress_callback,
+        "joint_optimization_start",
+        training_samples=len(training_samples),
+        validation_samples=len(validation_samples),
+        max_nfev=max_nfev,
+    )
     optimized = least_squares(
-        parameter_residuals,
+        tracked_residuals,
         initial,
         args=(context,),
         method="trf",
@@ -475,7 +566,16 @@ def optimize_spatiotemporal(
         f_scale=1.0,
         bounds=(lower_bounds, upper_bounds),
         x_scale="jac",
-        max_nfev=2000,
+        max_nfev=max_nfev,
+    )
+    _emit_progress(
+        progress_callback,
+        "joint_optimization_complete",
+        residual_calls=residual_calls,
+        nfev=int(optimized.nfev),
+        status=int(optimized.status),
+        message=str(optimized.message),
+        cost=float(optimized.cost),
     )
     if not optimized.success:
         raise RuntimeError(f"时空联合优化失败: {optimized.message}")

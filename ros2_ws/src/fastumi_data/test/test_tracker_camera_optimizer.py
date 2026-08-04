@@ -22,6 +22,7 @@ from fastumi_data.tracker_camera_optimizer import (
     OptimizationOptions,
     _samples_valid_for_full_search,
     optimize_spatiotemporal,
+    scan_time_offset,
     split_temporal_blocks,
 )
 from fastumi_data.tracker_camera_pnp import project_fisheye_points
@@ -223,9 +224,33 @@ def test_temporal_split_keeps_neighboring_frames_in_same_partition() -> None:
     assert sorted(train + validation) == list(range(100))
 
 
+def test_time_offset_scan_reports_every_candidate() -> None:
+    """时间粗扫必须逐点报告进度和当前最佳偏移。"""
+    fixture = make_spatiotemporal_fixture(18.0, 0.1)
+    options = OptimizationOptions(-2.0, 2.0, 2.0, 20.0, 0.2)
+    events = []
+
+    scan_time_offset(
+        fixture.samples,
+        fixture.timeline,
+        options,
+        progress_callback=lambda stage, details: events.append(
+            (stage, details)
+        ),
+    )
+
+    assert len(events) == 3
+    assert all(stage == "time_offset_scan" for stage, _ in events)
+    assert events[0][1]["completed"] == 1
+    assert events[-1][1]["completed"] == 3
+    assert events[-1][1]["total"] == 3
+    assert events[-1][1]["best_offset_ms"] is not None
+
+
 def test_joint_optimizer_recovers_extrinsic_and_time_offset() -> None:
     """合成鱼眼角点应恢复外参和 18 ms 时间偏移。"""
     fixture = make_spatiotemporal_fixture(18.0, 0.15)
+    events = []
     result = optimize_spatiotemporal(
         fixture.samples,
         fixture.timeline,
@@ -233,6 +258,9 @@ def test_joint_optimizer_recovers_extrinsic_and_time_offset() -> None:
         fixture.handeye_seed,
         fixture.board_seed,
         OptimizationOptions(-50.0, 50.0, 2.0, 20.0, 0.2),
+        progress_callback=lambda stage, details: events.append(
+            (stage, details)
+        ),
     )
     translation_mm, rotation_deg = transform_error(
         fixture.tracker_from_camera, result.tracker_from_camera
@@ -246,6 +274,18 @@ def test_joint_optimizer_recovers_extrinsic_and_time_offset() -> None:
         atol=1.0e-10,
     )
     assert set(result.train_indices).isdisjoint(result.validation_indices)
+    stages = [stage for stage, _ in events]
+    assert "joint_optimization_start" in stages
+    assert "joint_optimization_evaluation" in stages
+    assert "joint_optimization_complete" in stages
+    completion = next(
+        details
+        for stage, details in events
+        if stage == "joint_optimization_complete"
+    )
+    assert completion["nfev"] > 0
+    assert isinstance(completion["status"], int)
+    assert completion["message"]
 
 
 def test_optimizer_is_robust_to_five_percent_outlier_corners() -> None:
