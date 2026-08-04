@@ -72,6 +72,35 @@ ros2 run fastumi_data calibrate_tracker_camera \
   --detect-only
 ```
 
+`calibrate_tracker_camera` 在检测预检模式下支持以下参数。表中标记为“预检不使用”的参数
+仍可被命令行解析，但只在完整标定模式中生效；带“必填”的参数没有默认值。
+
+| 参数名 | 默认值 | 参数说明 |
+| --- | --- | --- |
+| `--bag` | 无（必填） | ROS 2 MCAP/bag 数据路径。预检从其中读取图像。 |
+| `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，用于加载 `pinhole + equidistant` 模型。 |
+| `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径。 |
+| `--output-dir` | 无（必填） | 检测统计和叠加图的输出目录。 |
+| `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
+| `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 图像话题名称。预检从该话题读取图像。 |
+| `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题。预检不使用。 |
+| `--status-topic` | `/vive_tracker/status` | Tracker 状态话题。预检不使用。 |
+| `--tag-family` | `tag36h11` | AprilTag 标签族，必须与目标板配置和实际打印板一致。 |
+| `--frame-stride` | `2` | 图像抽帧步长；每隔指定帧数处理一帧。 |
+| `--min-tags` | `6` | 一帧被视为有效检测所需的最少标签数。 |
+| `--max-pose-gap-ms` | `50.0` | Tracker 位姿插值允许的最大间隔，单位为毫秒。预检不使用。 |
+| `--time-offset-min-ms` | `-100.0` | 时间偏移搜索下界，单位为毫秒。预检不使用。 |
+| `--time-offset-max-ms` | `100.0` | 时间偏移搜索上界，单位为毫秒。预检不使用。 |
+| `--time-offset-step-ms` | `2.0` | 时间偏移粗搜索步长，单位为毫秒。预检不使用。 |
+| `--minimum-valid-frames` | `30` | 完整标定的最少有效帧数。预检使用固定的至少 20 帧样本要求，不读取此参数。 |
+| `--validation-median-max-px` | `1.0` | 验证集重投影误差 median 质量门限，单位为像素。预检不使用。 |
+| `--validation-p95-max-px` | `2.0` | 验证集重投影误差 P95 质量门限，单位为像素。预检不使用。 |
+| `--closure-translation-max-mm` | `5.0` | 固定板闭环平移 RMSE 质量门限，单位为毫米。预检不使用。 |
+| `--closure-rotation-max-deg` | `1.0` | 固定板闭环旋转 RMSE 质量门限，单位为度。预检不使用。 |
+| `--progress-interval-seconds` | `30.0` | 控制台和日志进度心跳间隔，单位为秒。 |
+| `--detect-only` | 关闭 | 启用检测预检；本节命令必须指定。 |
+| `--allow-high-residual` | 关闭 | 允许质量门失败时返回零退出码。预检失败诊断仍会保留，通常无需指定。 |
+
 工具会扫描完整时间段，并以固定随机种子保留 20 帧 reservoir 样本。预检失败时仍会
 写出 `detection_summary.json` 和已有叠加图，进程退出码为 2。开始完整求解前应确认：
 
@@ -98,6 +127,35 @@ ros2 run fastumi_data calibrate_tracker_camera \
   --time-offset-max-ms 100 \
   --time-offset-step-ms 2
 ```
+
+`calibrate_tracker_camera` 在完整标定模式下支持以下参数。带“必填”的参数没有默认值；
+未指定 `--settings-config` 时直接使用下表默认值。
+
+| 参数名 | 默认值 | 参数说明 |
+| --- | --- | --- |
+| `--bag` | 无（必填） | ROS 2 MCAP/bag 数据路径；读取图像、Tracker 位姿和状态。 |
+| `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，加载 `pinhole + equidistant` 模型。 |
+| `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径，提供网格尺寸和标签几何。 |
+| `--output-dir` | 无（必填） | 标定 YAML、质量报告、逐帧指标、诊断图和进度日志的输出目录。 |
+| `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
+| `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 图像话题名称。 |
+| `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题名称。 |
+| `--status-topic` | `/vive_tracker/status` | Tracker 状态话题名称；仅使用有效状态的位姿。 |
+| `--tag-family` | `tag36h11` | AprilTag 标签族，必须与目标板配置和实际打印板一致。 |
+| `--frame-stride` | `2` | 图像抽帧步长；每隔指定帧数参与检测和标定。 |
+| `--min-tags` | `6` | 一帧进入 PnP 和后续优化所需的最少有效标签数。 |
+| `--max-pose-gap-ms` | `50.0` | Tracker 位姿插值允许的最大间隔，单位为毫秒；超过该间隔的帧会被拒绝。 |
+| `--time-offset-min-ms` | `-100.0` | 图像与 Tracker 时间偏移搜索下界，单位为毫秒。 |
+| `--time-offset-max-ms` | `100.0` | 图像与 Tracker 时间偏移搜索上界，单位为毫秒。 |
+| `--time-offset-step-ms` | `2.0` | 时间偏移粗搜索步长，单位为毫秒。 |
+| `--minimum-valid-frames` | `30` | 进入完整求解的最少有效标定帧数。 |
+| `--validation-median-max-px` | `1.0` | 验证集重投影误差 median 质量门限，单位为像素。 |
+| `--validation-p95-max-px` | `2.0` | 验证集重投影误差 P95 质量门限，单位为像素。 |
+| `--closure-translation-max-mm` | `5.0` | 固定板闭环平移 RMSE 质量门限，单位为毫米。 |
+| `--closure-rotation-max-deg` | `1.0` | 固定板闭环旋转 RMSE 质量门限，单位为度。 |
+| `--progress-interval-seconds` | `30.0` | 控制台和日志进度心跳间隔，单位为秒。 |
+| `--detect-only` | 关闭 | 仅执行检测预检；完整标定命令不应指定。 |
+| `--allow-high-residual` | 关闭 | 质量门失败时仍以零退出码结束，但报告中的 `accepted` 和失败指标保持真实状态。 |
 
 流水线依次执行两遍 MCAP 读取、状态过滤、AprilGrid 检测、鱼眼 IPPE PnP、运动
 去冗余、五算法 Hand-Eye 初值、时间偏移粗扫描、13 参数原始鱼眼角点联合优化和报告
