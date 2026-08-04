@@ -22,3 +22,6 @@ dataset/
 *.mp4
 *.avi
 log
+findings.md
+progress.md
+task_plan.md
