@@ -94,7 +94,7 @@ class OpenCvAprilTagDetector:
         parameters.errorCorrectionRate = 1.0
         parameters.perspectiveRemovePixelPerCell = 16
         parameters.perspectiveRemoveIgnoredMarginPerCell = 0.25
-        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_CONTOUR
         dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
         dictionary.maxCorrectionBits = 3
         self._detector = cv2.aruco.ArucoDetector(dictionary, parameters)
@@ -107,7 +107,7 @@ class OpenCvAprilTagDetector:
             "error_correction_rate": 1.0,
             "perspective_remove_pixel_per_cell": 16,
             "perspective_remove_ignored_margin_per_cell": 0.25,
-            "corner_refinement": "subpix",
+            "corner_refinement": "contour",
         }
 
     def detect(self, gray_image: np.ndarray) -> Sequence[RawTagDetection]:

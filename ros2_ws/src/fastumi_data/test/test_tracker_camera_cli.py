@@ -146,7 +146,7 @@ def test_detect_only_failure_still_writes_diagnostics(
             "error_correction_rate": 1.0,
             "perspective_remove_pixel_per_cell": 16,
             "perspective_remove_ignored_margin_per_cell": 0.25,
-            "corner_refinement": "subpix",
+            "corner_refinement": "contour",
         },
         detect=lambda image: [
             RawTagDetection(

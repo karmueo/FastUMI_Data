@@ -82,6 +82,9 @@ def test_opencv_detector_decodes_tag36h11() -> None:
     detections = OpenCvAprilTagDetector("tag36h11").detect(canvas)
     assert [item.tag_id for item in detections] == [5]
     assert detections[0].corners_px.shape == (4, 2)
+    assert OpenCvAprilTagDetector("tag36h11").settings[
+        "corner_refinement"
+    ] == "contour"
 
 
 def test_opencv_detector_corrects_one_bit_damage() -> None:

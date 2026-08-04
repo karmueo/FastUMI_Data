@@ -13,8 +13,10 @@
   `device_connected=true`、`pose_valid=true`、`tracking_state=3`。
 - 相机模型：`docs/kalibr_data-camchain-imucam.yaml` 中的
   `pinhole + equidistant` 参数。bag 内 `CameraInfo` 不参与求解。
-- 标定板：`docs/april_6x6.yaml`，6×6、`tagSize=0.055 m`、
-  `tagSpacing=0.3`、`tag36h11`、ID 0–35。
+- 标定板：`docs/april_6x6.yaml`，6×6、`tagSize=0.052 m`、
+  `tagSpacing=0.3725`、`tag36h11`、ID 0–35。间距比由 2026-07-31 实际板图像的
+  66 个跨时段轮廓观测复核，标签边长由 Tracker 米制闭环尺度扫描得到；打印或更换
+  目标板后必须重新实测。
 
 旧的 `docs/handeye_result.txt` 仅供结果对比，求解器不会把它作为初值。
 

@@ -63,7 +63,8 @@ def test_load_checked_camera_and_target_files() -> None:
     assert camera.resolution == (1280, 1280)
     assert camera.distortion_model == "equidistant"
     assert camera.k[0, 0] == pytest.approx(397.07575683833136)
-    assert target.tag_size_m == pytest.approx(0.055)
+    assert target.tag_size_m == pytest.approx(0.052)
+    assert target.tag_spacing == pytest.approx(0.3725)
     assert target.tag_family == "tag36h11"
 
 
