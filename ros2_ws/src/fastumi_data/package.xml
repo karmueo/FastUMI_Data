@@ -14,7 +14,9 @@
   <exec_depend>fastumi_interfaces</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>python3-h5py</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>

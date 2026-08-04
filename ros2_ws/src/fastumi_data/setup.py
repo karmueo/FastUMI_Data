@@ -36,6 +36,7 @@ setup(
             "record_session = fastumi_data.session_recorder:main",
             "convert_mcap = fastumi_data.mcap_converter:main",
             "calibrate_tracker_tcp = fastumi_data.calibration_cli:main",
+            "calibrate_tracker_camera = fastumi_data.tracker_camera_cli:main",
         ],
     },
 )
