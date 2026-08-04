@@ -1,0 +1,127 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# XV RGB 鱼眼原始/注册图像单目惯性配置。
+# 相机内参、equidistant 畸变、T_cam_imu 和时间偏移来自：
+# $HOME/ros2_ws/src/xv_sdk_ros2/config/kalibr_data-camchain-imucam.yaml
+# IMU 噪声参数来自配套 Allan 标定结果；运行频率和队列参数属于 ROS wrapper 调优值。
+#--------------------------------------------------------------------------------------------
+# 配置文件格式版本，ORB-SLAM3 用于识别当前 YAML 配置格式。
+File.version: "1.0"
+
+# 相机模型类型；XV RGB 鱼眼相机使用 ORB-SLAM3 的 Kannala-Brandt 鱼眼模型。
+Camera.type: "KannalaBrandt8"
+
+# 相机 x 方向焦距 fx，单位为像素；来自 Kalibr intrinsics 的第 1 个值。
+Camera1.fx: 397.07575683833136
+# 相机 y 方向焦距 fy，单位为像素；来自 Kalibr intrinsics 的第 2 个值。
+Camera1.fy: 397.07575683833136
+# 主点 x 坐标 cx，单位为像素；来自 Kalibr intrinsics 的第 3 个值。
+Camera1.cx: 637.7723482481603
+# 主点 y 坐标 cy，单位为像素；来自 Kalibr intrinsics 的第 4 个值。
+Camera1.cy: 640.0889202000565
+
+# 鱼眼畸变参数 k1；来自 Kalibr equidistant distortion_coeffs 的第 1 个值。
+Camera1.k1: 0.0817184405261036
+# 鱼眼畸变参数 k2；来自 Kalibr equidistant distortion_coeffs 的第 2 个值。
+Camera1.k2: -0.017473874510500673
+# 鱼眼畸变参数 k3；来自 Kalibr equidistant distortion_coeffs 的第 3 个值。
+Camera1.k3: 0.004642522742384059
+# 鱼眼畸变参数 k4；来自 Kalibr equidistant distortion_coeffs 的第 4 个值。
+Camera1.k4: -0.0031138505924389118
+
+# 图像宽度，单位为像素；与 Kalibr resolution 和 XV RGB 图像输出一致。
+Camera.width: 1280
+# 图像高度，单位为像素；与 Kalibr resolution 和 XV RGB 图像输出一致。
+Camera.height: 1280
+# ORB-SLAM3 内部处理图像宽度，单位为像素；用于降低 1280x1280 输入的实时计算负载。
+Camera.newWidth: 960
+# ORB-SLAM3 内部处理图像高度，单位为像素；保持与原图相同宽高比，内部会同步缩放相机内参。
+Camera.newHeight: 960
+# 图像帧率，单位为 Hz；ORB-SLAM3 新版 Settings 解析要求该字段为整数。
+Camera.fps: 15
+
+# 图像颜色通道顺序标志；当前 /rgb/image 使用 bgr8 编码，因此填写 0。
+Camera.RGB: 0
+
+# ROS wrapper IMU 时间戳固定偏移，单位为秒。
+# Kalibr time shift 定义为 t_imu = t_cam + shift；wrapper 对 IMU 时间戳执行 imu_time += offset，
+# 因此这里取 Kalibr shift 的相反数，把 IMU 时间戳对齐到相机时间。
+ROS.ImuTimeOffsetSec: -0.005089461604383672
+
+# ROS wrapper 主动送入 SLAM 的目标图像帧率，单位为 Hz；用于匹配 0709 bag 的稳定处理频率。
+ROS.TargetFps: 15
+# ROS wrapper 图像缓存队列最大容量；较小队列让跟踪线程落后时优先使用较新的图像。
+ROS.MaxImageQueueSize: 2
+
+# 相机系到机体系（IMU）的外参，对应 ORB-SLAM3 使用的 T_b_c。
+# Kalibr T_cam_imu 满足 p_cam = T_cam_imu * p_imu，写入 IMU.T_b_c1 前需要取逆。
+IMU.T_b_c1: !!opencv-matrix
+   # 外参矩阵行数，固定为 4。
+   rows: 4
+   # 外参矩阵列数，固定为 4。
+   cols: 4
+   # OpenCV 矩阵元素类型；f 表示 32 位浮点数。
+   dt: f
+   # 4x4 齐次变换矩阵，按行展开；前三行是旋转和平移，最后一行为 [0, 0, 0, 1]。
+   data: [0.999729781341468, 0.00969564125634819, -0.0211272061467728, -0.0200285583895465,
+          -0.0092884083006446, 0.99977080554486, 0.0192889048787812, 0.0107219204777111,
+          0.0213093822102039, -0.0190874545398372, 0.999590705893672, 0.0204154259017981,
+          0.0, 0.0, 0.0, 1.0]
+
+# 跟踪丢失时是否强制插入关键帧；当前保持 0，使用 ORB-SLAM3 默认惯性初始化行为。
+IMU.InsertKFsWhenLost: 0
+
+# 低运动惯性初始化策略；启用后在 BA2 完成前延后低运动触发的 active map reset。
+IMU.DeferLowMotionReset: 1
+
+# 陀螺仪白噪声密度，单位为 rad/s/sqrt(Hz)；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.NoiseGyro: 6.342105454949378e-05
+# 加速度计白噪声密度，单位为 m/s^2/sqrt(Hz)；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.NoiseAcc: 0.0016827827305701717
+# 陀螺仪随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.GyroWalk: 4.2371968480801686e-06
+# 加速度计随机游走，单位按 ORB-SLAM3/Kalibr IMU 模型使用；来自 xv_sdk_ros2/config/imu.yaml。
+IMU.AccWalk: 5.235024282770444e-05
+# IMU 发布频率，单位为 Hz；来自 xv_sdk_ros2/config/imu.yaml 的 update_rate。
+IMU.Frequency: 493.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters.
+#--------------------------------------------------------------------------------------------
+# 每帧提取的 ORB 特征点数量；用于 960x960 输入下提高单目惯性初始化稳定性。
+ORBextractor.nFeatures: 1200
+# 图像金字塔相邻层缩放因子；当前保持 ORB-SLAM3 常用值 1.2。
+ORBextractor.scaleFactor: 1.2
+# 图像金字塔层数；当前保持模板值 8。
+ORBextractor.nLevels: 8
+# FAST 初始阈值；值越大，提取的角点更强但数量可能减少。
+ORBextractor.iniThFAST: 20
+# FAST 最小阈值；初始阈值提取不足时使用该阈值补充特征。
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters.
+#--------------------------------------------------------------------------------------------
+# Pangolin viewer 中关键帧相机模型的显示尺寸。
+Viewer.KeyFrameSize: 0.05
+# Pangolin viewer 中关键帧相机模型线宽。
+Viewer.KeyFrameLineWidth: 1.0
+# Pangolin viewer 中共视图/图优化连线宽度。
+Viewer.GraphLineWidth: 0.9
+# Pangolin viewer 中地图点显示大小。
+Viewer.PointSize: 2.0
+# Pangolin viewer 中当前相机模型的显示尺寸。
+Viewer.CameraSize: 0.08
+# Pangolin viewer 中当前相机模型线宽。
+Viewer.CameraLineWidth: 3.0
+# Pangolin viewer 初始观察位置 x 坐标。
+Viewer.ViewpointX: 0.0
+# Pangolin viewer 初始观察位置 y 坐标。
+Viewer.ViewpointY: -0.7
+# Pangolin viewer 初始观察位置 z 坐标。
+Viewer.ViewpointZ: -3.5
+# Pangolin viewer 初始观察焦距参数。
+Viewer.ViewpointF: 500.0
+# Pangolin viewer 图像显示缩放比例。
+Viewer.imageViewScale: 0.8
