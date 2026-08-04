@@ -12,6 +12,7 @@ from fastumi_data.tracker_camera_bag import ImageFrame
 from fastumi_data.tracker_camera_config import AprilGridSpec
 from fastumi_data.tracker_camera_cli import (
     PipelineOutcome,
+    _collect_samples,
     _run_detection_only,
     apply_settings_file,
     build_argument_parser,
@@ -199,3 +200,60 @@ def test_full_mode_insufficient_frames_writes_failure_summary(
     assert summary["stage"] == "sample_collection"
     assert summary["counters"]["decoded"] == 7
     assert "有效标定帧" in summary["failure"]
+
+
+def test_collection_checks_configured_offset_status_window(
+    monkeypatch,
+) -> None:
+    """单侧偏移搜索应检查配对窗口，不能按图像原时刻提前拒绝。"""
+    frame = ImageFrame(1_000_000_000, 1_000_000_000, np.zeros((4, 4, 3)))
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.iter_image_frames",
+        lambda *args: iter([frame]),
+    )
+    checked_intervals = []
+
+    def valid_interval(samples, start_ns, end_ns, maximum_delta_ms, timestamps):
+        """记录采样阶段使用的状态时间窗口。"""
+        checked_intervals.append((start_ns, end_ns))
+        return True
+
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.tracker_status_valid_for_interval",
+        valid_interval,
+    )
+    observation = SimpleNamespace(
+        object_points_m=np.zeros((4, 3)),
+        image_points_px=np.zeros((4, 2)),
+        tag_count=1,
+    )
+    estimate = SimpleNamespace(camera_from_board=np.eye(4))
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.build_aprilgrid_observation",
+        lambda *args: observation,
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.estimate_camera_from_board",
+        lambda *args: estimate,
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.interpolate_world_from_tracker",
+        lambda *args: (np.eye(4), 1.0),
+    )
+    arguments = SimpleNamespace(
+        bag="unused", image_topic="/camera/image", frame_stride=1,
+        max_pose_gap_ms=50.0, min_tags=1,
+        time_offset_min_ms=20.0, time_offset_max_ms=60.0,
+    )
+    timeline = SimpleNamespace(
+        poses=(object(), object()), statuses=(object(),),
+        pose_timestamps_ns=np.asarray([0, 2_000_000_000]),
+        status_timestamps_ns=np.asarray([1_020_000_000]),
+    )
+    samples, _, _, _, counters = _collect_samples(
+        arguments, SimpleNamespace(detect=lambda image: []),
+        SimpleNamespace(), SimpleNamespace(), timeline,
+    )
+    assert len(samples) == 1
+    assert counters["status_rejected"] == 0
+    assert checked_intervals == [(1_020_000_000, 1_060_000_000)]

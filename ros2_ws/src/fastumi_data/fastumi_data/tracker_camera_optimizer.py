@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation
 from fastumi_data.tracker_camera_bag import (
     TrackerTimeline,
     interpolate_world_from_tracker,
-    tracker_status_valid_at,
+    tracker_status_valid_for_interval,
 )
 from fastumi_data.tracker_camera_config import FisheyeCameraModel
 from fastumi_data.tracker_camera_handeye import (
@@ -337,27 +337,12 @@ def _tracker_status_valid_for_interval(
     """检查偏移区间端点和区间内全部 Tracker 状态。"""
     if not timeline.statuses:
         return True
-    timestamps = timeline.status_timestamps_ns
-    if not tracker_status_valid_at(
+    return tracker_status_valid_for_interval(
         timeline.statuses,
         start_ns,
-        maximum_delta_ms,
-        timestamps,
-    ):
-        return False
-    if not tracker_status_valid_at(
-        timeline.statuses,
         end_ns,
         maximum_delta_ms,
-        timestamps,
-    ):
-        return False
-    first = int(np.searchsorted(timestamps, start_ns, side="left"))
-    last = int(np.searchsorted(timestamps, end_ns, side="right"))
-    return all(
-        sample.device_connected and sample.pose_valid
-        and sample.tracking_state == 3
-        for sample in timeline.statuses[first:last]
+        timeline.status_timestamps_ns,
     )
 
 

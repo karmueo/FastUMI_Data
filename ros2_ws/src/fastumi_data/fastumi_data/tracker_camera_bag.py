@@ -294,3 +294,42 @@ def tracker_status_valid_at(
         and sample.pose_valid
         and sample.tracking_state == 3
     )
+
+
+def tracker_status_valid_for_interval(
+    samples: Sequence[TrackerStatusSample],
+    start_ns: int,
+    end_ns: int,
+    maximum_delta_ms: float,
+    timestamps_ns: np.ndarray | None = None,
+) -> bool:
+    """检查区间端点可配对，并要求区间内全部 Tracker 状态有效。"""
+    if start_ns > end_ns:
+        raise ValueError("Tracker 状态区间起点不能晚于终点")
+    if not samples:
+        return False
+    if timestamps_ns is None:
+        timestamps = np.fromiter(
+            (sample.timestamp_ns for sample in samples), dtype=np.int64
+        )
+        if np.any(np.diff(timestamps) <= 0):
+            raise ValueError("Tracker status 时间戳必须严格递增")
+    else:
+        timestamps = np.asarray(timestamps_ns, dtype=np.int64)
+        if timestamps.shape != (len(samples),):
+            raise ValueError("Tracker status 时间戳缓存长度不匹配")
+    for target_ns in (start_ns, end_ns):
+        if not tracker_status_valid_at(
+            samples,
+            target_ns,
+            maximum_delta_ms,
+            timestamps,
+        ):
+            return False
+    first = int(np.searchsorted(timestamps, start_ns, side="left"))
+    last = int(np.searchsorted(timestamps, end_ns, side="right"))
+    return all(
+        sample.device_connected and sample.pose_valid
+        and sample.tracking_state == 3
+        for sample in samples[first:last]
+    )

@@ -20,6 +20,7 @@ from fastumi_data.tracker_camera_bag import (
     iter_image_frames,
     read_tracker_timeline,
     tracker_status_valid_at,
+    tracker_status_valid_for_interval,
 )
 from fastumi_data.tracker_camera_config import (
     CalibrationSettings,
@@ -351,8 +352,15 @@ def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
         arguments.bag, arguments.image_topic, arguments.frame_stride
     ):
         counters["decoded"] += 1
-        if not tracker_status_valid_at(
-            timeline.statuses, frame.timestamp_ns, arguments.max_pose_gap_ms,
+        status_start_ns = frame.timestamp_ns + int(
+            round(arguments.time_offset_min_ms * 1.0e6)
+        )
+        status_end_ns = frame.timestamp_ns + int(
+            round(arguments.time_offset_max_ms * 1.0e6)
+        )
+        if not tracker_status_valid_for_interval(
+            timeline.statuses, status_start_ns, status_end_ns,
+            arguments.max_pose_gap_ms,
             timeline.status_timestamps_ns,
         ):
             counters["status_rejected"] += 1
