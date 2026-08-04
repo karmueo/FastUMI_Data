@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -295,6 +296,10 @@ def _run_detection_only(
         _write_detection_overlay(path, frame, observation)
         paths[f"overlay_{index:03d}"] = path
     tag_ids = [tag for item in observations for tag in item.tag_ids]
+    tag_count_histogram = Counter(
+        observation.tag_count for observation in observations
+    )
+    tag_id_frame_counts = Counter(tag_ids)
     summary = {
         "accepted": not failures,
         "failures": failures,
@@ -305,6 +310,15 @@ def _run_detection_only(
         "tag_family": target.tag_family,
         "tag_id_min": min(tag_ids) if tag_ids else None,
         "tag_id_max": max(tag_ids) if tag_ids else None,
+        "tag_count_histogram": {
+            str(count): tag_count_histogram[count]
+            for count in sorted(tag_count_histogram)
+        },
+        "tag_id_frame_counts": {
+            str(tag_id): tag_id_frame_counts[tag_id]
+            for tag_id in sorted(tag_id_frame_counts)
+        },
+        "detector_settings": dict(detector.settings),
     }
     summary_path = output_dir / "detection_summary.json"
     summary_path.write_text(

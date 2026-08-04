@@ -127,6 +127,13 @@ def test_detect_only_failure_still_writes_diagnostics(
         lambda *args, **kwargs: iter(frames),
     )
     detector = SimpleNamespace(
+        settings={
+            "max_correction_bits": 3,
+            "error_correction_rate": 1.0,
+            "perspective_remove_pixel_per_cell": 16,
+            "perspective_remove_ignored_margin_per_cell": 0.25,
+            "corner_refinement": "subpix",
+        },
         detect=lambda image: [
             RawTagDetection(
                 0,
@@ -156,11 +163,14 @@ def test_detect_only_failure_still_writes_diagnostics(
         AprilGridSpec(6, 6, 0.055, 0.3, "tag36h11"),
     )
     assert outcome.accepted is False
-    summary = outcome.output_paths["detection_summary"].read_text(
-        encoding="utf-8"
+    summary = json.loads(
+        outcome.output_paths["detection_summary"].read_text(encoding="utf-8")
     )
-    assert '"valid_frames": 3' in summary
-    assert "至少 5 帧" in summary
+    assert summary["valid_frames"] == 3
+    assert any("至少 5 帧" in failure for failure in summary["failures"])
+    assert summary["tag_count_histogram"] == {"1": 3}
+    assert summary["tag_id_frame_counts"] == {"0": 3}
+    assert summary["detector_settings"]["max_correction_bits"] == 3
     assert outcome.output_paths["overlay_000"].exists()
 
 
