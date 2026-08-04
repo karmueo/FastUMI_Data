@@ -84,6 +84,48 @@ def test_opencv_detector_decodes_tag36h11() -> None:
     assert detections[0].corners_px.shape == (4, 2)
 
 
+def test_opencv_detector_corrects_one_bit_damage() -> None:
+    """OpenCV 后端应纠正目标板图像中的单个 payload bit 损伤。"""
+    dictionary = cv2.aruco.getPredefinedDictionary(
+        cv2.aruco.DICT_APRILTAG_36h11
+    )
+    marker = cv2.aruco.generateImageMarker(dictionary, 5, 80)
+    marker[20:30, 20:30] = 255 - marker[20:30, 20:30]
+    canvas = np.full((160, 160), 255, dtype=np.uint8)
+    canvas[40:120, 40:120] = marker
+
+    detections = OpenCvAprilTagDetector("tag36h11").detect(canvas)
+
+    assert [item.tag_id for item in detections] == [5]
+
+
+def test_opencv_detector_normalizes_kalibr_corner_order() -> None:
+    """检测角点应归一化为 Kalibr 的左下、右下、右上、左上顺序。"""
+    dictionary = cv2.aruco.getPredefinedDictionary(
+        cv2.aruco.DICT_APRILTAG_36h11
+    )
+    marker = cv2.aruco.generateImageMarker(dictionary, 5, 240)
+    rotated_marker = cv2.rotate(marker, cv2.ROTATE_180)
+    canvas = np.full((320, 320), 255, dtype=np.uint8)
+    canvas[40:280, 40:280] = rotated_marker
+
+    detections = OpenCvAprilTagDetector("tag36h11").detect(canvas)
+
+    assert [item.tag_id for item in detections] == [5]
+    np.testing.assert_allclose(
+        detections[0].corners_px,
+        np.asarray(
+            [
+                [40.0, 279.0],
+                [279.0, 279.0],
+                [279.0, 40.0],
+                [40.0, 40.0],
+            ]
+        ),
+        atol=1.1,
+    )
+
+
 def test_detector_accepts_bgr_and_rejects_unknown_family() -> None:
     """后端应统一 BGR 输入，并明确拒绝不支持的标签族。"""
     dictionary = cv2.aruco.getPredefinedDictionary(

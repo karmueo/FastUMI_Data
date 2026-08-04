@@ -24,7 +24,7 @@ class RawTagDetection:
 
     Attributes:
         tag_id: 标签字典中的整数 ID。
-        corners_px: 左上、右上、右下、左下顺序的 ``(4, 2)`` 像素角点。
+        corners_px: Kalibr 左下、右下、右上、左上顺序的 ``(4, 2)`` 像素角点。
         decision_margin: 检测后端可选的判决裕量。
         hamming: 检测后端可选的汉明纠错位数。
     """
@@ -80,6 +80,7 @@ class TagDetector(Protocol):
 class OpenCvAprilTagDetector:
     """使用 OpenCV ArUco 模块的 AprilTag 字典检测标签。"""
 
+    KALIBR_CORNER_INDICES = np.asarray([1, 0, 3, 2])
     FAMILY_DICTIONARIES = {
         "tag36h11": cv2.aruco.DICT_APRILTAG_36h11,
     }
@@ -90,9 +91,24 @@ class OpenCvAprilTagDetector:
         if dictionary_id is None:
             raise ValueError(f"OpenCV 后端不支持 Tag family: {tag_family}")
         parameters = cv2.aruco.DetectorParameters()
-        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        parameters.errorCorrectionRate = 1.0
+        parameters.perspectiveRemovePixelPerCell = 16
+        parameters.perspectiveRemoveIgnoredMarginPerCell = 0.25
+        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         dictionary = cv2.aruco.getPredefinedDictionary(dictionary_id)
+        dictionary.maxCorrectionBits = 3
         self._detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+
+    @property
+    def settings(self) -> dict[str, object]:
+        """返回影响 AprilTag 解码结果的只读参数快照。"""
+        return {
+            "max_correction_bits": 3,
+            "error_correction_rate": 1.0,
+            "perspective_remove_pixel_per_cell": 16,
+            "perspective_remove_ignored_margin_per_cell": 0.25,
+            "corner_refinement": "subpix",
+        }
 
     def detect(self, gray_image: np.ndarray) -> Sequence[RawTagDetection]:
         """统一 mono8/BGR/BGRA 图像并返回按 ID 排序的检测结果。"""
@@ -119,7 +135,7 @@ class OpenCvAprilTagDetector:
                     tag_id=int(identifier),
                     corners_px=np.asarray(
                         detected_corners, dtype=np.float64
-                    ).reshape(4, 2),
+                    ).reshape(4, 2)[self.KALIBR_CORNER_INDICES],
                     decision_margin=None,
                     hamming=None,
                 )
