@@ -50,6 +50,7 @@ from fastumi_data.tracker_camera_pnp import (
     estimate_camera_from_board,
     project_fisheye_points,
 )
+from fastumi_data.tracker_camera_progress import CalibrationProgressLogger
 from fastumi_data.tracker_camera_report import (
     OverlaySample,
     QualityThresholds,
@@ -66,6 +67,82 @@ class PipelineOutcome:
 
     accepted: bool
     output_paths: dict[str, Path]
+
+
+class _OptimizationProgressAdapter:
+    """把优化器结构化事件转换为面向用户的阶段日志。"""
+
+    def __init__(self, progress: CalibrationProgressLogger) -> None:
+        """保存目标进度记录器并初始化阶段状态。"""
+        self._progress = progress
+        self._stage = ""
+
+    def __call__(self, event: str, details: Mapping[str, object]) -> None:
+        """处理一次粗扫描或联合优化进度事件。"""
+        if event == "time_offset_scan":
+            if self._stage != "time_offset_scan":
+                self._progress.start_stage(
+                    "time_offset_scan", "开始时间偏移粗扫描"
+                )
+                self._stage = "time_offset_scan"
+            completed = int(details["completed"])
+            total = int(details["total"])
+            best_offset = details.get("best_offset_ms")
+            best_text = (
+                "未知" if best_offset is None else f"{float(best_offset):.3f}"
+            )
+            self._progress.update(
+                "时间偏移粗扫描进行中",
+                completed=completed,
+                total=total,
+                force=completed >= total,
+                extra=(
+                    f"offset_ms={float(details['offset_ms']):.3f} | "
+                    f"valid={bool(details['valid'])} | "
+                    f"best_offset_ms={best_text}"
+                ),
+            )
+            if completed >= total:
+                self._progress.finish_stage(
+                    f"时间偏移粗扫描完成，best_offset_ms={best_text}"
+                )
+            return
+        if event == "joint_optimization_start":
+            self._progress.start_stage(
+                "joint_optimization",
+                "开始时空联合优化: "
+                f"training={int(details['training_samples'])}, "
+                f"validation={int(details['validation_samples'])}, "
+                f"max_nfev={int(details['max_nfev'])}",
+            )
+            self._stage = "joint_optimization"
+            return
+        if event == "joint_optimization_evaluation":
+            self._progress.update(
+                "联合优化近似进度",
+                completed=int(details["approx_nfev"]),
+                total=int(details["max_nfev"]),
+                extra=(
+                    "保守上限 ETA 基于 max_nfev | "
+                    f"residual_calls={int(details['residual_calls'])} | "
+                    f"residual_rms_px={float(details['residual_rms_px']):.6f}"
+                ),
+            )
+            return
+        if event == "joint_optimization_complete":
+            self._progress.update(
+                "联合优化器已返回",
+                force=True,
+                extra=(
+                    f"nfev={int(details['nfev'])} | "
+                    f"residual_calls={int(details['residual_calls'])} | "
+                    f"status={int(details['status'])} | "
+                    f"cost={float(details['cost']):.6f}"
+                ),
+            )
+            self._progress.finish_stage(
+                f"联合优化完成: {details['message']}"
+            )
 
 
 def _write_failure_summary(
@@ -90,6 +167,31 @@ def _write_failure_summary(
         encoding="utf-8",
     )
     return PipelineOutcome(False, {"summary": summary_path})
+
+
+def _attach_progress_log(
+    outcome: PipelineOutcome, progress: CalibrationProgressLogger
+) -> PipelineOutcome:
+    """把持久进度日志加入流水线输出路径。"""
+    return PipelineOutcome(
+        outcome.accepted,
+        {**outcome.output_paths, "calibration_log": progress.log_path},
+    )
+
+
+def _logged_failure(
+    progress: CalibrationProgressLogger,
+    output_dir: Path | str,
+    stage: str,
+    failure: str,
+    counters: Mapping[str, int] | None = None,
+) -> PipelineOutcome:
+    """记录失败阶段并生成带日志路径的结构化失败结果。"""
+    progress.start_stage(stage, f"开始检查阶段 {stage}")
+    progress.fail(failure)
+    return _attach_progress_log(
+        _write_failure_summary(output_dir, stage, failure, counters), progress
+    )
 
 
 SETTING_GROUPS = {
@@ -117,6 +219,17 @@ SETTING_GROUPS = {
         "closure_rotation_max_deg": "closure_rotation_max_deg",
     },
 }
+
+
+def _finite_positive_float(value: str) -> float:
+    """解析有限正浮点数，供进度心跳参数使用。"""
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("必须是浮点数") from error
+    if not np.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError("必须是有限正数")
+    return parsed
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -172,6 +285,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--closure-rotation-max-deg", type=float,
         default=defaults.closure_rotation_max_deg,
+    )
+    parser.add_argument(
+        "--progress-interval-seconds",
+        type=_finite_positive_float,
+        default=30.0,
     )
     parser.add_argument("--detect-only", action="store_true")
     parser.add_argument("--allow-high-residual", action="store_true")
@@ -254,6 +372,7 @@ def _run_detection_only(
     arguments: argparse.Namespace,
     detector: OpenCvAprilTagDetector,
     target: Any,
+    progress: CalibrationProgressLogger | None = None,
 ) -> PipelineOutcome:
     """全 bag 检测并用 reservoir 输出 20 帧跨时段预检。"""
     output_dir = Path(arguments.output_dir)
@@ -263,10 +382,20 @@ def _run_detection_only(
     observations = []
     decoded = 0
     rejected = 0
+    if progress is not None:
+        progress.start_stage("detection_only", "开始全 bag AprilGrid 检测预检")
     for frame in iter_image_frames(
         arguments.bag, arguments.image_topic, arguments.frame_stride
     ):
         decoded += 1
+        if progress is not None:
+            progress.update(
+                "AprilGrid 检测预检进行中",
+                extra=(
+                    f"decoded={decoded} | valid={len(observations)} | "
+                    f"rejected={rejected}"
+                ),
+            )
         try:
             observation = build_aprilgrid_observation(
                 frame.timestamp_ns, detector.detect(frame.image), target,
@@ -326,6 +455,16 @@ def _run_detection_only(
         encoding="utf-8",
     )
     paths["detection_summary"] = summary_path
+    if progress is not None:
+        progress.update(
+            "检测预检计数已汇总",
+            force=True,
+            extra=(
+                f"decoded={decoded} | valid={len(observations)} | "
+                f"rejected={rejected}"
+            ),
+        )
+        progress.finish_stage("全 bag AprilGrid 检测预检完成")
     print(json.dumps(summary, ensure_ascii=False))
     return PipelineOutcome(not failures, paths)
 
@@ -350,8 +489,14 @@ def _motion_diverse_indices(transforms: Sequence[np.ndarray]) -> list[int]:
     return selected
 
 
-def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
-                     camera: Any, timeline: Any) -> tuple:
+def _collect_samples(
+    arguments: argparse.Namespace,
+    detector: Any,
+    target: Any,
+    camera: Any,
+    timeline: Any,
+    progress: CalibrationProgressLogger | None = None,
+) -> tuple:
     """第二遍流式执行状态过滤、AprilGrid 检测、PnP 和零偏移插值。"""
     samples = []
     estimates = []
@@ -362,10 +507,22 @@ def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
         "pnp_rejected", "interpolation_rejected",
     )}
     observations = []
+    if progress is not None:
+        progress.start_stage(
+            "sample_collection", "开始解码图像、检测 AprilGrid 并估计 PnP"
+        )
     for frame in iter_image_frames(
         arguments.bag, arguments.image_topic, arguments.frame_stride
     ):
         counters["decoded"] += 1
+        if progress is not None:
+            progress.update(
+                "样本采集进行中",
+                extra=(
+                    f"decoded={counters['decoded']} | valid={len(samples)} | "
+                    f"rejected={sum(counters.values()) - counters['decoded']}"
+                ),
+            )
         status_start_ns = frame.timestamp_ns + int(
             round(arguments.time_offset_min_ms * 1.0e6)
         )
@@ -414,6 +571,15 @@ def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
             validate_tag_family(observations, target, minimum_probe_frames=5)
         if len(overlay_frames) < 5:
             overlay_frames[index] = frame
+    if progress is not None:
+        progress.update(
+            "样本采集计数已汇总",
+            force=True,
+            extra=f"decoded={counters['decoded']} | valid={len(samples)}",
+        )
+        progress.finish_stage(
+            f"样本采集完成: decoded={counters['decoded']}, valid={len(samples)}"
+        )
     return samples, estimates, tracker_poses, overlay_frames, counters
 
 
@@ -479,103 +645,147 @@ def _diagnostics(result: Any, samples: Sequence[Any], estimates: Sequence[Any],
 
 def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
     """执行检测预检或完整 Tracker–鱼眼相机标定流水线。"""
-    if not matplotlib_available():
-        warnings.warn(
-            "缺少 Matplotlib：标定仍会生成 YAML/JSON/CSV，安装后可生成 PNG 诊断图",
-            RuntimeWarning,
-            stacklevel=2,
+    with CalibrationProgressLogger(
+        arguments.output_dir, arguments.progress_interval_seconds
+    ) as progress:
+        try:
+            progress.start_stage("load_inputs", "开始加载配置和标定输入")
+            if not matplotlib_available():
+                warnings.warn(
+                    "缺少 Matplotlib：标定仍会生成 YAML/JSON/CSV，安装后可生成 PNG 诊断图",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            camera = load_kalibr_camera(arguments.camera_config)
+            target = load_aprilgrid(
+                arguments.target_config, arguments.tag_family
+            )
+            detector = OpenCvAprilTagDetector(arguments.tag_family)
+            if arguments.detect_only:
+                progress.finish_stage("配置和检测器加载完成")
+                return _attach_progress_log(
+                    _run_detection_only(arguments, detector, target, progress),
+                    progress,
+                )
+            timeline = read_tracker_timeline(
+                arguments.bag, arguments.tracker_topic,
+                arguments.status_topic,
+            )
+            progress.finish_stage(
+                "配置和 Tracker 时间线加载完成: "
+                f"poses={len(timeline.poses)}, statuses={len(timeline.statuses)}"
+            )
+            samples, estimates, tracker_poses, overlay_frames, counters = (
+                _collect_samples(
+                    arguments, detector, target, camera, timeline, progress
+                )
+            )
+        except DetectionRejected as error:
+            return _logged_failure(
+                progress,
+                arguments.output_dir,
+                "tag_family_validation",
+                str(error),
+            )
+        except KeyboardInterrupt:
+            progress.fail("用户中断标定")
+            raise
+        except Exception as error:
+            progress.fail(f"未处理异常: {error}")
+            raise
+        if len(samples) < arguments.minimum_valid_frames:
+            return _logged_failure(
+                progress,
+                arguments.output_dir,
+                "sample_collection",
+                f"有效标定帧 {len(samples)} 少于 {arguments.minimum_valid_frames}",
+                counters,
+            )
+        progress.start_stage("motion_and_seed", "开始运动去冗余和 Hand-Eye 初值估计")
+        diverse = _motion_diverse_indices(tracker_poses)
+        if len(diverse) < 8:
+            return _logged_failure(
+                progress,
+                arguments.output_dir,
+                "motion_diversity",
+                f"运动去冗余后仅 {len(diverse)} 帧，至少需要 8 帧",
+                counters,
+            )
+        try:
+            seed = select_handeye_seed(solve_handeye_candidates(
+                [tracker_poses[index] for index in diverse],
+                [samples[index].camera_from_board for index in diverse],
+            ))
+        except (HandEyeEstimationError, ValueError) as error:
+            return _logged_failure(
+                progress, arguments.output_dir, "handeye", str(error), counters
+            )
+        progress.finish_stage(
+            "Hand-Eye 初值估计完成: "
+            f"method={seed.method}, diverse_frames={len(diverse)}, "
+            f"translation_rmse_mm={seed.translation_rmse_mm:.6f}, "
+            f"rotation_rmse_deg={seed.rotation_rmse_deg:.6f}"
         )
-    camera = load_kalibr_camera(arguments.camera_config)
-    target = load_aprilgrid(arguments.target_config, arguments.tag_family)
-    detector = OpenCvAprilTagDetector(arguments.tag_family)
-    if arguments.detect_only:
-        return _run_detection_only(arguments, detector, target)
-    timeline = read_tracker_timeline(
-        arguments.bag, arguments.tracker_topic, arguments.status_topic
-    )
-    try:
-        samples, estimates, tracker_poses, overlay_frames, counters = (
-            _collect_samples(arguments, detector, target, camera, timeline)
+        try:
+            result = optimize_spatiotemporal(
+                samples, timeline, camera, seed.tracker_from_camera,
+                seed.world_from_board,
+                OptimizationOptions(
+                    arguments.time_offset_min_ms,
+                    arguments.time_offset_max_ms,
+                    arguments.time_offset_step_ms,
+                    arguments.max_pose_gap_ms,
+                    0.2,
+                ),
+                progress_callback=_OptimizationProgressAdapter(progress),
+            )
+        except KeyboardInterrupt:
+            progress.fail("用户中断标定")
+            raise
+        except (HandEyeEstimationError, RuntimeError, ValueError) as error:
+            return _logged_failure(
+                progress, arguments.output_dir, "optimization", str(error),
+                counters,
+            )
+        progress.start_stage("diagnostics", "开始计算诊断指标和生成标定报告")
+        frame_metrics, overlays = _diagnostics(
+            result, samples, estimates, overlay_frames, timeline, camera,
+            arguments.max_pose_gap_ms,
         )
-    except DetectionRejected as error:
-        return _write_failure_summary(
-            arguments.output_dir,
-            "tag_family_validation",
-            str(error),
+        thresholds = _thresholds(arguments)
+        context = ReportContext(
+            Path(arguments.bag), Path(arguments.camera_config),
+            Path(arguments.target_config), arguments.image_topic,
+            arguments.tracker_topic, arguments.status_topic,
+            arguments.tag_family,
+            {
+                "frame_stride": arguments.frame_stride,
+                "min_tags": arguments.min_tags,
+                "max_pose_gap_ms": arguments.max_pose_gap_ms,
+                "time_offset_min_ms": arguments.time_offset_min_ms,
+                "time_offset_max_ms": arguments.time_offset_max_ms,
+                "time_offset_step_ms": arguments.time_offset_step_ms,
+                "progress_interval_seconds": (
+                    arguments.progress_interval_seconds
+                ),
+            },
+            thresholds, frame_metrics, overlays,
+            (f"阶段计数: {json.dumps(counters, ensure_ascii=False)}",),
         )
-    if len(samples) < arguments.minimum_valid_frames:
-        return _write_failure_summary(
-            arguments.output_dir,
-            "sample_collection",
-            f"有效标定帧 {len(samples)} 少于 {arguments.minimum_valid_frames}",
-            counters,
+        paths = write_calibration_report(arguments.output_dir, result, context)
+        decision = evaluate_quality(result.metrics, thresholds)
+        progress.finish_stage(
+            "诊断和报告生成完成，质量门结果="
+            f"{'通过' if decision.accepted else '未通过'}"
         )
-    diverse = _motion_diverse_indices(tracker_poses)
-    if len(diverse) < 8:
-        return _write_failure_summary(
-            arguments.output_dir,
-            "motion_diversity",
-            f"运动去冗余后仅 {len(diverse)} 帧，至少需要 8 帧",
-            counters,
-        )
-    try:
-        seed = select_handeye_seed(solve_handeye_candidates(
-            [tracker_poses[index] for index in diverse],
-            [samples[index].camera_from_board for index in diverse],
-        ))
-    except (HandEyeEstimationError, ValueError) as error:
-        return _write_failure_summary(
-            arguments.output_dir,
-            "handeye",
-            str(error),
-            counters,
-        )
-    try:
-        result = optimize_spatiotemporal(
-            samples, timeline, camera, seed.tracker_from_camera,
-            seed.world_from_board,
-            OptimizationOptions(
-                arguments.time_offset_min_ms, arguments.time_offset_max_ms,
-                arguments.time_offset_step_ms, arguments.max_pose_gap_ms, 0.2,
-            ),
-        )
-    except (HandEyeEstimationError, RuntimeError, ValueError) as error:
-        return _write_failure_summary(
-            arguments.output_dir,
-            "optimization",
-            str(error),
-            counters,
-        )
-    frame_metrics, overlays = _diagnostics(
-        result, samples, estimates, overlay_frames, timeline, camera,
-        arguments.max_pose_gap_ms,
-    )
-    thresholds = _thresholds(arguments)
-    context = ReportContext(
-        Path(arguments.bag), Path(arguments.camera_config),
-        Path(arguments.target_config), arguments.image_topic,
-        arguments.tracker_topic, arguments.status_topic,
-        arguments.tag_family,
-        {
-            "frame_stride": arguments.frame_stride,
-            "min_tags": arguments.min_tags,
-            "max_pose_gap_ms": arguments.max_pose_gap_ms,
-            "time_offset_min_ms": arguments.time_offset_min_ms,
-            "time_offset_max_ms": arguments.time_offset_max_ms,
-            "time_offset_step_ms": arguments.time_offset_step_ms,
-        },
-        thresholds, frame_metrics, overlays,
-        (f"阶段计数: {json.dumps(counters, ensure_ascii=False)}",),
-    )
-    paths = write_calibration_report(arguments.output_dir, result, context)
-    decision = evaluate_quality(result.metrics, thresholds)
-    print(json.dumps({
-        "accepted": decision.accepted,
-        "failures": list(decision.failures),
-        "counters": counters,
-        "output_paths": {name: str(path) for name, path in paths.items()},
-    }, ensure_ascii=False))
-    return PipelineOutcome(decision.accepted, paths)
+        paths["calibration_log"] = progress.log_path
+        print(json.dumps({
+            "accepted": decision.accepted,
+            "failures": list(decision.failures),
+            "counters": counters,
+            "output_paths": {name: str(path) for name, path in paths.items()},
+        }, ensure_ascii=False))
+        return PipelineOutcome(decision.accepted, paths)
 
 
 def main(argv: list[str] | None = None) -> None:

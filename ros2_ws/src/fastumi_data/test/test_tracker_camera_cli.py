@@ -1,6 +1,7 @@
 """验证 Tracker–鱼眼标定 CLI 参数、设置覆盖和退出码。"""
 
 import argparse
+from io import StringIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from fastumi_data.tracker_camera_bag import ImageFrame
 from fastumi_data.tracker_camera_config import AprilGridSpec
 from fastumi_data.tracker_camera_cli import (
+    _OptimizationProgressAdapter,
     PipelineOutcome,
     _collect_samples,
     _run_detection_only,
@@ -20,6 +22,7 @@ from fastumi_data.tracker_camera_cli import (
     run_calibration,
 )
 from fastumi_data.tracker_camera_detection import RawTagDetection
+from fastumi_data.tracker_camera_progress import CalibrationProgressLogger
 
 
 def minimum_arguments(extra: list[str] | None = None) -> list[str]:
@@ -46,6 +49,17 @@ def test_parser_defaults_match_target_bag_topics() -> None:
     assert arguments.tag_family == "tag36h11"
     assert arguments.frame_stride == 2
     assert arguments.min_tags == 6
+    assert arguments.progress_interval_seconds == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_parser_rejects_invalid_progress_interval(value: str) -> None:
+    """进度心跳间隔必须是有限正数。"""
+    with pytest.raises(SystemExit) as error:
+        build_argument_parser().parse_args(
+            minimum_arguments(["--progress-interval-seconds", value])
+        )
+    assert error.value.code == 2
 
 
 def test_settings_file_overrides_defaults_but_cli_wins(tmp_path: Path) -> None:
@@ -210,6 +224,12 @@ def test_full_mode_insufficient_frames_writes_failure_summary(
     assert summary["stage"] == "sample_collection"
     assert summary["counters"]["decoded"] == 7
     assert "有效标定帧" in summary["failure"]
+    progress_log = outcome.output_paths["calibration_log"]
+    assert progress_log.exists()
+    log_text = progress_log.read_text(encoding="utf-8")
+    assert "stage=load_inputs" in log_text
+    assert "stage=sample_collection" in log_text
+    assert "status=FAILED" in log_text
 
 
 def test_collection_checks_configured_offset_status_window(
@@ -267,3 +287,106 @@ def test_collection_checks_configured_offset_status_window(
     assert len(samples) == 1
     assert counters["status_rejected"] == 0
     assert checked_intervals == [(1_020_000_000, 1_060_000_000)]
+
+
+def test_collection_writes_final_progress_counts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """样本采集结束时应强制输出解码帧数和有效样本数。"""
+    frames = [
+        ImageFrame(index, index, np.zeros((4, 4, 3)))
+        for index in range(3)
+    ]
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.iter_image_frames",
+        lambda *args: iter(frames),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.tracker_status_valid_for_interval",
+        lambda *args: True,
+    )
+    observation = SimpleNamespace(
+        object_points_m=np.zeros((4, 3)),
+        image_points_px=np.zeros((4, 2)),
+        tag_count=1,
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.build_aprilgrid_observation",
+        lambda *args: observation,
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.estimate_camera_from_board",
+        lambda *args: SimpleNamespace(camera_from_board=np.eye(4)),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.interpolate_world_from_tracker",
+        lambda *args: (np.eye(4), 1.0),
+    )
+    arguments = SimpleNamespace(
+        bag="unused", image_topic="/camera/image", frame_stride=1,
+        max_pose_gap_ms=50.0, min_tags=1,
+        time_offset_min_ms=-20.0, time_offset_max_ms=20.0,
+    )
+    timeline = SimpleNamespace(
+        poses=(object(), object()), statuses=(object(),),
+        pose_timestamps_ns=np.asarray([0, 10]),
+        status_timestamps_ns=np.asarray([0]),
+    )
+    stream = StringIO()
+    with CalibrationProgressLogger(tmp_path, stream=stream) as progress:
+        samples, _, _, _, counters = _collect_samples(
+            arguments, SimpleNamespace(detect=lambda image: []),
+            SimpleNamespace(), SimpleNamespace(), timeline, progress,
+        )
+
+    output = stream.getvalue()
+    assert len(samples) == 3
+    assert counters["decoded"] == 3
+    assert "stage=sample_collection" in output
+    assert "decoded=3" in output
+    assert "valid=3" in output
+    assert "status=COMPLETED" in output
+
+
+def test_optimization_progress_adapter_reports_exact_and_upper_bound_eta(
+    tmp_path: Path,
+) -> None:
+    """粗扫描应给出精确进度，联合优化应标明 ETA 是保守上限。"""
+    now = [100.0]
+    stream = StringIO()
+    with CalibrationProgressLogger(
+        tmp_path, clock=lambda: now[0], stream=stream
+    ) as progress:
+        adapter = _OptimizationProgressAdapter(progress)
+        adapter("time_offset_scan", {
+            "completed": 1, "total": 5, "offset_ms": -40.0,
+            "valid": True, "best_offset_ms": -40.0,
+        })
+        now[0] += 30.0
+        adapter("time_offset_scan", {
+            "completed": 2, "total": 5, "offset_ms": -20.0,
+            "valid": True, "best_offset_ms": -20.0,
+        })
+        adapter("joint_optimization_start", {
+            "training_samples": 100, "validation_samples": 20,
+            "max_nfev": 2000,
+        })
+        now[0] += 30.0
+        adapter("joint_optimization_evaluation", {
+            "residual_calls": 140, "approx_nfev": 10,
+            "max_nfev": 2000, "residual_rms_px": 1.25,
+        })
+        adapter("joint_optimization_complete", {
+            "residual_calls": 280, "nfev": 20, "status": 2,
+            "message": "converged", "cost": 12.0,
+        })
+
+    output = stream.getvalue()
+    assert "stage=time_offset_scan" in output
+    assert "progress=40.0%" in output
+    assert "best_offset_ms=-20.000" in output
+    assert "stage=joint_optimization" in output
+    assert "近似进度" in output
+    assert "保守上限 ETA" in output
+    assert "nfev=20" in output
+    assert "status=COMPLETED" in output
