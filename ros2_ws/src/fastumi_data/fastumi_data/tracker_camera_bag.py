@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from bisect import bisect_left
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -32,6 +31,30 @@ class TrackerTimeline:
 
     poses: tuple[PoseSample, ...]
     statuses: tuple[TrackerStatusSample, ...]
+    pose_timestamps_ns: np.ndarray = field(
+        init=False, repr=False, compare=False
+    )
+    status_timestamps_ns: np.ndarray = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        """一次性校验时间顺序并缓存只读时间戳数组。"""
+        pose_timestamps = np.fromiter(
+            (sample.timestamp_ns for sample in self.poses), dtype=np.int64
+        )
+        status_timestamps = np.fromiter(
+            (sample.timestamp_ns for sample in self.statuses), dtype=np.int64
+        )
+        for name, timestamps in (
+            ("Tracker pose", pose_timestamps),
+            ("Tracker status", status_timestamps),
+        ):
+            if np.any(np.diff(timestamps) <= 0):
+                raise ValueError(f"{name} 时间戳必须严格递增")
+            timestamps.setflags(write=False)
+        object.__setattr__(self, "pose_timestamps_ns", pose_timestamps)
+        object.__setattr__(self, "status_timestamps_ns", status_timestamps)
 
 
 def _stamp_to_ns(stamp: object) -> int:
@@ -189,7 +212,10 @@ def iter_image_frames(
 
 
 def interpolate_world_from_tracker(
-    samples: Sequence[PoseSample], target_ns: int, max_gap_ms: float
+    samples: Sequence[PoseSample],
+    target_ns: int,
+    max_gap_ms: float,
+    timestamps_ns: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float] | None:
     """在相邻 Tracker 样本之间插值 ``^world T_tracker``。
 
@@ -200,13 +226,17 @@ def interpolate_world_from_tracker(
         return None
     if max_gap_ms <= 0.0:
         raise ValueError("max_gap_ms 必须为正数")
-    timestamps = [sample.timestamp_ns for sample in samples]
-    if any(
-        second <= first
-        for first, second in zip(timestamps[:-1], timestamps[1:])
-    ):
-        raise ValueError("Tracker pose 时间戳必须严格递增")
-    insertion = bisect_left(timestamps, target_ns)
+    if timestamps_ns is None:
+        timestamps = np.fromiter(
+            (sample.timestamp_ns for sample in samples), dtype=np.int64
+        )
+        if np.any(np.diff(timestamps) <= 0):
+            raise ValueError("Tracker pose 时间戳必须严格递增")
+    else:
+        timestamps = np.asarray(timestamps_ns, dtype=np.int64)
+        if timestamps.shape != (len(samples),):
+            raise ValueError("Tracker pose 时间戳缓存长度不匹配")
+    insertion = int(np.searchsorted(timestamps, target_ns, side="left"))
     if insertion == 0 or insertion >= len(samples):
         return None
     first, second = samples[insertion - 1], samples[insertion]
@@ -228,19 +258,24 @@ def tracker_status_valid_at(
     samples: Sequence[TrackerStatusSample],
     target_ns: int,
     maximum_delta_ms: float,
+    timestamps_ns: np.ndarray | None = None,
 ) -> bool:
     """返回最近 Tracker 状态是否足够接近且满足 6DoF 有效条件。"""
     if maximum_delta_ms < 0.0:
         raise ValueError("maximum_delta_ms 不能为负数")
     if not samples:
         return False
-    timestamps = [sample.timestamp_ns for sample in samples]
-    if any(
-        second <= first
-        for first, second in zip(timestamps[:-1], timestamps[1:])
-    ):
-        raise ValueError("Tracker status 时间戳必须严格递增")
-    insertion = bisect_left(timestamps, target_ns)
+    if timestamps_ns is None:
+        timestamps = np.fromiter(
+            (sample.timestamp_ns for sample in samples), dtype=np.int64
+        )
+        if np.any(np.diff(timestamps) <= 0):
+            raise ValueError("Tracker status 时间戳必须严格递增")
+    else:
+        timestamps = np.asarray(timestamps_ns, dtype=np.int64)
+        if timestamps.shape != (len(samples),):
+            raise ValueError("Tracker status 时间戳缓存长度不匹配")
+    insertion = int(np.searchsorted(timestamps, target_ns, side="left"))
     candidates = []
     if insertion < len(samples):
         candidates.append(insertion)

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from fastumi_data.models import PoseSample
+from fastumi_data.models import PoseSample, TrackerStatusSample
 from fastumi_data.pose_math import pose_to_matrix
 from fastumi_data.tracker_camera_bag import (
     TrackerTimeline,
@@ -20,6 +20,7 @@ from fastumi_data.tracker_camera_config import (
 from fastumi_data.tracker_camera_optimizer import (
     CalibrationSample,
     OptimizationOptions,
+    _samples_valid_for_full_search,
     optimize_spatiotemporal,
     split_temporal_blocks,
 )
@@ -186,6 +187,25 @@ def transform_error(
             )
         ),
     )
+
+
+def test_full_search_rejects_status_failure_inside_offset_window() -> None:
+    """偏移搜索窗口内出现无效状态时，该图像不能进入联合优化。"""
+    fixture = make_spatiotemporal_fixture(18.0, 0.0)
+    statuses = []
+    rejected_timestamp_ns = fixture.samples[10].timestamp_ns
+    for pose in fixture.timeline.poses:
+        is_valid = abs(pose.timestamp_ns - rejected_timestamp_ns) > 40_000_000
+        statuses.append(
+            TrackerStatusSample(pose.timestamp_ns, True, is_valid, 3)
+        )
+    timeline = TrackerTimeline(fixture.timeline.poses, tuple(statuses))
+    _, indices = _samples_valid_for_full_search(
+        fixture.samples,
+        timeline,
+        OptimizationOptions(-50.0, 50.0, 2.0, 20.0, 0.2),
+    )
+    assert 10 not in indices
 
 
 def test_temporal_split_keeps_neighboring_frames_in_same_partition() -> None:

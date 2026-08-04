@@ -1,6 +1,7 @@
 """验证 Tracker–鱼眼标定 CLI 参数、设置覆盖和退出码。"""
 
 import argparse
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from fastumi_data.tracker_camera_cli import (
     apply_settings_file,
     build_argument_parser,
     main,
+    run_calibration,
 )
 from fastumi_data.tracker_camera_detection import RawTagDetection
 
@@ -159,3 +161,41 @@ def test_detect_only_failure_still_writes_diagnostics(
     assert '"valid_frames": 3' in summary
     assert "至少 5 帧" in summary
     assert outcome.output_paths["overlay_000"].exists()
+
+
+def test_full_mode_insufficient_frames_writes_failure_summary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """完整模式样本不足时应写结构化失败摘要，而不抛出异常。"""
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.load_kalibr_camera",
+        lambda path: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.load_aprilgrid",
+        lambda path, family: AprilGridSpec(6, 6, 0.055, 0.3, family),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.OpenCvAprilTagDetector",
+        lambda family: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.read_tracker_timeline",
+        lambda *args: SimpleNamespace(poses=(), statuses=()),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli._collect_samples",
+        lambda *args: ([], [], [], {}, {"decoded": 7}),
+    )
+    output_dir = tmp_path / "report"
+    arguments = build_argument_parser().parse_args(
+        minimum_arguments(["--output-dir", str(output_dir)])
+    )
+    outcome = run_calibration(arguments)
+    assert outcome.accepted is False
+    summary = json.loads(
+        outcome.output_paths["summary"].read_text(encoding="utf-8")
+    )
+    assert summary["stage"] == "sample_collection"
+    assert summary["counters"]["decoded"] == 7
+    assert "有效标定帧" in summary["failure"]

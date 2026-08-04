@@ -15,6 +15,7 @@ from sensor_msgs.msg import Image
 
 from fastumi_data.models import PoseSample, TrackerStatusSample
 from fastumi_data.tracker_camera_bag import (
+    TrackerTimeline,
     image_message_to_frame,
     interpolate_world_from_tracker,
     iter_image_frames,
@@ -63,6 +64,21 @@ def make_two_pose_samples() -> list[PoseSample]:
             Rotation.from_euler("z", 90, degrees=True).as_quat(),
         ),
     ]
+
+
+def test_tracker_timeline_caches_checked_timestamp_arrays() -> None:
+    """时间线应只构建一次只读时间戳缓存，并拒绝乱序输入。"""
+    poses = make_two_pose_samples()
+    statuses = [TrackerStatusSample(100, True, True, 3)]
+    timeline = TrackerTimeline(tuple(poses), tuple(statuses))
+    np.testing.assert_array_equal(
+        timeline.pose_timestamps_ns, [0, 1_000_000_000]
+    )
+    np.testing.assert_array_equal(timeline.status_timestamps_ns, [100])
+    assert timeline.pose_timestamps_ns.flags.writeable is False
+    assert timeline.status_timestamps_ns.flags.writeable is False
+    with pytest.raises(ValueError, match="严格递增"):
+        TrackerTimeline(tuple(reversed(poses)), ())
 
 
 def test_interpolate_world_from_tracker_uses_slerp() -> None:

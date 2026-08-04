@@ -12,10 +12,12 @@ import platform
 from typing import Any, Mapping, Sequence
 
 import cv2
-import matplotlib
-
-matplotlib.use("Agg")
-from matplotlib import pyplot as plt  # noqa: E402
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+except ImportError:
+    plt = None
 import numpy as np
 import scipy
 from scipy.spatial.transform import Rotation
@@ -80,6 +82,11 @@ class VerificationResult:
     valid: bool
     failures: tuple[str, ...]
     metrics: Mapping[str, Any]
+
+
+def matplotlib_available() -> bool:
+    """返回当前环境是否可以生成 Matplotlib 诊断图。"""
+    return plt is not None
 
 
 def evaluate_quality(
@@ -335,6 +342,8 @@ def write_calibration_report(
     destination.mkdir(parents=True, exist_ok=True)
     decision = evaluate_quality(result.metrics, context.thresholds)
     warnings = list(context.warnings)
+    if plt is None:
+        warnings.append("缺少 Matplotlib，已跳过 PNG 诊断图；可安装后重新生成")
     if not context.overlay_samples:
         warnings.append("没有可视化样本，未生成角点叠加图")
     calibration_path = destination / "calibration.yaml"
@@ -409,37 +418,55 @@ def write_calibration_report(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
     )
     _write_frame_metrics(frame_metrics_path, context.frame_metrics)
-    _write_time_offset_plot(time_offset_path, result)
-    _write_residual_plot(residual_path, result, context.frame_metrics)
     paths = {
         "calibration": calibration_path,
         "summary": summary_path,
         "frame_metrics": frame_metrics_path,
-        "time_offset_plot": time_offset_path,
-        "residual_plot": residual_path,
     }
-    for index, sample in enumerate(context.overlay_samples):
-        overlay_path = destination / f"overlay_{index:03d}.png"
-        _write_overlay(overlay_path, sample)
-        paths[f"overlay_{index:03d}"] = overlay_path
+    if plt is not None:
+        _write_time_offset_plot(time_offset_path, result)
+        _write_residual_plot(residual_path, result, context.frame_metrics)
+        paths["time_offset_plot"] = time_offset_path
+        paths["residual_plot"] = residual_path
+        for index, sample in enumerate(context.overlay_samples):
+            overlay_path = destination / f"overlay_{index:03d}.png"
+            _write_overlay(overlay_path, sample)
+            paths[f"overlay_{index:03d}"] = overlay_path
     return paths
 
 
 def _check_transform_document(
-    name: str, document: Mapping[str, Any], failures: list[str]
+    name: str,
+    document: Mapping[str, Any],
+    failures: list[str],
+    expected_maps_from: str,
+    expected_maps_to: str,
 ) -> np.ndarray | None:
     """复核一个序列化变换的矩阵、旋转和四元数。"""
     try:
         matrix = np.asarray(document["matrix"], dtype=np.float64)
+        translation = np.asarray(document["translation_m"], dtype=np.float64)
         quaternion = np.asarray(
             document["quaternion_xyzw"], dtype=np.float64
         )
+        maps_from = str(document["maps_from"])
+        maps_to = str(document["maps_to"])
     except (KeyError, TypeError, ValueError) as error:
         failures.append(f"{name} 无法解析: {error}")
         return None
     if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
         failures.append(f"{name} matrix 必须是有限 4x4 数组")
         return None
+    if maps_from != expected_maps_from or maps_to != expected_maps_to:
+        failures.append(
+            f"{name} 映射方向应为 {expected_maps_from} 到 {expected_maps_to}"
+        )
+    if not np.allclose(matrix[3], [0.0, 0.0, 0.0, 1.0], atol=1.0e-12):
+        failures.append(f"{name} 齐次末行必须为 [0, 0, 0, 1]")
+    if translation.shape != (3,) or not np.all(np.isfinite(translation)):
+        failures.append(f"{name} 平移字段必须是三个有限数")
+    elif not np.allclose(translation, matrix[:3, 3], atol=1.0e-12):
+        failures.append(f"{name} 平移字段与矩阵不一致")
     rotation = matrix[:3, :3]
     if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1.0e-9):
         failures.append(f"{name} 旋转矩阵不正交")
@@ -474,16 +501,29 @@ def verify_calibration_file(path: str) -> VerificationResult:
         "tracker_from_camera",
         document.get("tracker_from_camera", {}),
         failures,
+        "camera",
+        "tracker",
     )
     camera = _check_transform_document(
         "camera_from_tracker",
         document.get("camera_from_tracker", {}),
         failures,
+        "tracker",
+        "camera",
     )
-    if tracker is not None and camera is not None and not np.allclose(
-        tracker @ camera, np.eye(4), atol=1.0e-9
-    ):
-        failures.append("tracker_from_camera 与 camera_from_tracker 不互逆")
+    _check_transform_document(
+        "world_from_board",
+        document.get("world_from_board", {}),
+        failures,
+        "board",
+        "world",
+    )
+    if tracker is not None and camera is not None:
+        if not (
+            np.allclose(tracker @ camera, np.eye(4), atol=1.0e-9)
+            and np.allclose(camera @ tracker, np.eye(4), atol=1.0e-9)
+        ):
+            failures.append("tracker_from_camera 与 camera_from_tracker 不互逆")
     metrics = document.get("metrics", {})
     if not isinstance(metrics, Mapping):
         failures.append("metrics 必须是映射")

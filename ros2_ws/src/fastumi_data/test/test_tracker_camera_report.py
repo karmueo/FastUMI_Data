@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import yaml
 
+import fastumi_data.tracker_camera_report as report_module
+
 from fastumi_data.pose_math import pose_to_matrix
 from fastumi_data.tracker_camera_optimizer import (
     OptimizationResult,
@@ -186,3 +188,51 @@ def test_report_without_overlays_records_warning(tmp_path: Path) -> None:
     summary = paths["summary"].read_text(encoding="utf-8")
     assert "没有可视化样本" in summary
     assert paths["calibration"].exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("maps_from", "tracker", "映射方向"),
+        ("bottom_row", 0.1, "齐次末行"),
+        ("translation", 9.0, "平移"),
+    ],
+)
+def test_verify_rejects_inconsistent_transform_metadata(
+    tmp_path: Path, field: str, value, message: str
+) -> None:
+    """独立复核应检查方向、齐次末行和冗余平移字段。"""
+    paths = write_calibration_report(
+        tmp_path / "report",
+        make_passing_optimization_result(),
+        make_report_context(tmp_path),
+    )
+    document = yaml.safe_load(paths["calibration"].read_text(encoding="utf-8"))
+    if field == "maps_from":
+        document["tracker_from_camera"]["maps_from"] = value
+    elif field == "bottom_row":
+        document["tracker_from_camera"]["matrix"][3][0] = value
+    else:
+        document["tracker_from_camera"]["translation_m"][0] = value
+    paths["calibration"].write_text(
+        yaml.safe_dump(document, allow_unicode=True), encoding="utf-8"
+    )
+    verification = verify_calibration_file(str(paths["calibration"]))
+    assert verification.valid is False
+    assert any(message in failure for failure in verification.failures)
+
+
+def test_report_without_matplotlib_keeps_text_outputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """缺少 Matplotlib 时仍应生成可复核文本结果并记录提示。"""
+    monkeypatch.setattr(report_module, "plt", None)
+    paths = write_calibration_report(
+        tmp_path / "report",
+        make_passing_optimization_result(),
+        make_report_context(tmp_path),
+    )
+    assert paths["calibration"].exists()
+    assert paths["summary"].exists()
+    assert "time_offset_plot" not in paths
+    assert "缺少 Matplotlib" in paths["summary"].read_text(encoding="utf-8")

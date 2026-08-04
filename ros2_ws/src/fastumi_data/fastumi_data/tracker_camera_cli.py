@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+import warnings
 
 import cv2
 import numpy as np
@@ -32,6 +33,7 @@ from fastumi_data.tracker_camera_detection import (
     validate_tag_family,
 )
 from fastumi_data.tracker_camera_handeye import (
+    HandEyeEstimationError,
     select_handeye_seed,
     solve_handeye_candidates,
 )
@@ -51,6 +53,7 @@ from fastumi_data.tracker_camera_report import (
     QualityThresholds,
     ReportContext,
     evaluate_quality,
+    matplotlib_available,
     write_calibration_report,
 )
 
@@ -61,6 +64,30 @@ class PipelineOutcome:
 
     accepted: bool
     output_paths: dict[str, Path]
+
+
+def _write_failure_summary(
+    output_dir: Path | str,
+    stage: str,
+    failure: str,
+    counters: Mapping[str, int] | None = None,
+) -> PipelineOutcome:
+    """保存流水线中止阶段、原因和计数，供补采与自动化诊断。"""
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "accepted": False,
+        "stage": stage,
+        "failure": failure,
+        "counters": dict(counters or {}),
+        "suggestion": "检查采集覆盖、Tracker 状态和 AprilGrid 可见性后补采",
+    }
+    summary_path = destination / "summary.json"
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return PipelineOutcome(False, {"summary": summary_path})
 
 
 SETTING_GROUPS = {
@@ -325,7 +352,8 @@ def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
     ):
         counters["decoded"] += 1
         if not tracker_status_valid_at(
-            timeline.statuses, frame.timestamp_ns, arguments.max_pose_gap_ms
+            timeline.statuses, frame.timestamp_ns, arguments.max_pose_gap_ms,
+            timeline.status_timestamps_ns,
         ):
             counters["status_rejected"] += 1
             continue
@@ -343,7 +371,10 @@ def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
             counters["pnp_rejected"] += 1
             continue
         interpolation = interpolate_world_from_tracker(
-            timeline.poses, frame.timestamp_ns, arguments.max_pose_gap_ms
+            timeline.poses,
+            frame.timestamp_ns,
+            arguments.max_pose_gap_ms,
+            timeline.pose_timestamps_ns,
         )
         if interpolation is None:
             counters["interpolation_rejected"] += 1
@@ -357,9 +388,10 @@ def _collect_samples(arguments: argparse.Namespace, detector: Any, target: Any,
         estimates.append(estimate)
         tracker_poses.append(interpolation[0])
         observations.append(observation)
+        if len(observations) == 5:
+            validate_tag_family(observations, target, minimum_probe_frames=5)
         if len(overlay_frames) < 5:
             overlay_frames[index] = frame
-    validate_tag_family(observations[:5], target, minimum_probe_frames=5)
     return samples, estimates, tracker_poses, overlay_frames, counters
 
 
@@ -373,8 +405,19 @@ def _diagnostics(result: Any, samples: Sequence[Any], estimates: Sequence[Any],
     overlays = []
     offset_ns = int(round(result.time_offset_ms * 1.0e6))
     for index, (sample, estimate) in enumerate(zip(samples, estimates)):
+        target_ns = sample.timestamp_ns + offset_ns
+        if timeline.statuses and not tracker_status_valid_at(
+            timeline.statuses,
+            target_ns,
+            max_gap_ms,
+            timeline.status_timestamps_ns,
+        ):
+            continue
         interpolation = interpolate_world_from_tracker(
-            timeline.poses, sample.timestamp_ns + offset_ns, max_gap_ms
+            timeline.poses,
+            target_ns,
+            max_gap_ms,
+            timeline.pose_timestamps_ns,
         )
         if interpolation is None:
             continue
@@ -414,6 +457,12 @@ def _diagnostics(result: Any, samples: Sequence[Any], estimates: Sequence[Any],
 
 def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
     """执行检测预检或完整 Tracker–鱼眼相机标定流水线。"""
+    if not matplotlib_available():
+        warnings.warn(
+            "缺少 Matplotlib：标定仍会生成 YAML/JSON/CSV，安装后可生成 PNG 诊断图",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     camera = load_kalibr_camera(arguments.camera_config)
     target = load_aprilgrid(arguments.target_config, arguments.tag_family)
     detector = OpenCvAprilTagDetector(arguments.tag_family)
@@ -422,28 +471,59 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
     timeline = read_tracker_timeline(
         arguments.bag, arguments.tracker_topic, arguments.status_topic
     )
-    samples, estimates, tracker_poses, overlay_frames, counters = (
-        _collect_samples(arguments, detector, target, camera, timeline)
-    )
+    try:
+        samples, estimates, tracker_poses, overlay_frames, counters = (
+            _collect_samples(arguments, detector, target, camera, timeline)
+        )
+    except DetectionRejected as error:
+        return _write_failure_summary(
+            arguments.output_dir,
+            "tag_family_validation",
+            str(error),
+        )
     if len(samples) < arguments.minimum_valid_frames:
-        raise ValueError(
-            f"有效标定帧 {len(samples)} 少于 {arguments.minimum_valid_frames}"
+        return _write_failure_summary(
+            arguments.output_dir,
+            "sample_collection",
+            f"有效标定帧 {len(samples)} 少于 {arguments.minimum_valid_frames}",
+            counters,
         )
     diverse = _motion_diverse_indices(tracker_poses)
     if len(diverse) < 8:
-        raise ValueError(f"运动去冗余后仅 {len(diverse)} 帧，至少需要 8 帧")
-    seed = select_handeye_seed(solve_handeye_candidates(
-        [tracker_poses[index] for index in diverse],
-        [samples[index].camera_from_board for index in diverse],
-    ))
-    result = optimize_spatiotemporal(
-        samples, timeline, camera, seed.tracker_from_camera,
-        seed.world_from_board,
-        OptimizationOptions(
-            arguments.time_offset_min_ms, arguments.time_offset_max_ms,
-            arguments.time_offset_step_ms, arguments.max_pose_gap_ms, 0.2,
-        ),
-    )
+        return _write_failure_summary(
+            arguments.output_dir,
+            "motion_diversity",
+            f"运动去冗余后仅 {len(diverse)} 帧，至少需要 8 帧",
+            counters,
+        )
+    try:
+        seed = select_handeye_seed(solve_handeye_candidates(
+            [tracker_poses[index] for index in diverse],
+            [samples[index].camera_from_board for index in diverse],
+        ))
+    except (HandEyeEstimationError, ValueError) as error:
+        return _write_failure_summary(
+            arguments.output_dir,
+            "handeye",
+            str(error),
+            counters,
+        )
+    try:
+        result = optimize_spatiotemporal(
+            samples, timeline, camera, seed.tracker_from_camera,
+            seed.world_from_board,
+            OptimizationOptions(
+                arguments.time_offset_min_ms, arguments.time_offset_max_ms,
+                arguments.time_offset_step_ms, arguments.max_pose_gap_ms, 0.2,
+            ),
+        )
+    except (HandEyeEstimationError, RuntimeError, ValueError) as error:
+        return _write_failure_summary(
+            arguments.output_dir,
+            "optimization",
+            str(error),
+            counters,
+        )
     frame_metrics, overlays = _diagnostics(
         result, samples, estimates, overlay_frames, timeline, camera,
         arguments.max_pose_gap_ms,

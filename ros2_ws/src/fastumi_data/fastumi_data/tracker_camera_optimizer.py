@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation
 from fastumi_data.tracker_camera_bag import (
     TrackerTimeline,
     interpolate_world_from_tracker,
+    tracker_status_valid_at,
 )
 from fastumi_data.tracker_camera_config import FisheyeCameraModel
 from fastumi_data.tracker_camera_handeye import (
@@ -228,6 +229,7 @@ def parameter_residuals(
             context.timeline.poses,
             sample.timestamp_ns + time_offset_ns,
             context.options.max_pose_gap_ms,
+            context.timeline.pose_timestamps_ns,
         )
         if interpolation is None:
             raise RuntimeError(
@@ -278,6 +280,7 @@ def scan_time_offset(
                 timeline.poses,
                 sample.timestamp_ns + offset_ns,
                 options.max_pose_gap_ms,
+                timeline.pose_timestamps_ns,
             )
             if interpolation is None:
                 break
@@ -325,6 +328,39 @@ def scan_time_offset(
     return scan_points, best_candidate, best_point.time_offset_ms
 
 
+def _tracker_status_valid_for_interval(
+    timeline: TrackerTimeline,
+    start_ns: int,
+    end_ns: int,
+    maximum_delta_ms: float,
+) -> bool:
+    """检查偏移区间端点和区间内全部 Tracker 状态。"""
+    if not timeline.statuses:
+        return True
+    timestamps = timeline.status_timestamps_ns
+    if not tracker_status_valid_at(
+        timeline.statuses,
+        start_ns,
+        maximum_delta_ms,
+        timestamps,
+    ):
+        return False
+    if not tracker_status_valid_at(
+        timeline.statuses,
+        end_ns,
+        maximum_delta_ms,
+        timestamps,
+    ):
+        return False
+    first = int(np.searchsorted(timestamps, start_ns, side="left"))
+    last = int(np.searchsorted(timestamps, end_ns, side="right"))
+    return all(
+        sample.device_connected and sample.pose_valid
+        and sample.tracking_state == 3
+        for sample in timeline.statuses[first:last]
+    )
+
+
 def _samples_valid_for_full_search(
     samples: Sequence[CalibrationSample],
     timeline: TrackerTimeline,
@@ -338,15 +374,25 @@ def _samples_valid_for_full_search(
         int(round(options.time_offset_max_ms * 1.0e6)),
     )
     for index, sample in enumerate(samples):
-        if all(
+        start_ns = sample.timestamp_ns + boundary_offsets[0]
+        end_ns = sample.timestamp_ns + boundary_offsets[1]
+        pose_valid = all(
             interpolate_world_from_tracker(
                 timeline.poses,
                 sample.timestamp_ns + offset_ns,
                 options.max_pose_gap_ms,
+                timeline.pose_timestamps_ns,
             )
             is not None
             for offset_ns in boundary_offsets
-        ):
+        )
+        status_valid = _tracker_status_valid_for_interval(
+            timeline,
+            start_ns,
+            end_ns,
+            options.max_pose_gap_ms,
+        )
+        if pose_valid and status_valid:
             valid_samples.append(sample)
             original_indices.append(index)
     return valid_samples, original_indices
@@ -369,6 +415,7 @@ def _pixel_errors(
             timeline.poses,
             sample.timestamp_ns + offset_ns,
             options.max_pose_gap_ms,
+            timeline.pose_timestamps_ns,
         )
         if interpolation is None:
             raise RuntimeError("结果评估时 Tracker 插值失败")
@@ -476,6 +523,7 @@ def optimize_spatiotemporal(
             timeline.poses,
             sample.timestamp_ns + offset_ns,
             options.max_pose_gap_ms,
+            timeline.pose_timestamps_ns,
         )
         if interpolation is None:
             raise RuntimeError("闭环评估时 Tracker 插值失败")
