@@ -437,7 +437,7 @@ ros2 run fastumi_data convert_mcap \
 
 1. 按 `EpisodeEvent` 切分可变长度 episode。
 2. 生成 20 Hz 网格并选取最近鱼眼帧。
-3. 在原图时间戳上进行位置线性插值和四元数 SLERP。
+3. 在偏移后的 Tracker 查询时刻 `t_image + Δt` 进行位置线性插值和四元数 SLERP；图像、夹爪和输出时间戳保持 `t_image`。
 4. 夹爪无效区间最多插值 0.2 s，VIVE 相邻有效位姿最多跨越 0.1 s。
 5. `TrackerStatus` 的非 `TRACKING_RUNNING_OK` 状态会阻止内部插值掩盖跟踪丢失。
 6. 裁剪首尾无效样本；内部缺口、NaN、样本过短等情况会生成拒绝报告。
