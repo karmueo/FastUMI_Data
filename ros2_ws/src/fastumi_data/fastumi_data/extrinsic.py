@@ -18,6 +18,8 @@ class TrackerTcpExtrinsic:
     matrix: np.ndarray
     tracker_serial: str
     calibration_hash: str
+    time_offset_ms: float
+    source_calibration_sha256: str
     metadata: Dict[str, Any]
 
 
@@ -42,10 +44,26 @@ def load_tracker_tcp_extrinsic(path: str) -> TrackerTcpExtrinsic:
     tracker_serial = str(document.get("tracker_serial", "")).strip()
     if not tracker_serial:
         raise ValueError("外参文件必须包含 tracker_serial")
+    try:
+        time_offset_ms = float(document.get("time_offset_ms", 0.0))
+    except (TypeError, ValueError) as error:
+        raise ValueError("外参 time_offset_ms 必须为有限数") from error
+    if not np.isfinite(time_offset_ms):
+        raise ValueError("外参 time_offset_ms 必须为有限数")
+    source_calibration = document.get("source_calibration", {})
+    if source_calibration is None:
+        source_calibration = {}
+    if not isinstance(source_calibration, dict):
+        raise ValueError("source_calibration 必须是映射")
+    source_calibration_sha256 = str(
+        source_calibration.get("sha256", "")
+    ).strip()
     calibration_hash = hashlib.sha256(file_bytes).hexdigest()
     return TrackerTcpExtrinsic(
         matrix=matrix,
         tracker_serial=tracker_serial,
         calibration_hash=calibration_hash,
+        time_offset_ms=time_offset_ms,
+        source_calibration_sha256=source_calibration_sha256,
         metadata=document,
     )
