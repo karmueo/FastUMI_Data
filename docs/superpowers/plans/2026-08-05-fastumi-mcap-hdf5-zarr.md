@@ -438,10 +438,12 @@ Expected: 完成行报告 11 个 episodes，steps 大于零，目标以 `pick_pl
 ```bash
 env -u PYTHONPATH /home/scl/work/UMI/FastUMI_Data/.venv/bin/python - <<'PY'
 from pathlib import Path
+from imagecodecs_numcodecs import register_codecs
 import numpy as np
 import zarr
 from replay_buffer import ReplayBuffer
 
+register_codecs()
 path = Path("/home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/tracker_fisheye_20260731_143146/pick_place_dp.zarr")
 root = zarr.open(str(path), mode="r")
 buffer = ReplayBuffer.create_from_group(root)
