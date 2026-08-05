@@ -399,6 +399,40 @@ ros2 run fastumi_data convert_mcap \
   dataset/pick_place/<session>/calibration_snapshot/processing.yaml
 ```
 
+### 5.1 已验收 Tracker→鱼眼标定适配为公共 TCP
+
+当鱼眼相机的光学坐标系就是本次数据链路的公共 TCP 时，可从已验收的
+`tracker_from_camera` 标定生成独立的 `tracker_to_tcp.yaml`。该适配器保留
+`schema_version`、`tracker_serial`、`fixture_version`、`method`、`calibrated_at`、
+`sample_count`、`translation_rmse_mm`、`rotation_rmse_deg` 和 `time_offset_ms`，并在
+`source_calibration` 中记录源文件绝对路径、SHA-256 和源变换名。
+
+这里 `tracker_to_tcp` 直接等于源标定的 `tracker_from_camera`：公共 TCP 即相机，
+因此不对该矩阵或位姿求逆。`camera_from_tracker` 表示相反方向，不能作为本适配器的
+`tracker_to_tcp`。
+
+时间偏移同样属于外参溯源的一部分。对每个图像时间戳 `t_image`，转换器在
+`t_tracker = t_image + Δt` 查询 Tracker 位姿；`Δt` 是适配 YAML 的
+`time_offset_ms`，转换为纳秒后参与位置插值、四元数 SLERP 和 Tracker 状态有效性
+检查。不要在图像时间戳上再次手动补偿该偏移。
+
+需要保留原 session 的快照、episodes 和 reports 时，使用独立输出目录。以下命令只会
+在 `--output-dir` 指向的派生目录创建或在 `--force` 下替换转换产物：
+
+```bash
+ros2 run fastumi_data convert_mcap \
+  dataset/pick_place/<session>/raw/bag \
+  --extrinsic dataset/pick_place/<session>/derived/<calibration-id>/calibration_snapshot/tracker_to_tcp.yaml \
+  --config dataset/pick_place/<session>/calibration_snapshot/processing.yaml \
+  --output-dir dataset/pick_place/<session>/derived/<calibration-id> \
+  --force
+```
+
+每条派生 HDF5 的根属性及对应质量报告都记录
+`calibration_sha256`（适配 YAML 哈希）、`source_calibration_sha256`（已验收源标定
+哈希）和 `tracker_time_offset_ms`。这三个字段与适配 YAML 的 tracker serial、治具/
+方法和质量指标共同构成可复现的转换溯源。
+
 转换过程：
 
 1. 按 `EpisodeEvent` 切分可变长度 episode。
@@ -461,6 +495,15 @@ data/robot0_gripper_width
 data/robot0_demo_start_pose
 data/robot0_demo_end_pose
 meta/episode_ends
+```
+
+导出器使用 `imagecodecs_jpegxl` 压缩图像块。独立的 Zarr/`ReplayBuffer` 读取进程
+需要先注册该自定义 codec，再调用 `zarr.open`：
+
+```python
+from imagecodecs_numcodecs import register_codecs
+
+register_codecs()
 ```
 
 训练 checkpoint 需要同时保存 `sample_rate_hz=20`、图像裁剪和缩放方式、
