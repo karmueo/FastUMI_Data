@@ -1,6 +1,7 @@
 """测试图像主时钟同步、TCP 相对轨迹和长缺口拒绝。"""
 
 import numpy as np
+import pytest
 
 from fastumi_data.models import (
     EpisodeBuffer,
@@ -47,6 +48,43 @@ def _make_buffer(
                 index / 30.0,
                 2,
                 True,
+            )
+        )
+        buffer.tracker_statuses.append(
+            TrackerStatusSample(timestamp_ns, True, True, 3)
+        )
+    return buffer
+
+
+def _make_offset_buffer() -> EpisodeBuffer:
+    """生成 20 Hz 图像与夹爪、100 Hz 二次轨迹的合成 episode。"""
+    start = EpisodeEventRecord(0, "session", "task", 0, 1)
+    buffer = EpisodeBuffer(start_event=start)
+    for index in range(12):
+        timestamp_ns = index * 50_000_000
+        buffer.images.append(
+            ImageSample(
+                timestamp_ns,
+                np.full((8, 8, 3), index, dtype=np.uint8),
+            )
+        )
+        buffer.grippers.append(
+            GripperSample(
+                timestamp_ns,
+                index / 10.0,
+                index / 10.0,
+                2,
+                True,
+            )
+        )
+    for index in range(62):
+        timestamp_ns = index * 10_000_000
+        timestamp_s = timestamp_ns / 1.0e9
+        buffer.poses.append(
+            PoseSample(
+                timestamp_ns,
+                np.asarray([timestamp_s**2, 0.0, 0.0]),
+                np.asarray([0.0, 0.0, 0.0, 1.0]),
             )
         )
         buffer.tracker_statuses.append(
@@ -115,6 +153,47 @@ def test_rejects_reported_tracker_loss() -> None:
         int(1.0e9),
         np.eye(4),
         ProcessingConfig(),
+    )
+
+    assert result.episode is None
+    assert any("跟踪丢失" in reason for reason in result.rejection_reasons)
+
+
+def test_queries_tracker_pose_at_offset_without_shifting_gripper_or_output_clock() -> None:
+    """验证偏移只作用于 Tracker 位姿，输出和夹爪保持图像时钟。"""
+    buffer = _make_offset_buffer()
+    result = synchronize_episode(
+        buffer,
+        600_000_000,
+        np.eye(4),
+        ProcessingConfig(),
+        tracker_time_offset_ns=10_000_000,
+    )
+
+    assert result.episode is not None
+    assert result.episode.timestamp_ns[0] == 0
+    assert result.episode.qpos[1, 0] == pytest.approx(0.0035, abs=1.0e-6)
+    assert result.episode.qpos[1, 7] == pytest.approx(0.1, abs=1.0e-6)
+
+
+def test_rejects_tracker_status_at_offset_boundary() -> None:
+    """验证偏移后的最近 TrackerStatus 无效时会拒绝该 episode。"""
+    buffer = _make_offset_buffer()
+    invalid_status_index = 26
+    invalid_timestamp_ns = invalid_status_index * 10_000_000
+    buffer.tracker_statuses[invalid_status_index] = TrackerStatusSample(
+        invalid_timestamp_ns,
+        True,
+        False,
+        4,
+    )
+
+    result = synchronize_episode(
+        buffer,
+        600_000_000,
+        np.eye(4),
+        ProcessingConfig(),
+        tracker_time_offset_ns=10_000_000,
     )
 
     assert result.episode is None

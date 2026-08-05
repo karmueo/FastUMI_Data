@@ -153,11 +153,14 @@ def synchronize_episode(
     stop_timestamp_ns: int,
     tracker_to_tcp: np.ndarray,
     config: ProcessingConfig,
+    tracker_time_offset_ns: int = 0,
 ) -> ProcessingResult:
     """同步单条 episode 并转换到起始 TCP 相对坐标系。
 
     首尾缺失样本会被裁剪。同步区间内部出现超过门限的位姿或夹爪缺口时，
     整条 episode 会被拒绝，防止训练数据包含隐式长时间保持值。
+    ``tracker_time_offset_ns`` 仅用于查询 Tracker 位姿和状态；夹爪及输出
+    时间戳始终使用鱼眼图像时间戳。
     """
     rejection_reasons: List[str] = []
     warnings: List[str] = []
@@ -203,10 +206,13 @@ def synchronize_episode(
             synchronized_records.append((None, None, None, None))
             continue
         image_sample = images[image_index]
+        tracker_query_ns = (
+            image_sample.timestamp_ns + int(tracker_time_offset_ns)
+        )
         pose_result = _interpolate_pose_sample(
             poses,
             pose_timestamps,
-            image_sample.timestamp_ns,
+            tracker_query_ns,
             maximum_pose_gap_ns,
         )
         gripper_result = _interpolate_gripper_sample(
@@ -218,7 +224,7 @@ def synchronize_episode(
         tracker_tracking_ok = _tracker_status_at(
             tracker_statuses,
             tracker_status_timestamps,
-            image_sample.timestamp_ns,
+            tracker_query_ns,
             maximum_pose_gap_ns,
         )
         if not config.require_tracker_status and tracker_tracking_ok is None:
