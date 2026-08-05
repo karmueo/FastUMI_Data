@@ -55,7 +55,8 @@ Run:
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
-PYTHONPATH=src/fastumi_data pytest -q src/fastumi_data/test/test_extrinsic.py
+PYTHONPATH=src/fastumi_data /usr/bin/python3 -m pytest -q \
+  src/fastumi_data/test/test_extrinsic.py
 ```
 
 Expected: 新字段断言失败，或非有限偏移未被拒绝；不得因测试导入或 fixture 错误失败。
@@ -145,7 +146,8 @@ assert result.episode.qpos[1, 7] == pytest.approx(
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
-PYTHONPATH=src/fastumi_data pytest -q src/fastumi_data/test/test_synchronizer.py
+PYTHONPATH=src/fastumi_data /usr/bin/python3 -m pytest -q \
+  src/fastumi_data/test/test_synchronizer.py
 ```
 
 Expected: 失败原因是 `synchronize_episode()` 尚不接受偏移，或仍在图像时刻查询 Tracker。
@@ -223,7 +225,7 @@ assert report["source_calibration_sha256"] == "source-hash"
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
-PYTHONPATH=src/fastumi_data pytest -q \
+PYTHONPATH=src/fastumi_data /usr/bin/python3 -m pytest -q \
   src/fastumi_data/test/test_hdf5_writer.py \
   src/fastumi_data/test/test_mcap_pipeline.py
 ```
@@ -304,7 +306,7 @@ import numpy as np
 import yaml
 from fastumi_data.pose_math import pose_to_matrix
 
-path = Path("dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml")
+path = Path("/home/scl/work/UMI/FastUMI_Data/dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml")
 raw = path.read_bytes()
 document = yaml.safe_load(raw)
 assert sha256(raw).hexdigest() == "e80bf562fdc6c99d66a6888089ed53cdc4b40d99057b563ed229e1d1447afb75"
@@ -418,8 +420,8 @@ Expected: 输出 `validated 11 episodes`。
 - [ ] **Step 5: 执行 HDF5→Zarr**
 
 ```bash
-source .venv/bin/activate
-python data_processing_tcp_to_dp.py \
+env -u PYTHONPATH /home/scl/work/UMI/FastUMI_Data/.venv/bin/python \
+  data_processing_tcp_to_dp.py \
   --input \
   /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/tracker_fisheye_20260731_143146/episodes \
   --output \
@@ -434,8 +436,7 @@ Expected: 完成行报告 11 个 episodes，steps 大于零，目标以 `pick_pl
 - [ ] **Step 6: 验收 Zarr 与 ReplayBuffer**
 
 ```bash
-source .venv/bin/activate
-python - <<'PY'
+env -u PYTHONPATH /home/scl/work/UMI/FastUMI_Data/.venv/bin/python - <<'PY'
 from pathlib import Path
 import numpy as np
 import zarr
@@ -472,8 +473,9 @@ Expected: 输出以 `validated zarr: 11 episodes, ` 开头，末尾 steps 数大
 - [ ] **Step 7: 运行最终回归并提交文档**
 
 ```bash
-source .venv/bin/activate
-pytest -q tests/test_dp_export.py
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  /home/scl/work/UMI/FastUMI_Data/.venv/bin/python -m pytest -q \
+  tests/test_dp_export.py
 python -m compileall \
   data_processing_tcp_to_dp.py \
   ros2_ws/src/fastumi_data/fastumi_data
