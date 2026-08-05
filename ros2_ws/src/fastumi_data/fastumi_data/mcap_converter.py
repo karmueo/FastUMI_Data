@@ -119,6 +119,10 @@ class McapEpisodeConverter:
             "rejection_reasons": reasons,
             "warnings": warnings or [],
             "calibration_sha256": self._extrinsic.calibration_hash,
+            "tracker_time_offset_ms": self._extrinsic.time_offset_ms,
+            "source_calibration_sha256": (
+                self._extrinsic.source_calibration_sha256
+            ),
         }
         write_json_report(str(report_path), report)
         self._rejected_count += 1
@@ -140,11 +144,15 @@ class McapEpisodeConverter:
             )
             self._active = None
             return
+        tracker_time_offset_ns = int(
+            round(self._extrinsic.time_offset_ms * 1.0e6)
+        )
         result = synchronize_episode(
             self._active,
             stop_event.timestamp_ns,
             self._extrinsic.matrix,
             self._config,
+            tracker_time_offset_ns=tracker_time_offset_ns,
         )
         if result.episode is None:
             self._write_rejection(
@@ -169,9 +177,19 @@ class McapEpisodeConverter:
             episode_index=start_event.episode_index,
             sample_rate_hz=self._config.sample_rate_hz,
             calibration_hash=self._extrinsic.calibration_hash,
+            tracker_time_offset_ms=self._extrinsic.time_offset_ms,
+            source_calibration_sha256=(
+                self._extrinsic.source_calibration_sha256
+            ),
         )
         report = build_quality_report(
-            result.episode, result.warnings, self._extrinsic.calibration_hash
+            result.episode,
+            result.warnings,
+            self._extrinsic.calibration_hash,
+            tracker_time_offset_ms=self._extrinsic.time_offset_ms,
+            source_calibration_sha256=(
+                self._extrinsic.source_calibration_sha256
+            ),
         )
         report.update(
             {

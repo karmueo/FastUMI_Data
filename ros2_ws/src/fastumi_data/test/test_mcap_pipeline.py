@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -142,6 +143,15 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
     stop_event.episode_index = 0
     stop_event.event_type = EpisodeEvent.STOP
     records.append((stop_ns, topics["episode_event"], stop_event))
+    incomplete_start = EpisodeEvent()
+    incomplete_start.header.stamp = _time(stop_ns + 1_000_000_000)
+    incomplete_start.task_name = "task"
+    incomplete_start.session_id = "session"
+    incomplete_start.episode_index = 1
+    incomplete_start.event_type = EpisodeEvent.START
+    records.append(
+        (stop_ns + 1_000_000_000, topics["episode_event"], incomplete_start)
+    )
     for timestamp_ns, topic, message in sorted(
         records, key=lambda record: record[0]
     ):
@@ -156,6 +166,8 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
                 "tracker_serial": "LHR-TEST",
                 "translation_rmse_mm": 0.0,
                 "rotation_rmse_deg": 0.0,
+                "time_offset_ms": 2.968089243035214,
+                "source_calibration": {"sha256": "source-hash"},
                 "tracker_to_tcp": {
                     "translation_m": [0.0, 0.0, 0.0],
                     "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
@@ -175,6 +187,7 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
     summary = converter.convert()
 
     assert summary["converted"] == 1
+    assert summary["rejected"] == 1
     output = tmp_path / "episodes" / "episode_0000.hdf5"
     with h5py.File(output, "r") as root:
         lengths = {
@@ -187,3 +200,19 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         assert np.all(
             root["observations/quality/tracker_tracking_ok"][:]
         )
+        assert root.attrs["tracker_time_offset_ms"] == pytest.approx(
+            2.968089243035214
+        )
+        assert root.attrs["source_calibration_sha256"] == "source-hash"
+    report_path = tmp_path / "reports" / "episode_0000.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["tracker_time_offset_ms"] == pytest.approx(
+        2.968089243035214
+    )
+    assert report["source_calibration_sha256"] == "source-hash"
+    rejection_path = tmp_path / "reports" / "episode_0001.json"
+    rejection_report = json.loads(rejection_path.read_text(encoding="utf-8"))
+    assert rejection_report["tracker_time_offset_ms"] == pytest.approx(
+        2.968089243035214
+    )
+    assert rejection_report["source_calibration_sha256"] == "source-hash"

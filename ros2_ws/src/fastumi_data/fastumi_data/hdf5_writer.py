@@ -21,6 +21,8 @@ def write_episode_hdf5(
     episode_index: int,
     sample_rate_hz: float,
     calibration_hash: str,
+    tracker_time_offset_ms: float = 0.0,
+    source_calibration_sha256: str = "",
 ) -> None:
     """原子式写入一条 FastUMI HDF5 episode。
 
@@ -40,6 +42,8 @@ def write_episode_hdf5(
         root.attrs["pose_frame"] = "episode_start_tcp"
         root.attrs["image_encoding"] = "rgb8"
         root.attrs["calibration_sha256"] = calibration_hash
+        root.attrs["tracker_time_offset_ms"] = tracker_time_offset_ms
+        root.attrs["source_calibration_sha256"] = source_calibration_sha256
         observations = root.create_group("observations")
         images = observations.create_group("images")
         images.create_dataset(
@@ -73,6 +77,8 @@ def build_quality_report(
     episode: SynchronizedEpisode,
     warnings: List[str],
     calibration_hash: str,
+    tracker_time_offset_ms: float = 0.0,
+    source_calibration_sha256: str = "",
 ) -> Dict[str, Any]:
     """生成可序列化的 episode 质量摘要。"""
     quaternion_norms = np.linalg.norm(episode.qpos[:, 3:7], axis=1)
@@ -93,6 +99,8 @@ def build_quality_report(
             np.max(np.abs(quaternion_norms - 1.0))
         ),
         "calibration_sha256": calibration_hash,
+        "tracker_time_offset_ms": tracker_time_offset_ms,
+        "source_calibration_sha256": source_calibration_sha256,
         "warnings": warnings,
     }
 
