@@ -20,8 +20,7 @@ from fastumi_data.tracker_camera_config import FisheyeCameraModel
 def _config_document():
     """返回测试使用的双 ArUco 配置文档。"""
     return {
-        "schema_version": 1,
-        "verified": False,
+        "schema_version": 2,
         "fixture_version": "dual-aruco-bootstrap-v1",
         "aruco": {
             "dictionary_name": "DICT_4X4_50",
@@ -58,7 +57,7 @@ def _load_config(tmp_path: Path):
     path.write_text(
         yaml.safe_dump(_config_document(), sort_keys=False), encoding="utf-8"
     )
-    return load_aruco_tcp_config(str(path), allow_unverified=True)
+    return load_aruco_tcp_config(str(path))
 
 
 def _camera() -> FisheyeCameraModel:
