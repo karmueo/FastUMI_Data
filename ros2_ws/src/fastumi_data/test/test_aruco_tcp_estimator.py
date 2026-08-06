@@ -172,6 +172,8 @@ def test_estimator_rectifies_full_image_with_kalibr_k_and_detects_both_tags(
     assert result.tag1.positive_depth is True
     assert np.isfinite(result.tag0.reprojection_rmse_px)
     assert np.isfinite(result.tag1.reprojection_rmse_px)
+    assert result.tag0.reprojection_rmse_px < 1.0
+    assert result.tag1.reprojection_rmse_px < 1.0
 
 
 def test_estimator_rejects_missing_duplicate_and_wrong_resolution(tmp_path, monkeypatch):

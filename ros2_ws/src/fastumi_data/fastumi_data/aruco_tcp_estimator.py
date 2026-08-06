@@ -259,14 +259,18 @@ def estimate_tcp_from_tag_poses(
 
 
 def _tag_object_points(marker_size_m: float) -> np.ndarray:
-    """按 IPPE_SQUARE 要求返回左上、右上、右下、左下米制角点。"""
+    """按 IPPE_SQUARE 要求返回图像角点对应的米制角点。
+
+    OpenCV 的方形 IPPE 约定平面坐标的 ``+Y`` 指向图像上方，因此图像
+    左上、右上、右下、左下对应 ``(-x,+y)、(+x,+y)、(+x,-y)、(-x,-y)``。
+    """
     half_size = marker_size_m / 2.0
     return np.asarray(
         [
-            [-half_size, -half_size, 0.0],
-            [half_size, -half_size, 0.0],
-            [half_size, half_size, 0.0],
             [-half_size, half_size, 0.0],
+            [half_size, half_size, 0.0],
+            [half_size, -half_size, 0.0],
+            [-half_size, -half_size, 0.0],
         ],
         dtype=np.float64,
     )
