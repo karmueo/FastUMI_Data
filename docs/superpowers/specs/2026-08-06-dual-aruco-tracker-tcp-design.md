@@ -3,15 +3,21 @@
 
 ## 1. 目标
 
-基于已验收的 Vive Tracker→鱼眼相机外参、指定连续 MCAP 会话中的鱼眼图像和
+基于已验收的 Vive Tracker→鱼眼相机外参、指定连续 MCAP bag 中的鱼眼图像和
 GripperState，离线求得固定的 Tracker→夹爪中心 TCP 外参。后续 MCAP→HDF5 和
 HDF5→Diffusion Policy Zarr 转换继续复用现有数据链路，但所有位姿统一表示夹爪中心，
 不再把鱼眼相机光学坐标系当作公共 TCP。
 
-指定输入会话为：
+指定 session 根目录为：
 
 ```text
 /home/scl/datasets/ros2bag/pick_place/20260731T052137Z
+```
+
+标定和转换命令的 MCAP 输入目录为：
+
+```text
+/home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag
 ```
 
 现有 Tracker→鱼眼标定为：
@@ -20,11 +26,27 @@ HDF5→Diffusion Policy Zarr 转换继续复用现有数据链路，但所有位
 dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml
 ```
 
-试运行产物写入原会话的独立 `derived/` 子目录，不能覆盖历史 HDF5、报告或 Zarr。
+session 根目录是原始采集快照和全部派生结果的共同容器。试运行产物写入该根目录的独立
+`derived/<calibration-id>/` 子目录，不能写入 `raw/bag`，也不能覆盖根目录已有的历史
+HDF5、报告或 Zarr。预期结构为：
+
+```text
+/home/scl/datasets/ros2bag/pick_place/20260731T052137Z/
+├── raw/bag/                         # 唯一 MCAP 输入目录
+├── calibration_snapshot/            # 原始采集快照，保持不变
+├── episodes/                        # 历史结果，保持不变
+├── reports/                         # 历史结果，保持不变
+└── derived/<calibration-id>/
+    ├── calibration_snapshot/
+    ├── calibration_report/
+    ├── episodes/
+    ├── reports/
+    └── pick_place_dp.zarr/
+```
 
 ## 2. 真实数据可行性证据
 
-指定 MCAP 包含 8119 帧 1280×1280 原始鱼眼图像、4060 条 Tracker pose/status、
+指定 `raw/bag` MCAP 包含 8119 帧 1280×1280 原始鱼眼图像、4060 条 Tracker pose/status、
 7893 条 GripperState 和 22 条 EpisodeEvent。11 条历史 HDF5 合计 1205 帧。
 
 使用 Kalibr `pinhole + equidistant` 参数对整幅图像去畸变，并显式复用原 Kalibr
@@ -145,7 +167,8 @@ motion_model:
 
 1. 加载鱼眼 Kalibr 内参与双 ArUco→TCP 配置；
 2. 加载已验收的 Tracker→鱼眼标定及其 `time_offset_ms`；
-3. 两遍流式读取指定 MCAP：第一遍建立 Tracker/状态/GripperState 时间线，第二遍读取图像；
+3. 两遍流式读取 session 根目录下的 `raw/bag`：第一遍建立 Tracker/状态/GripperState
+   时间线，第二遍读取图像；
 4. 使用原 Kalibr K 作为投影矩阵对整幅图像去畸变；
 5. 在去畸变图像上检测 ID 0/1 并执行 `SOLVEPNP_IPPE_SQUARE`；
 6. 按图像时间同步 openness，按 Tracker 标定时间偏移查询 Tracker 位姿；
@@ -156,7 +179,9 @@ motion_model:
     `^tracker T_tcp = ^tracker T_camera · ^camera T_tcp`；
 11. 写入适配现有 `convert_mcap --extrinsic` 的 `tracker_to_tcp.yaml`、JSON 报告、逐帧 CSV
     和坐标叠加图；
-12. 试运行使用生成的固定外参重新执行 MCAP→11 HDF5→224×224 Zarr。
+12. 试运行以 `raw/bag` 为唯一 MCAP 输入，使用生成的固定外参重新执行
+    MCAP→11 HDF5→224×224 Zarr，并把全部结果写入同一
+    `derived/<calibration-id>/`。
 
 最终轨迹计算仍由现有同步器完成：
 
@@ -235,7 +260,8 @@ inverse(^world T_tcp_start) · ^world T_tcp(t)
 - HDF5 合计 1205 步且根属性记录完整溯源；
 - Zarr 可由注册 JPEG XL codec 后的 ReplayBuffer 加载，包含 11 episodes、1205 steps、
   `(1205,224,224,3)` 图像；
-- 原始 session 非 `derived/` 内容摘要不变；
+- session 根目录中除目标 `derived/<calibration-id>/` 外的内容摘要不变，尤其是
+  `raw/bag`、`calibration_snapshot`、历史 `episodes` 和 `reports`；
 - `compileall`、ROS Python 测试、DP 测试和 `git diff --check` 通过。
 
 所有 Python 命令只允许使用：
