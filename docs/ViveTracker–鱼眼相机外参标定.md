@@ -3,6 +3,11 @@
 本文说明如何从 ROS 2 MCAP 中的 Vive Tracker 位姿和 6×6 AprilGrid 鱼眼图像，
 求解 Tracker 与相机之间的刚性外参、相机相对 Tracker 的时间偏移，并判读质量报告。
 
+本文同时说明下一阶段的双 ArUco 夹爪中心 TCP 标定。AprilGrid 流程负责生成已验收的
+`^tracker T_camera` 源标定；双 ArUco 流程在该源标定基础上生成
+`^tracker T_tcp`。默认数据链路的 TCP 原点位于夹爪中心，鱼眼相机即 TCP 仅作为明确
+选择的特殊兼容模式。
+
 ## 1. 输入与约束
 
 标定工具使用以下输入：
@@ -266,3 +271,126 @@ dataset/calibration/tracker_fisheye_20260731_143146/detection/
 本次没有执行完整 Hand-Eye 和联合优化，也没有生成可部署的 `calibration.yaml`。
 旧结果中的约 1.489 m 杆臂，以及 0.416674 m / 23.6603° 残差均未被新流程复现；
 这些旧数值不应进入部署配置。下一步需要按“有效检测帧不足”章节重新采集数据。
+
+## 11. 双 ArUco Tracker→夹爪中心 TCP 标定
+
+### 11.1 固定输入和输出范围
+
+指定 session 根目录为：
+
+```text
+/home/scl/datasets/ros2bag/pick_place/20260731T052137Z
+```
+
+双 ArUco CLI 的唯一 MCAP 输入为：
+
+```text
+/home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag
+```
+
+源 Tracker→鱼眼相机标定为：
+
+```text
+/home/scl/work/UMI/FastUMI_Data/dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml
+```
+
+双 ArUco 配置示例为仓库内的
+`config/calibration/aruco_to_tcp.example.yaml`。bootstrap 的所有派生结果固定写入：
+
+```text
+/home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/
+├── calibration_snapshot/aruco_to_tcp.yaml
+├── calibration_snapshot/tracker_to_tcp.yaml
+├── calibration_report/summary.json
+├── calibration_report/frame_metrics.csv
+├── calibration_report/overlay_*.png
+├── episodes/episode_*.hdf5
+├── reports/episode_*.json
+└── pick_place_dp.zarr/
+```
+
+raw/bag、原始 `calibration_snapshot/`、历史 `episodes/`、历史 `reports/` 和根目录已有
+结果保持不变。
+
+### 11.2 去畸变、ID 确认和单帧几何
+
+每帧先对完整 1280×1280 鱼眼图像执行 Kalibr `pinhole + equidistant` 去畸变，
+`cv2.fisheye.initUndistortRectifyMap` 的投影矩阵显式复用 Kalibr K。去畸变后的整幅图像
+再进入 `DICT_4X4_50` 检测和 `SOLVEPNP_IPPE_SQUARE`；检测阶段不调用自动新相机矩阵。
+
+标定检查图必须确认：ID 0 与 ID 1 同时存在，ID 0 位于 ID 1 的 `-Y` 侧，两个方形
+角点顺序保持左上、右上、右下、左下，双 tag 位于正深度。重复 ID、缺少任一 ID、负深度、
+非有限 RMSE、分辨率不符和退化法向都会拒绝当前帧。
+
+pair 坐标系使用以下约定：
+
+- 原点是 ID 0/1 中心中点；
+- `+Y` 从 ID 0 指向 ID 1；
+- 两枚 tag 法向先对齐到同一半球，再应用 `marker_normal_sign=-1` 得到 `+Z`；
+- `+X = +Y × +Z`，随后重新计算 `+Z = +X × +Y`，旋转保持右手；
+- `^pair T_tcp` 旋转为单位旋转，平移是 `[0.012, 0.0, 0.018] m`。
+
+夹爪完全打开的 tag 中心距是 `0.126 m`，完全闭合中心距是 `0.04831 m`。开度定义为
+0 闭合、1 打开，单枚 tag 到 pair 中心的期望半距离为：
+
+```text
+half_distance(openness) = 0.024155 + openness × 0.038845 [m]
+```
+
+ID 0/1 分别生成 TCP 位置候选，候选平移按单 tag 重投影 RMSE 的
+`1 / max(rmse_px, 0.05)^2` 加权融合。候选差和实测 tag 中心距会进入质量门。
+
+### 11.3 运行双 ArUco 标定
+
+命令必须使用 ROS Jazzy Python，并将当前 worktree 源码放在 `PYTHONPATH` 首位：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
+PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
+/home/scl/work/UMI/UMI/.venv/bin/python -m fastumi_data.aruco_tcp_cli \
+  /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
+  --camera-config $PWD/docs/kalibr_data-camchain-imucam.yaml \
+  --aruco-config $PWD/config/calibration/aruco_to_tcp.example.yaml \
+  --tracker-camera-calibration \
+    /home/scl/work/UMI/FastUMI_Data/dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml \
+  --tracker-config \
+    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/calibration_snapshot/vive_tracker.yaml \
+  --output-dir \
+    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806 \
+  --frame-stride 1 --allow-unverified
+```
+
+`--allow-unverified` 只放行 `verified=false` bootstrap 配置。它对数值质量门没有影响。
+输出 `accepted=true` 后才可使用 `calibration_snapshot/tracker_to_tcp.yaml` 进入转换。
+
+默认质量门为：
+
+- 每帧同时得到 ID 0/1 的正深度 IPPE 位姿；
+- 单 tag 重投影 RMSE ≤1.5 px；
+- 实测 tag 中心距与 openness 模型误差 ≤5 mm；
+- 两路 TCP 候选差 ≤5 mm；
+- 至少 30 个有效帧；
+- 稳健 SE(3) 聚合后的平移 P95 ≤3 mm；
+- 稳健 SE(3) 聚合后的旋转 P95 ≤2°。
+
+### 11.4 外参组合、溯源和正式确认
+
+聚合得到 `^camera T_tcp` 后严格组合：
+
+```text
+^tracker T_tcp = ^tracker T_camera · ^camera T_tcp
+```
+
+`tracker_to_tcp.yaml`、`summary.json`、每条 HDF5 根属性和 episode JSON 都保留：
+
+- `calibration_verified=false`；
+- `calibration_method=dual_aruco_bootstrap`；
+- 双 ArUco 配置 SHA-256；
+- Tracker→Camera 源标定 SHA-256；
+- Tracker serial、`time_offset_ms`、质量指标和输入路径/哈希。
+
+正式使用前需要检查至少 5 张 overlay 中的 ID、角点、pair 方向和 TCP 偏移，并确认
+安装测量/CAD。确认后复制配置为新的版本，将 `verified` 改为 `true`、更新
+`fixture_version`，重新运行标定、MCAP 转换和 Zarr 导出。bootstrap 报告保持原样，
+不能只修改旧报告的 verified 字段。
