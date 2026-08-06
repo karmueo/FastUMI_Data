@@ -431,5 +431,6 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 正式使用前需要检查至少 5 张 overlay 中的 ID、角点、pair 方向和 TCP 偏移，并确认
 安装测量/CAD。更新安装几何或 `fixture_version` 后，应重新运行标定、MCAP 转换和 Zarr
 导出；不能只修改旧报告。双 ArUco `calibrate_aruco_tcp` 没有
-`--allow-high-residual`：质量门失败会保留报告并返回退出码 2。该参数只属于独立的
-`calibrate_tracker_tcp` paired/pivot 流程，用于诊断该流程的高残差结果。
+`--allow-high-residual`：质量门失败会保留报告并返回退出码 2。相较于双 ArUco 流程，
+该参数可用于 `calibrate_tracker_tcp` paired/pivot 的高残差诊断；Tracker→相机标定也有
+其独立的同名参数。
