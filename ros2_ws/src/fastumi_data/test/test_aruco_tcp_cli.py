@@ -92,48 +92,48 @@ def _make_fixture(tmp_path: Path):
     )
 
 
-def test_parser_contains_fixed_calibration_pipeline_arguments():
-    """CLI parser 应同时暴露四类话题、配置、质量和安全参数。"""
+def test_parser_contains_fixed_calibration_pipeline_arguments(capsys):
+    """CLI parser 应暴露必需参数并拒绝已移除的绕过参数。"""
     parser = build_argument_parser()
-    arguments = parser.parse_args(
-        [
-            "bag",
-            "--camera-config",
-            "camera.yaml",
-            "--aruco-config",
-            "aruco.yaml",
-            "--tracker-camera-calibration",
-            "tracker-camera.yaml",
-            "--tracker-config",
-            "vive.yaml",
-            "--output-dir",
-            "derived",
-            "--image-topic",
-            "/image",
-            "--tracker-topic",
-            "/pose",
-            "--status-topic",
-            "/status",
-            "--gripper-topic",
-            "/gripper",
-            "--frame-stride",
-            "2",
-            "--max-pose-gap-ms",
-            "30",
-            "--max-gripper-gap-ms",
-            "100",
-            "--minimum-frames",
-            "30",
-            "--force",
-        ]
-    )
+    valid_arguments = [
+        "bag",
+        "--camera-config",
+        "camera.yaml",
+        "--aruco-config",
+        "aruco.yaml",
+        "--tracker-camera-calibration",
+        "tracker-camera.yaml",
+        "--tracker-config",
+        "vive.yaml",
+        "--output-dir",
+        "derived",
+        "--image-topic",
+        "/image",
+        "--tracker-topic",
+        "/pose",
+        "--status-topic",
+        "/status",
+        "--gripper-topic",
+        "/gripper",
+        "--frame-stride",
+        "2",
+        "--max-pose-gap-ms",
+        "30",
+        "--max-gripper-gap-ms",
+        "100",
+        "--minimum-frames",
+        "30",
+        "--force",
+    ]
+    arguments = parser.parse_args(valid_arguments)
 
     assert arguments.bag_uri == "bag"
     assert arguments.minimum_frames == 30
     assert arguments.force is True
     assert arguments.gripper_topic == "/gripper"
     with pytest.raises(SystemExit):
-        parser.parse_args(["bag", "--allow-unverified"])
+        parser.parse_args([*valid_arguments, "--allow-unverified"])
+    assert "unrecognized arguments: --allow-unverified" in capsys.readouterr().err
 
 
 def test_output_persists_v2_accepted_extrinsic_and_at_least_five_overlays(
