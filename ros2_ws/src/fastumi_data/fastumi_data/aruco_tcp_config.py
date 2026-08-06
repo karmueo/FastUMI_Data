@@ -145,7 +145,6 @@ class ArucoTcpConfig:
     """保存双 ArUco→TCP 配置和源文件溯源信息。"""
 
     schema_version: int
-    verified: bool
     fixture_version: str
     aruco: ArucoSpec
     rectification_projection: str
@@ -158,10 +157,8 @@ class ArucoTcpConfig:
 
     def __post_init__(self) -> None:
         """校验配置组合关系并冻结齐次变换数组。"""
-        if self.schema_version != 1:
-            raise ValueError("schema_version 必须为 1")
-        if not isinstance(self.verified, bool):
-            raise ValueError("verified 必须是 YAML bool")
+        if self.schema_version != 2:
+            raise ValueError("schema_version 必须为 2")
         if not self.fixture_version:
             raise ValueError("fixture_version 不能为空")
         if self.rectification_projection != "reuse_kalibr_intrinsics":
@@ -206,9 +203,7 @@ class ArucoTcpConfig:
         return distance / 2.0
 
 
-def load_aruco_tcp_config(
-    path: str, allow_unverified: bool = False
-) -> ArucoTcpConfig:
+def load_aruco_tcp_config(path: str) -> ArucoTcpConfig:
     """加载双 ArUco→TCP YAML 并执行全部安全与几何校验。"""
     config_path = Path(path)
     try:
@@ -217,16 +212,13 @@ def load_aruco_tcp_config(
     except (OSError, yaml.YAMLError) as error:
         raise ValueError(f"无法读取 ArUco TCP 配置 {path}: {error}") from error
     root = _mapping(document, "ArUco TCP 配置")
+    legacy_fields = {"verified", "calibration_verified"}.intersection(root)
+    if legacy_fields:
+        names = ", ".join(sorted(legacy_fields))
+        raise ValueError(f"文件包含已删除字段: {names}")
     schema_version = _integer(root.get("schema_version"), "schema_version")
-    if schema_version != 1:
-        raise ValueError("schema_version 必须为 1")
-    verified = root.get("verified")
-    if not isinstance(verified, bool):
-        raise ValueError("verified 必须是 YAML bool")
-    if not verified and not allow_unverified:
-        raise ValueError(
-            "配置 verified=false，需要显式传入 --allow-unverified 才能加载"
-        )
+    if schema_version != 2:
+        raise ValueError("文件 schema_version 必须为 2；旧 v1 不再兼容")
     fixture_version = str(root.get("fixture_version", "")).strip()
     if not fixture_version:
         raise ValueError("fixture_version 不能为空")
@@ -311,7 +303,6 @@ def load_aruco_tcp_config(
     )
     return ArucoTcpConfig(
         schema_version=schema_version,
-        verified=verified,
         fixture_version=fixture_version,
         aruco=aruco,
         rectification_projection=projection,

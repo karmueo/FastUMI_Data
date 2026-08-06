@@ -21,14 +21,11 @@ class TrackerTcpExtrinsic:
     time_offset_ms: float
     source_calibration_sha256: str
     metadata: Dict[str, Any]
-    calibration_verified: bool = True
     calibration_method: str = ""
     aruco_config_sha256: str = ""
 
 
-def load_tracker_tcp_extrinsic(
-    path: str, allow_unverified: bool = False
-) -> TrackerTcpExtrinsic:
+def load_tracker_tcp_extrinsic(path: str) -> TrackerTcpExtrinsic:
     """加载并严格校验 Tracker 到 TCP 外参 YAML。"""
     calibration_path = Path(path)
     try:
@@ -36,16 +33,19 @@ def load_tracker_tcp_extrinsic(
         document = yaml.safe_load(file_bytes)
     except (OSError, yaml.YAMLError) as error:
         raise ValueError(f"无法读取外参文件 {path}: {error}") from error
-    if not isinstance(document, dict) or document.get("schema_version") != 1:
-        raise ValueError("外参文件 schema_version 必须为 1")
-    calibration_verified = document.get("calibration_verified", True)
-    if not isinstance(calibration_verified, bool):
-        raise ValueError("calibration_verified 必须是 YAML bool")
-    if not calibration_verified and not allow_unverified:
-        raise ValueError(
-            "外参 calibration_verified=false，需要显式传入 "
-            "--allow-unverified-extrinsic 才能加载"
-        )
+    if not isinstance(document, dict):
+        raise ValueError("外参文件必须是 YAML 映射")
+    legacy_fields = {"verified", "calibration_verified"}.intersection(document)
+    if legacy_fields:
+        names = ", ".join(sorted(legacy_fields))
+        raise ValueError(f"文件包含已删除字段: {names}")
+    if document.get("schema_version") != 2:
+        raise ValueError("外参文件 schema_version 必须为 2；旧 v1 不再兼容")
+    accepted = document.get("accepted")
+    if not isinstance(accepted, bool):
+        raise ValueError("外参 accepted 必须是 YAML bool")
+    if accepted is not True:
+        raise ValueError("外参 accepted 必须为 true")
     transform = document.get("tracker_to_tcp")
     if not isinstance(transform, dict):
         raise ValueError("外参文件缺少 tracker_to_tcp")
@@ -85,7 +85,6 @@ def load_tracker_tcp_extrinsic(
         time_offset_ms=time_offset_ms,
         source_calibration_sha256=source_calibration_sha256,
         metadata=document,
-        calibration_verified=calibration_verified,
         calibration_method=calibration_method,
         aruco_config_sha256=aruco_config_sha256,
     )

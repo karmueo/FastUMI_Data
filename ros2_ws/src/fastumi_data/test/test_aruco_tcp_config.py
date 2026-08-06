@@ -12,9 +12,8 @@ from fastumi_data.aruco_tcp_config import load_aruco_tcp_config
 def _document(**overrides):
     """构造包含全部确认几何值的最小配置文档。"""
     document = {
-        "schema_version": 1,
-        "verified": False,
-        "fixture_version": "dual-aruco-bootstrap-v1",
+        "schema_version": 2,
+        "fixture_version": "dual-aruco-bootstrap-v2",
         "aruco": {
             "dictionary_name": "DICT_4X4_50",
             "marker_size_m": 0.016,
@@ -55,19 +54,15 @@ def _write_config(path, document=None):
     )
 
 
-def test_unverified_config_requires_explicit_opt_in_and_preserves_sha256(
-    tmp_path,
-):
-    """未验证配置默认拒绝，显式放行后应保留源文件哈希。"""
+def test_load_v2_config_preserves_sha256_without_verification_field(tmp_path):
+    """v2 配置无需验证绕过参数，且应保留源文件哈希。"""
     path = tmp_path / "aruco_to_tcp.yaml"
     _write_config(path)
 
-    with pytest.raises(ValueError, match="allow-unverified"):
-        load_aruco_tcp_config(str(path))
+    config = load_aruco_tcp_config(str(path))
 
-    config = load_aruco_tcp_config(str(path), allow_unverified=True)
-
-    assert config.verified is False
+    assert config.schema_version == 2
+    assert not hasattr(config, "verified")
     assert config.source_sha256 == hashlib.sha256(
         path.read_bytes()
     ).hexdigest()
@@ -81,7 +76,7 @@ def test_config_exposes_immutable_pair_from_tcp_transform(tmp_path):
     path = tmp_path / "aruco_to_tcp.yaml"
     _write_config(path)
 
-    config = load_aruco_tcp_config(str(path), allow_unverified=True)
+    config = load_aruco_tcp_config(str(path))
 
     np.testing.assert_allclose(
         config.pair_from_tcp,
@@ -111,7 +106,7 @@ def test_expected_half_distance_follows_linear_motion_model(
     """开度 0、1 及中点应按确认的对称线性模型计算。"""
     path = tmp_path / "aruco_to_tcp.yaml"
     _write_config(path)
-    config = load_aruco_tcp_config(str(path), allow_unverified=True)
+    config = load_aruco_tcp_config(str(path))
 
     assert config.expected_half_distance_m(openness) == pytest.approx(expected)
 
@@ -121,7 +116,7 @@ def test_expected_half_distance_rejects_invalid_openness(tmp_path, openness):
     """开度必须是 [0, 1] 内的有限数值。"""
     path = tmp_path / "aruco_to_tcp.yaml"
     _write_config(path)
-    config = load_aruco_tcp_config(str(path), allow_unverified=True)
+    config = load_aruco_tcp_config(str(path))
 
     with pytest.raises(ValueError, match="openness"):
         config.expected_half_distance_m(openness)
@@ -147,7 +142,7 @@ def test_loader_rejects_unsupported_or_inconsistent_values(
     _write_config(path, document)
 
     with pytest.raises(ValueError, match=message):
-        load_aruco_tcp_config(str(path), allow_unverified=True)
+        load_aruco_tcp_config(str(path))
 
 
 def test_loader_rejects_non_unit_pair_quaternion_and_mismatched_open_distance(
@@ -164,11 +159,32 @@ def test_loader_rejects_non_unit_pair_quaternion_and_mismatched_open_distance(
     path = tmp_path / "invalid_quaternion.yaml"
     _write_config(path, document)
     with pytest.raises(ValueError, match="单位四元数"):
-        load_aruco_tcp_config(str(path), allow_unverified=True)
+        load_aruco_tcp_config(str(path))
 
     document = _document()
     document["motion_model"]["open_tag_center_distance_m"] = 0.125
     path = tmp_path / "invalid_distance.yaml"
     _write_config(path, document)
     with pytest.raises(ValueError, match="全开"):
-        load_aruco_tcp_config(str(path), allow_unverified=True)
+        load_aruco_tcp_config(str(path))
+
+
+def test_loader_rejects_schema_v1_without_legacy_verification_fields(tmp_path):
+    """仅升级版本号前的 v1 文档也必须被拒绝。"""
+    document = _document(schema_version=1)
+    path = tmp_path / "schema_v1.yaml"
+    _write_config(path, document)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        load_aruco_tcp_config(str(path))
+
+
+@pytest.mark.parametrize("legacy_field", ["verified", "calibration_verified"])
+def test_loader_rejects_removed_verification_fields(tmp_path, legacy_field):
+    """v2 配置不得继续携带已删除的顶层验证字段。"""
+    document = _document(**{legacy_field: True})
+    path = tmp_path / f"legacy_{legacy_field}.yaml"
+    _write_config(path, document)
+
+    with pytest.raises(ValueError, match=legacy_field):
+        load_aruco_tcp_config(str(path))
