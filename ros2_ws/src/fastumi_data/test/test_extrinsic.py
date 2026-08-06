@@ -114,6 +114,16 @@ def test_extrinsic_rejects_schema_v1_without_legacy_verification_fields(tmp_path
         load_tracker_tcp_extrinsic(str(path))
 
 
+@pytest.mark.parametrize("schema_version", [2.0, True])
+def test_extrinsic_requires_integer_schema_version_two(tmp_path, schema_version):
+    """外参 schema_version 仅接受 YAML 整数 2。"""
+    path = tmp_path / "invalid_schema_version_type.yaml"
+    _write_extrinsic(path, schema_version=schema_version)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        load_tracker_tcp_extrinsic(str(path))
+
+
 @pytest.mark.parametrize("legacy_field", ["verified", "calibration_verified"])
 def test_extrinsic_rejects_removed_verification_fields(tmp_path, legacy_field):
     """严格 v2 外参不得继续携带已删除的顶层验证字段。"""

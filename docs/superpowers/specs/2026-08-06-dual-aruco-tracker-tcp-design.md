@@ -224,9 +224,10 @@ inverse(^world T_tcp_start) · ^world T_tcp(t)
 - 稳健聚合后 `^camera T_tcp` 平移 P95 残差不超过 3 mm；
 - 旋转 P95 残差不超过 2°。
 
-质量门失败时 CLI 返回非零并保留报告，不生成可用于转换的外参。`--allow-high-residual`
-只允许诊断流程保留零退出码，报告中的 `accepted=false` 和失败项保持真实状态；它不会
-生成可消费外参。输入、配置和源标定均记录 SHA-256。
+`calibrate_aruco_tcp` 没有 `--allow-high-residual`。质量门失败时，它总会写出诊断报告、
+返回非零退出码（2），且不生成可用于转换的外参。`--allow-high-residual` 仅用于
+Tracker→Camera 标定和 `calibrate_tracker_tcp` 的 paired/pivot 高残差诊断；输入、配置和
+源标定均记录 SHA-256。
 
 ## 8. Bootstrap 与正式标定边界
 

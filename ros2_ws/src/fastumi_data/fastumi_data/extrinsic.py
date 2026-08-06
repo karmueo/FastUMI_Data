@@ -39,7 +39,8 @@ def load_tracker_tcp_extrinsic(path: str) -> TrackerTcpExtrinsic:
     if legacy_fields:
         names = ", ".join(sorted(legacy_fields))
         raise ValueError(f"文件包含已删除字段: {names}")
-    if document.get("schema_version") != 2:
+    schema_version = document.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
         raise ValueError("外参文件 schema_version 必须为 2；旧 v1 不再兼容")
     accepted = document.get("accepted")
     if not isinstance(accepted, bool):

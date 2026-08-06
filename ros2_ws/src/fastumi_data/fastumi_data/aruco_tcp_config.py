@@ -216,8 +216,8 @@ def load_aruco_tcp_config(path: str) -> ArucoTcpConfig:
     if legacy_fields:
         names = ", ".join(sorted(legacy_fields))
         raise ValueError(f"文件包含已删除字段: {names}")
-    schema_version = _integer(root.get("schema_version"), "schema_version")
-    if schema_version != 2:
+    schema_version = root.get("schema_version")
+    if type(schema_version) is not int or schema_version != 2:
         raise ValueError("文件 schema_version 必须为 2；旧 v1 不再兼容")
     fixture_version = str(root.get("fixture_version", "")).strip()
     if not fixture_version:
