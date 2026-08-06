@@ -286,10 +286,8 @@ def write_calibration_outputs(
         }
         report_metrics = dict(result.metrics)
         tracker_document = {
-            "schema_version": 1,
-            "accepted": bool(result.accepted),
-            "calibration_verified": False,
-            "verified": False,
+            "schema_version": 2,
+            "accepted": True,
             "tracker_serial": tracker_serial,
             "fixture_version": aruco_config.fixture_version,
             "method": "dual_aruco_bootstrap",
@@ -336,7 +334,6 @@ def write_calibration_outputs(
         _write_frame_metrics(frame_metrics_path, frame_metrics)
         summary = {
             "accepted": bool(result.accepted),
-            "calibration_verified": False,
             "calibration_method": "dual_aruco_bootstrap",
             "fixture_version": aruco_config.fixture_version,
             "tracker_serial": tracker_serial,
@@ -405,7 +402,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-candidate-difference-mm", type=float, default=5.0)
     parser.add_argument("--max-translation-p95-mm", type=float, default=3.0)
     parser.add_argument("--max-rotation-p95-deg", type=float, default=2.0)
-    parser.add_argument("--allow-unverified", action="store_true")
     parser.add_argument("--force", action="store_true")
     return parser
 
@@ -429,9 +425,7 @@ def run_calibration(arguments: argparse.Namespace) -> ArucoTcpCalibrationResult:
     if arguments.frame_stride <= 0:
         raise ValueError("frame_stride 必须为正整数")
     camera = load_kalibr_camera(arguments.camera_config)
-    aruco_config = load_aruco_tcp_config(
-        arguments.aruco_config, allow_unverified=arguments.allow_unverified
-    )
+    aruco_config = load_aruco_tcp_config(arguments.aruco_config)
     tracker_from_camera, time_offset_ms, _ = _load_tracker_camera_calibration(
         arguments.tracker_camera_calibration
     )

@@ -58,20 +58,19 @@ def _paired(arguments: argparse.Namespace) -> None:
     result = solve_robot_world_hand_eye(
         base_tcp_poses, tracker_poses, initial_tracker_to_tcp=initial
     )
-    if (
-        not arguments.allow_high_residual
-        and (
-            result.translation_rmse_mm > 2.0
-            or result.rotation_rmse_deg > 1.0
-        )
-    ):
+    accepted = (
+        result.translation_rmse_mm <= 2.0
+        and result.rotation_rmse_deg <= 1.0
+    )
+    if not arguments.allow_high_residual and not accepted:
         raise RuntimeError(
             "留出集误差超过门限: "
             f"{result.translation_rmse_mm:.3f} mm, "
             f"{result.rotation_rmse_deg:.3f} deg"
         )
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "accepted": accepted,
         "tracker_serial": arguments.tracker_serial,
         "fixture_version": arguments.fixture_version,
         "calibrated_at": datetime.now(timezone.utc).isoformat(),
@@ -98,10 +97,12 @@ def _pivot(arguments: argparse.Namespace) -> None:
     translation, rmse_mm = solve_pivot_translation(tracker_poses)
     quaternion = np.asarray(arguments.quaternion_xyzw, dtype=np.float64)
     tracker_to_tcp = pose_to_matrix(translation, quaternion)
-    if not arguments.allow_high_residual and rmse_mm > 2.0:
+    accepted = rmse_mm <= 2.0
+    if not arguments.allow_high_residual and not accepted:
         raise RuntimeError(f"pivot 平移 RMSE {rmse_mm:.3f} mm 超过门限")
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "accepted": accepted,
         "tracker_serial": arguments.tracker_serial,
         "fixture_version": arguments.fixture_version,
         "calibrated_at": datetime.now(timezone.utc).isoformat(),

@@ -17,8 +17,7 @@ from fastumi_data.aruco_tcp_config import load_aruco_tcp_config
 def _config_document():
     """返回测试使用的 bootstrap ArUco 配置。"""
     return {
-        "schema_version": 1,
-        "verified": False,
+        "schema_version": 2,
         "fixture_version": "dual-aruco-bootstrap-v1",
         "aruco": {
             "dictionary_name": "DICT_4X4_50",
@@ -64,7 +63,7 @@ def _make_fixture(tmp_path: Path):
     bag_path = tmp_path / "bag"
     bag_path.mkdir()
     (bag_path / "bag_0.mcap").write_bytes(b"mcap")
-    config = load_aruco_tcp_config(str(aruco_path), allow_unverified=True)
+    config = load_aruco_tcp_config(str(aruco_path))
     identity = np.eye(4, dtype=np.float64)
     result = SimpleNamespace(
         accepted=True,
@@ -125,22 +124,22 @@ def test_parser_contains_fixed_calibration_pipeline_arguments():
             "100",
             "--minimum-frames",
             "30",
-            "--allow-unverified",
             "--force",
         ]
     )
 
     assert arguments.bag_uri == "bag"
     assert arguments.minimum_frames == 30
-    assert arguments.allow_unverified is True
     assert arguments.force is True
     assert arguments.gripper_topic == "/gripper"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["bag", "--allow-unverified"])
 
 
-def test_output_persists_unverified_provenance_and_at_least_five_overlays(
+def test_output_persists_v2_accepted_extrinsic_and_at_least_five_overlays(
     tmp_path,
 ):
-    """成功输出应同时写外参快照、质量报告、CSV 和 bootstrap provenance。"""
+    """成功输出应写入 v2 已接受外参、报告、CSV 和 bootstrap 溯源。"""
     (
         aruco_path,
         camera_path,
@@ -183,7 +182,10 @@ def test_output_persists_unverified_provenance_and_at_least_five_overlays(
         paths["tracker_to_tcp"].read_text(encoding="utf-8")
     )
     summary = yaml.safe_load(paths["summary"].read_text(encoding="utf-8"))
-    assert tracker_document["calibration_verified"] is False
+    assert tracker_document["schema_version"] == 2
+    assert tracker_document["accepted"] is True
+    assert "verified" not in tracker_document
+    assert "calibration_verified" not in tracker_document
     assert tracker_document["method"] == "dual_aruco_bootstrap"
     assert tracker_document["fixture_version"] == "dual-aruco-bootstrap-v1"
     assert tracker_document["time_offset_ms"] == pytest.approx(2.968)
@@ -192,7 +194,7 @@ def test_output_persists_unverified_provenance_and_at_least_five_overlays(
     assert tracker_document["tracker_from_camera"]["maps_from"] == "camera"
     assert tracker_document["camera_from_tcp"]["maps_to"] == "camera"
     assert tracker_document["tracker_to_tcp"]["maps_to"] == "tracker"
-    assert summary["calibration_verified"] is False
+    assert "calibration_verified" not in summary
     assert summary["calibration_method"] == "dual_aruco_bootstrap"
     assert paths["aruco_snapshot"].exists()
     assert paths["frame_metrics"].exists()
