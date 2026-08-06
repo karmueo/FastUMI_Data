@@ -436,7 +436,7 @@ ros2 run fastumi_data convert_mcap \
   dataset/pick_place/<session>/calibration_snapshot/processing.yaml
 ```
 
-指定 bootstrap 派生目录时使用生成的固定外参，并显式允许未验证 provenance：
+指定 bootstrap 派生目录时，转换器严格消费 schema v2 且 `accepted: true` 的生成外参：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
