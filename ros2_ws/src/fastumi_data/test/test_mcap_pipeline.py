@@ -26,11 +26,15 @@ try:
     from rclpy.serialization import serialize_message
     from sensor_msgs.msg import Image
 
-    from fastumi_data.mcap_converter import McapEpisodeConverter
+    from fastumi_data.mcap_converter import (
+        McapEpisodeConverter,
+        main as convert_mcap,
+    )
 except ModuleNotFoundError:
     INTEGRATION_AVAILABLE = False
     h5py = None
     McapEpisodeConverter = None
+    convert_mcap = None
 else:
     INTEGRATION_AVAILABLE = True
 
@@ -162,11 +166,11 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
     extrinsic_path.write_text(
         yaml.safe_dump(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "tracker_serial": "LHR-TEST",
                 "translation_rmse_mm": 0.0,
                 "rotation_rmse_deg": 0.0,
-                "calibration_verified": False,
+                "accepted": True,
                 "method": "dual_aruco_bootstrap",
                 "aruco_config_sha256": "aruco-hash",
                 "time_offset_ms": 2.968089243035214,
@@ -179,15 +183,6 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="allow-unverified-extrinsic"):
-        McapEpisodeConverter(
-            str(bag_uri),
-            str(tmp_path),
-            ProcessingConfig(),
-            topics,
-            str(extrinsic_path),
-            force=False,
-        )
     converter = McapEpisodeConverter(
         str(bag_uri),
         str(tmp_path),
@@ -195,7 +190,6 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         topics,
         str(extrinsic_path),
         force=False,
-        allow_unverified_extrinsic=True,
     )
     summary = converter.convert()
 
@@ -217,7 +211,8 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
             2.968089243035214
         )
         assert root.attrs["source_calibration_sha256"] == "source-hash"
-        assert bool(root.attrs["calibration_verified"]) is False
+        assert root.attrs["schema_version"] == "fastumi_ros2_v2"
+        assert "calibration_verified" not in root.attrs
         assert root.attrs["calibration_method"] == "dual_aruco_bootstrap"
         assert root.attrs["aruco_config_sha256"] == "aruco-hash"
     report_path = tmp_path / "reports" / "episode_0000.json"
@@ -226,7 +221,7 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         2.968089243035214
     )
     assert report["source_calibration_sha256"] == "source-hash"
-    assert report["calibration_verified"] is False
+    assert "calibration_verified" not in report
     assert report["calibration_method"] == "dual_aruco_bootstrap"
     assert report["aruco_config_sha256"] == "aruco-hash"
     rejection_path = tmp_path / "reports" / "episode_0001.json"
@@ -235,6 +230,23 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         2.968089243035214
     )
     assert rejection_report["source_calibration_sha256"] == "source-hash"
-    assert rejection_report["calibration_verified"] is False
+    assert "calibration_verified" not in rejection_report
     assert rejection_report["calibration_method"] == "dual_aruco_bootstrap"
     assert rejection_report["aruco_config_sha256"] == "aruco-hash"
+
+
+@pytest.mark.skipif(
+    not INTEGRATION_AVAILABLE,
+    reason="当前 Python 环境缺少 ROS2 MCAP 或 h5py 依赖",
+)
+def test_converter_cli_rejects_removed_unverified_extrinsic_option() -> None:
+    """验证转换命令行不再接受跳过外参验收的开关。"""
+    with pytest.raises(SystemExit):
+        convert_mcap(
+            [
+                "bag",
+                "--extrinsic",
+                "tracker_to_tcp.yaml",
+                "--allow-unverified-extrinsic",
+            ]
+        )

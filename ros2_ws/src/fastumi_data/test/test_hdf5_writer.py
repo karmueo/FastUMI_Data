@@ -45,7 +45,8 @@ def test_writes_versioned_fastumi_hdf5(tmp_path) -> None:
     )
 
     with h5py.File(output, "r") as root:
-        assert root.attrs["schema_version"] == "fastumi_ros2_v1"
+        assert root.attrs["schema_version"] == "fastumi_ros2_v2"
+        assert "calibration_verified" not in root.attrs
         assert root.attrs["pose_frame"] == "episode_start_tcp"
         assert root["observations/qpos"].shape == (10, 8)
         assert root["action"].shape == (10, 8)
@@ -111,10 +112,10 @@ def test_persists_tracker_time_offset_and_source_calibration(tmp_path) -> None:
 
 
 @pytest.mark.skipif(h5py is None, reason="当前系统 Python 未安装 h5py")
-def test_persists_unverified_calibration_provenance_in_hdf5_and_report(
+def test_persists_calibration_provenance_without_verification_state(
     tmp_path,
 ) -> None:
-    """HDF5 根属性和 JSON 报告应完整保留 bootstrap provenance。"""
+    """HDF5 根属性和 JSON 报告应保留外参来源而不写验证状态。"""
     episode = SynchronizedEpisode(
         timestamp_ns=np.arange(2, dtype=np.int64),
         images_rgb=np.zeros((2, 8, 8, 3), dtype=np.uint8),
@@ -138,7 +139,6 @@ def test_persists_unverified_calibration_provenance_in_hdf5_and_report(
         0,
         20.0,
         "runtime-hash",
-        calibration_verified=False,
         calibration_method="dual_aruco_bootstrap",
         aruco_config_sha256="aruco-hash",
     )
@@ -146,17 +146,16 @@ def test_persists_unverified_calibration_provenance_in_hdf5_and_report(
         episode,
         [],
         "runtime-hash",
-        calibration_verified=False,
         calibration_method="dual_aruco_bootstrap",
         aruco_config_sha256="aruco-hash",
     )
     write_json_report(str(report_path), report)
 
     with h5py.File(output, "r") as root:
-        assert bool(root.attrs["calibration_verified"]) is False
+        assert "calibration_verified" not in root.attrs
         assert root.attrs["calibration_method"] == "dual_aruco_bootstrap"
         assert root.attrs["aruco_config_sha256"] == "aruco-hash"
     persisted_report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert persisted_report["calibration_verified"] is False
+    assert "calibration_verified" not in persisted_report
     assert persisted_report["calibration_method"] == "dual_aruco_bootstrap"
     assert persisted_report["aruco_config_sha256"] == "aruco-hash"

@@ -6,6 +6,7 @@ from typing import List, Optional
 from unittest.mock import Mock
 
 import pytest
+import yaml
 
 from fastumi_data.session_recorder import (
     _TerminalKeyReader,
@@ -13,6 +14,7 @@ from fastumi_data.session_recorder import (
     _build_parser,
     _wait_for_service_readiness,
     _wait_for_recording_processes,
+    main,
 )
 
 
@@ -190,3 +192,110 @@ def test_parser_defaults_to_portable_dataset_root() -> None:
     )
 
     assert arguments.dataset_root == "dataset"
+
+
+def test_parser_rejects_removed_unverified_calibration_option() -> None:
+    """验证录制命令行不再接受跳过标定验收的开关。"""
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(
+            [
+                "--task",
+                "pick_place",
+                "--extrinsic",
+                "tracker_to_tcp.yaml",
+                "--allow-unverified-calibration",
+            ]
+        )
+
+
+def test_main_rejects_excessive_rmse_before_creating_session_or_processes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """验证正式录制在创建目录和进程前执行严格外参及残差门限。"""
+    strict_loader = Mock(
+        return_value=Mock(
+            metadata={
+                "translation_rmse_mm": 2.1,
+                "rotation_rmse_deg": 0.1,
+            }
+        )
+    )
+    popen = Mock()
+    monkeypatch.setattr(
+        "fastumi_data.session_recorder.load_tracker_tcp_extrinsic",
+        strict_loader,
+    )
+    monkeypatch.setattr(
+        "fastumi_data.session_recorder.subprocess.Popen", popen
+    )
+
+    with pytest.raises(ValueError, match="2 mm、1°"):
+        main(
+            [
+                "--task",
+                "pick_place",
+                "--session-id",
+                "session",
+                "--dataset-root",
+                str(tmp_path),
+                "--extrinsic",
+                str(tmp_path / "tracker_to_tcp.yaml"),
+            ]
+        )
+
+    strict_loader.assert_called_once_with(
+        str(tmp_path / "tracker_to_tcp.yaml")
+    )
+    assert not (tmp_path / "pick_place" / "session").exists()
+    popen.assert_not_called()
+
+
+def test_main_writes_v2_manifest_without_calibration_verified(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """验证成功会话清单使用 v2 并省略已删除的验证状态。"""
+    extrinsic_path = tmp_path / "tracker_to_tcp.yaml"
+    processing_path = tmp_path / "processing.yaml"
+    extrinsic_path.write_text("tracker_to_tcp: {}\n", encoding="utf-8")
+    processing_path.write_text("topics: {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "fastumi_data.session_recorder.load_tracker_tcp_extrinsic",
+        Mock(
+            return_value=Mock(
+                metadata={
+                    "translation_rmse_mm": 2.0,
+                    "rotation_rmse_deg": 1.0,
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.session_recorder.subprocess.Popen",
+        Mock(side_effect=[Mock(), Mock()]),
+    )
+    monkeypatch.setattr(
+        "fastumi_data.session_recorder._wait_for_recording_processes",
+        Mock(),
+    )
+
+    main(
+        [
+            "--task",
+            "pick_place",
+            "--session-id",
+            "session",
+            "--dataset-root",
+            str(tmp_path),
+            "--extrinsic",
+            str(extrinsic_path),
+            "--processing-config",
+            str(processing_path),
+        ]
+    )
+
+    manifest_path = tmp_path / "pick_place" / "session" / "session.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 2
+    assert "calibration_verified" not in manifest

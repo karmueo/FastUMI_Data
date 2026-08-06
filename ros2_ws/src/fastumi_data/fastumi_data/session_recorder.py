@@ -12,13 +12,15 @@ import sys
 import termios
 import time
 import tty
-from typing import Callable, List, Optional, TextIO
+from typing import Any, Callable, List, Mapping, Optional, TextIO
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 import yaml
+
+from fastumi_data.extrinsic import load_tracker_tcp_extrinsic
 
 
 # 默认录制的数据和 episode 边界话题。
@@ -151,11 +153,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="默认使用 fastumi_data 包内的同步配置",
     )
     parser.add_argument(
-        "--allow-unverified-calibration",
-        action="store_true",
-        help="仅用于降级试验；允许残差缺失或超过正式门限的外参",
-    )
-    parser.add_argument(
         "--topic", action="append", dest="topics", help="覆盖默认录制话题"
     )
     parser.add_argument(
@@ -191,13 +188,12 @@ def _copy_snapshot(
     }
 
 
-def _calibration_passes_acceptance(path: str) -> bool:
-    """检查外参是否满足 2 mm、1° 的正式数据门限。"""
+def _calibration_passes_acceptance(metadata: Mapping[str, Any]) -> bool:
+    """检查已严格校验外参元数据是否满足 2 mm、1° 正式门限。"""
     try:
-        document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-        translation_rmse_mm = float(document["translation_rmse_mm"])
-        rotation_rmse_deg = float(document["rotation_rmse_deg"])
-    except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError):
+        translation_rmse_mm = float(metadata["translation_rmse_mm"])
+        rotation_rmse_deg = float(metadata["rotation_rmse_deg"])
+    except (TypeError, ValueError, KeyError):
         return False
     return translation_rmse_mm <= 2.0 and rotation_rmse_deg <= 1.0
 
@@ -273,6 +269,9 @@ def _wait_for_recording_processes(
 def main(argv: Optional[List[str]] = None) -> None:
     """启动 episode 管理节点和 ros2 bag MCAP 录制进程。"""
     arguments = _build_parser().parse_args(argv)
+    extrinsic = load_tracker_tcp_extrinsic(arguments.extrinsic)
+    if not _calibration_passes_acceptance(extrinsic.metadata):
+        raise ValueError("Tracker 到 TCP 外参未通过 2 mm、1° 验收")
     session_id = arguments.session_id or datetime.now(
         timezone.utc
     ).strftime("%Y%m%dT%H%M%SZ")
@@ -283,17 +282,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     snapshot_dir = session_dir / "calibration_snapshot"
     topics = arguments.topics or DEFAULT_TOPICS
 
-    calibration_verified = _calibration_passes_acceptance(
-        arguments.extrinsic
-    )
-    if (
-        not calibration_verified
-        and not arguments.allow_unverified_calibration
-    ):
-        raise ValueError(
-            "Tracker 到 TCP 外参未通过 2 mm、1° 验收；"
-            "降级试验可显式使用 --allow-unverified-calibration"
-        )
     raw_dir.mkdir(parents=True, exist_ok=False)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     processing_config = arguments.processing_config or str(
@@ -317,7 +305,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             _copy_snapshot(source_text, snapshot_dir)
         )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "task_name": arguments.task,
         "session_id": session_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -325,7 +313,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         "bag_uri": "raw/bag",
         "topics": topics,
         "tracker_to_tcp": extrinsic_snapshot,
-        "calibration_verified": calibration_verified,
         "processing_config": processing_snapshot,
         "additional_snapshots": copied_snapshots,
     }

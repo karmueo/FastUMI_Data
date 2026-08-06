@@ -86,17 +86,13 @@ class McapEpisodeConverter:
         topics: Dict,
         extrinsic_path: str,
         force: bool,
-        allow_unverified_extrinsic: bool = False,
     ) -> None:
         """保存转换配置并初始化消息解码器。"""
         self._bag_uri = str(Path(bag_uri).resolve())
         self._output_dir = Path(output_dir).resolve()
         self._config = processing_config
         self._topics = topics
-        self._extrinsic = load_tracker_tcp_extrinsic(
-            extrinsic_path,
-            allow_unverified=allow_unverified_extrinsic,
-        )
+        self._extrinsic = load_tracker_tcp_extrinsic(extrinsic_path)
         self._force = force
         self._bridge = CvBridge()
         self._active: Optional[EpisodeBuffer] = None
@@ -127,7 +123,6 @@ class McapEpisodeConverter:
             "source_calibration_sha256": (
                 self._extrinsic.source_calibration_sha256
             ),
-            "calibration_verified": self._extrinsic.calibration_verified,
             "calibration_method": self._extrinsic.calibration_method,
             "aruco_config_sha256": self._extrinsic.aruco_config_sha256,
         }
@@ -188,7 +183,6 @@ class McapEpisodeConverter:
             source_calibration_sha256=(
                 self._extrinsic.source_calibration_sha256
             ),
-            calibration_verified=self._extrinsic.calibration_verified,
             calibration_method=self._extrinsic.calibration_method,
             aruco_config_sha256=self._extrinsic.aruco_config_sha256,
         )
@@ -200,7 +194,6 @@ class McapEpisodeConverter:
             source_calibration_sha256=(
                 self._extrinsic.source_calibration_sha256
             ),
-            calibration_verified=self._extrinsic.calibration_verified,
             calibration_method=self._extrinsic.calibration_method,
             aruco_config_sha256=self._extrinsic.aruco_config_sha256,
         )
@@ -374,7 +367,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         help="默认使用 <session>/ 目录",
     )
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--allow-unverified-extrinsic", action="store_true")
     arguments = parser.parse_args(argv)
     processing_config, topics = _load_processing_document(arguments.config)
     bag_path = Path(arguments.bag_uri).resolve()
@@ -392,7 +384,6 @@ def main(argv: Optional[list[str]] = None) -> None:
             topics,
             arguments.extrinsic,
             arguments.force,
-            arguments.allow_unverified_extrinsic,
         )
         summary = converter.convert()
         print(json.dumps(summary, ensure_ascii=False, indent=2))
