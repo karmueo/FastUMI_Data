@@ -37,6 +37,7 @@ setup(
             "convert_mcap = fastumi_data.mcap_converter:main",
             "calibrate_tracker_tcp = fastumi_data.calibration_cli:main",
             "calibrate_tracker_camera = fastumi_data.tracker_camera_cli:main",
+            "calibrate_aruco_tcp = fastumi_data.aruco_tcp_cli:main",
         ],
     },
 )
