@@ -1,0 +1,31 @@
+# 双 ArUco 到夹爪中心 TCP 的 bootstrap 配置；长度单位为米，变换方向为 ^pair T_tcp。
+schema_version: 1
+verified: false
+fixture_version: dual-aruco-bootstrap-v1
+
+aruco:
+  dictionary_name: DICT_4X4_50
+  marker_size_m: 0.016  # ArUco 方形边长，单位 m。
+  tag0_id: 0
+  tag1_id: 1
+
+rectification:
+  projection: reuse_kalibr_intrinsics  # 复用 Kalibr K 作为去畸变投影矩阵。
+
+pair_frame:
+  y_axis_from_tag_id: 0  # +Y 从 ID 0 指向 ID 1。
+  y_axis_to_tag_id: 1
+  z_axis_from_marker_normals: true
+  marker_normal_sign: -1  # 使用 -1 修正 ArUco 平面法向方向。
+
+full_open_geometry:
+  tag_center_distance_m: 0.126  # 全开 ID 0/1 中心距，单位 m。
+  pair_from_tcp:  # ^pair T_tcp，TCP 原点相对 pair 原点的平移和旋转。
+    translation_m: [0.012, 0.0, 0.018]  # +12 mm X、+18 mm Z。
+    quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+motion_model:
+  type: symmetric_parallel_linear
+  openness_definition: 0_closed_1_open
+  closed_tag_center_distance_m: 0.04831  # 完全闭合中心距，单位 m。
+  open_tag_center_distance_m: 0.126  # 完全打开中心距，单位 m。
