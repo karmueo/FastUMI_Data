@@ -53,6 +53,41 @@ def test_load_tracker_tcp_extrinsic_defaults_legacy_metadata(tmp_path):
 
     assert legacy.time_offset_ms == 0.0
     assert legacy.source_calibration_sha256 == ""
+    assert legacy.calibration_verified is True
+    assert legacy.calibration_method == ""
+    assert legacy.aruco_config_sha256 == ""
+
+
+def test_unverified_extrinsic_requires_explicit_opt_in(tmp_path):
+    """显式未验证外参默认拒绝，allow 后应保留完整 provenance。"""
+    path = tmp_path / "unverified.yaml"
+    _write_extrinsic(
+        path,
+        calibration_verified=False,
+        method="dual_aruco_bootstrap",
+        aruco_config_sha256="aruco-hash",
+    )
+
+    with pytest.raises(ValueError, match="allow-unverified-extrinsic"):
+        load_tracker_tcp_extrinsic(str(path))
+
+    extrinsic = load_tracker_tcp_extrinsic(
+        str(path), allow_unverified=True
+    )
+
+    assert extrinsic.calibration_verified is False
+    assert extrinsic.calibration_method == "dual_aruco_bootstrap"
+    assert extrinsic.aruco_config_sha256 == "aruco-hash"
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None])
+def test_calibration_verified_must_be_yaml_bool(tmp_path, value):
+    """calibration_verified 只接受 YAML bool，避免字符串真假误放行。"""
+    path = tmp_path / "invalid_verified.yaml"
+    _write_extrinsic(path, calibration_verified=value)
+
+    with pytest.raises(ValueError, match="calibration_verified"):
+        load_tracker_tcp_extrinsic(str(path), allow_unverified=True)
 
 
 def test_load_tracker_tcp_extrinsic_rejects_nonfinite_time_offset(tmp_path):

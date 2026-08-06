@@ -23,6 +23,9 @@ def write_episode_hdf5(
     calibration_hash: str,
     tracker_time_offset_ms: float = 0.0,
     source_calibration_sha256: str = "",
+    calibration_verified: bool = True,
+    calibration_method: str = "",
+    aruco_config_sha256: str = "",
 ) -> None:
     """原子式写入一条 FastUMI HDF5 episode。
 
@@ -44,6 +47,9 @@ def write_episode_hdf5(
         root.attrs["calibration_sha256"] = calibration_hash
         root.attrs["tracker_time_offset_ms"] = tracker_time_offset_ms
         root.attrs["source_calibration_sha256"] = source_calibration_sha256
+        root.attrs["calibration_verified"] = calibration_verified
+        root.attrs["calibration_method"] = calibration_method
+        root.attrs["aruco_config_sha256"] = aruco_config_sha256
         observations = root.create_group("observations")
         images = observations.create_group("images")
         images.create_dataset(
@@ -79,6 +85,9 @@ def build_quality_report(
     calibration_hash: str,
     tracker_time_offset_ms: float = 0.0,
     source_calibration_sha256: str = "",
+    calibration_verified: bool = True,
+    calibration_method: str = "",
+    aruco_config_sha256: str = "",
 ) -> Dict[str, Any]:
     """生成可序列化的 episode 质量摘要。"""
     quaternion_norms = np.linalg.norm(episode.qpos[:, 3:7], axis=1)
@@ -101,6 +110,9 @@ def build_quality_report(
         "calibration_sha256": calibration_hash,
         "tracker_time_offset_ms": tracker_time_offset_ms,
         "source_calibration_sha256": source_calibration_sha256,
+        "calibration_verified": calibration_verified,
+        "calibration_method": calibration_method,
+        "aruco_config_sha256": aruco_config_sha256,
         "warnings": warnings,
     }
 

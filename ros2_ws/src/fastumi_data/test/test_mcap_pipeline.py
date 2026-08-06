@@ -166,6 +166,9 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
                 "tracker_serial": "LHR-TEST",
                 "translation_rmse_mm": 0.0,
                 "rotation_rmse_deg": 0.0,
+                "calibration_verified": False,
+                "method": "dual_aruco_bootstrap",
+                "aruco_config_sha256": "aruco-hash",
                 "time_offset_ms": 2.968089243035214,
                 "source_calibration": {"sha256": "source-hash"},
                 "tracker_to_tcp": {
@@ -176,6 +179,15 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
+    with pytest.raises(ValueError, match="allow-unverified-extrinsic"):
+        McapEpisodeConverter(
+            str(bag_uri),
+            str(tmp_path),
+            ProcessingConfig(),
+            topics,
+            str(extrinsic_path),
+            force=False,
+        )
     converter = McapEpisodeConverter(
         str(bag_uri),
         str(tmp_path),
@@ -183,6 +195,7 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
         topics,
         str(extrinsic_path),
         force=False,
+        allow_unverified_extrinsic=True,
     )
     summary = converter.convert()
 
@@ -204,15 +217,24 @@ def test_synthetic_mcap_to_hdf5(tmp_path: Path) -> None:
             2.968089243035214
         )
         assert root.attrs["source_calibration_sha256"] == "source-hash"
+        assert bool(root.attrs["calibration_verified"]) is False
+        assert root.attrs["calibration_method"] == "dual_aruco_bootstrap"
+        assert root.attrs["aruco_config_sha256"] == "aruco-hash"
     report_path = tmp_path / "reports" / "episode_0000.json"
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["tracker_time_offset_ms"] == pytest.approx(
         2.968089243035214
     )
     assert report["source_calibration_sha256"] == "source-hash"
+    assert report["calibration_verified"] is False
+    assert report["calibration_method"] == "dual_aruco_bootstrap"
+    assert report["aruco_config_sha256"] == "aruco-hash"
     rejection_path = tmp_path / "reports" / "episode_0001.json"
     rejection_report = json.loads(rejection_path.read_text(encoding="utf-8"))
     assert rejection_report["tracker_time_offset_ms"] == pytest.approx(
         2.968089243035214
     )
     assert rejection_report["source_calibration_sha256"] == "source-hash"
+    assert rejection_report["calibration_verified"] is False
+    assert rejection_report["calibration_method"] == "dual_aruco_bootstrap"
+    assert rejection_report["aruco_config_sha256"] == "aruco-hash"

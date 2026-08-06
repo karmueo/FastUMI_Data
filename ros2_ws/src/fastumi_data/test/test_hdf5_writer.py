@@ -108,3 +108,55 @@ def test_persists_tracker_time_offset_and_source_calibration(tmp_path) -> None:
         2.968089243035214
     )
     assert persisted_report["source_calibration_sha256"] == "source-hash"
+
+
+@pytest.mark.skipif(h5py is None, reason="当前系统 Python 未安装 h5py")
+def test_persists_unverified_calibration_provenance_in_hdf5_and_report(
+    tmp_path,
+) -> None:
+    """HDF5 根属性和 JSON 报告应完整保留 bootstrap provenance。"""
+    episode = SynchronizedEpisode(
+        timestamp_ns=np.arange(2, dtype=np.int64),
+        images_rgb=np.zeros((2, 8, 8, 3), dtype=np.uint8),
+        qpos=np.tile(
+            np.asarray([0, 0, 0, 0, 0, 0, 1, 0.5], dtype=np.float32),
+            (2, 1),
+        ),
+        gripper_observed=np.ones(2, dtype=np.bool_),
+        tracker_tracking_ok=np.ones(2, dtype=np.bool_),
+        pose_gap_ms=np.zeros(2, dtype=np.float32),
+        gripper_gap_ms=np.zeros(2, dtype=np.float32),
+    )
+    output = tmp_path / "episode_0000.hdf5"
+    report_path = tmp_path / "episode_0000.json"
+
+    write_episode_hdf5(
+        str(output),
+        episode,
+        "task",
+        "session",
+        0,
+        20.0,
+        "runtime-hash",
+        calibration_verified=False,
+        calibration_method="dual_aruco_bootstrap",
+        aruco_config_sha256="aruco-hash",
+    )
+    report = build_quality_report(
+        episode,
+        [],
+        "runtime-hash",
+        calibration_verified=False,
+        calibration_method="dual_aruco_bootstrap",
+        aruco_config_sha256="aruco-hash",
+    )
+    write_json_report(str(report_path), report)
+
+    with h5py.File(output, "r") as root:
+        assert bool(root.attrs["calibration_verified"]) is False
+        assert root.attrs["calibration_method"] == "dual_aruco_bootstrap"
+        assert root.attrs["aruco_config_sha256"] == "aruco-hash"
+    persisted_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted_report["calibration_verified"] is False
+    assert persisted_report["calibration_method"] == "dual_aruco_bootstrap"
+    assert persisted_report["aruco_config_sha256"] == "aruco-hash"
