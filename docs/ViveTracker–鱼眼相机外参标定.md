@@ -16,7 +16,7 @@
 - Tracker 位姿：`geometry_msgs/msg/PoseStamped`。
 - Tracker 状态：`fastumi_interfaces/msg/TrackerStatus`，有效状态要求
   `device_connected=true`、`pose_valid=true`、`tracking_state=3`。
-- 相机模型：`docs/kalibr_data-camchain-imucam.yaml` 中的
+- 相机模型：`config/calibration/kalibr_data-camchain-imucam.yaml` 中的
   `pinhole + equidistant` 参数。bag 内 `CameraInfo` 不参与求解。
 - 标定板：`docs/april_6x6.yaml`，6×6、`tagSize=0.052 m`、
   `tagSpacing=0.3725`、`tag36h11`、ID 0–35。间距比由 2026-07-31 实际板图像的
@@ -68,7 +68,7 @@ ament Python 把 console script 安装在包的 `lib/fastumi_data/` 目录。推
 ```bash
 ros2 run fastumi_data calibrate_tracker_camera \
   --bag /path/to/tracker_fisheye_bag \
-  --camera-config docs/kalibr_data-camchain-imucam.yaml \
+  --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/example/detection \
   --tag-family tag36h11 \
@@ -121,7 +121,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 ```bash
 ros2 run fastumi_data calibrate_tracker_camera \
   --bag /path/to/tracker_fisheye_bag \
-  --camera-config docs/kalibr_data-camchain-imucam.yaml \
+  --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/example/final \
   --tag-family tag36h11 \
@@ -291,7 +291,7 @@ dataset/calibration/tracker_fisheye_20260731_143146/detection/
 源 Tracker→鱼眼相机标定为：
 
 ```text
-/home/scl/work/UMI/FastUMI_Data/dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml
+/home/scl/work/UMI/FastUMI_Data/config/calibration/tracker_camera_calibration.yaml
 ```
 
 双 ArUco 配置示例为仓库内的
@@ -342,27 +342,66 @@ ID 0/1 分别生成 TCP 位置候选，候选平移按单 tag 重投影 RMSE 的
 
 ### 11.3 运行双 ArUco 标定
 
-命令必须使用 ROS Jazzy Python，并将当前 worktree 源码放在 `PYTHONPATH` 首位：
+以下命令默认已进入 FastUMI_Data 项目根目录，配置和输出路径均按项目根目录
+解析。标定命令通过 ROS 2 console script 运行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
-PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
-/home/scl/work/UMI/UMI/.venv/bin/python -m fastumi_data.aruco_tcp_cli \
+source ros2_ws/install/setup.bash
+calibration_output_dir="dataset/calibration/dual_aruco_tcp_$(date +%Y%m%d_%H%M%S)"
+ros2 run fastumi_data calibrate_aruco_tcp \
   /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
-  --camera-config $PWD/docs/kalibr_data-camchain-imucam.yaml \
-  --aruco-config $PWD/config/calibration/aruco_to_tcp.example.yaml \
+  --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
+  --aruco-config config/calibration/aruco_to_tcp.example.yaml \
   --tracker-camera-calibration \
-    /home/scl/work/UMI/FastUMI_Data/dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml \
+    config/calibration/tracker_camera_calibration.yaml \
   --tracker-config \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/calibration_snapshot/vive_tracker.yaml \
+    config/calibration/vive_tracker.yaml \
   --output-dir \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806 \
-  --frame-stride 1 --allow-unverified
+    "$calibration_output_dir" \
+  --frame-stride 1
 ```
 
-`--allow-unverified` 只放行 `verified=false` bootstrap 配置。它对数值质量门没有影响。
-输出 `accepted=true` 后才可使用 `calibration_snapshot/tracker_to_tcp.yaml` 进入转换。
+`calibration_output_dir` 在每次运行前按当前系统时间生成，例如
+`dataset/calibration/dual_aruco_tcp_20260806_173045`，用于避免不同标定任务使用同一输出目录。
+
+`calibrate_aruco_tcp` 支持以下参数。带“必填”的参数没有默认值；
+`bag_uri` 是命令中的位置参数。
+
+| 参数名 | 默认值 | 参数说明 |
+| --- | --- | --- |
+| `bag_uri` | 无（必填） | 唯一 ROS 2 MCAP/bag 输入目录；读取图像、Tracker 位姿和状态、夹爪开度。 |
+| `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，用于加载 `pinhole + equidistant` 模型并生成整幅去畸变映射。 |
+| `--aruco-config` | 无（必填） | 双 ArUco→TCP 配置 YAML 路径，提供 tag ID、尺寸、坐标约定和开度运动模型。 |
+| `--tracker-camera-calibration` | 无（必填） | 已验收的 Tracker→Camera 标定 YAML 路径；提供 `^tracker T_camera` 和 `time_offset_ms`。 |
+| `--tracker-config` | 无（必填） | Vive Tracker 配置 YAML 路径，用于读取并记录 Tracker serial。 |
+| `--output-dir` | 无（必填） | 标定快照、Tracker→TCP 外参、JSON/CSV 报告和 overlay 图的原子输出目录。 |
+| `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 鱼眼图像话题名称。 |
+| `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题名称。 |
+| `--status-topic` | `/vive_tracker/status` | Tracker 状态话题名称；只使用有效状态对应的位姿。 |
+| `--gripper-topic` | `/gripper/state` | 夹爪状态话题名称；从 `raw_openness` 获取 0～1 开度。 |
+| `--frame-stride` | `1` | 图像抽帧步长；每隔指定帧数执行检测与标定。 |
+| `--max-pose-gap-ms` | `50.0` | Tracker 位姿插值和状态查询允许的最大间隔，单位为毫秒。 |
+| `--max-gripper-gap-ms` | `200.0` | 夹爪开度插值允许的最大间隔，单位为毫秒。 |
+| `--minimum-frames` | `30` | 稳健 SE(3) 聚合所需的最少有效双 tag 帧数。 |
+| `--max-reprojection-rmse-px` | `1.5` | 单 tag 重投影 RMSE 上限，单位为像素。 |
+| `--max-distance-error-mm` | `5.0` | 实测 tag 中心距与 openness 运动模型的最大误差，单位为毫米。 |
+| `--max-candidate-difference-mm` | `5.0` | ID 0/1 两路 TCP 位置候选的最大差值，单位为毫米。 |
+| `--max-translation-p95-mm` | `3.0` | 稳健聚合后平移残差 P95 质量门限，单位为毫米。 |
+| `--max-rotation-p95-deg` | `2.0` | 稳健聚合后旋转残差 P95 质量门限，单位为度。 |
+| `--force` | 关闭 | 允许原子替换已存在的输出目录；未指定时遇到已有目录会拒绝覆盖。 |
+
+`config/calibration/aruco_to_tcp.example.yaml` 使用 schema v2。旧 v1 配置和包含已删除
+验证字段的配置会在读取 bag 前被拒绝。程序会执行：
+
+- ArUco 配置 schema、字典、tag ID、四元数和几何一致性校验；
+- Tracker→Camera 源标定 `accepted=true` 校验；
+- 单 tag 重投影、tag 间距、两路 TCP 候选差和 SE(3) 聚合质量门。
+
+质量门失败时命令返回退出码 2，并保留 `summary.json`、逐帧指标和 overlay 诊断，
+不会生成可由严格消费者使用的外参。质量门通过时，输出
+`calibration_snapshot/tracker_to_tcp.yaml` 必须为 schema v2 且 `accepted: true`；
+严格消费者仅接受此状态。
 
 默认质量门为：
 
@@ -384,13 +423,12 @@ PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
 
 `tracker_to_tcp.yaml`、`summary.json`、每条 HDF5 根属性和 episode JSON 都保留：
 
-- `calibration_verified=false`；
 - `calibration_method=dual_aruco_bootstrap`；
 - 双 ArUco 配置 SHA-256；
 - Tracker→Camera 源标定 SHA-256；
 - Tracker serial、`time_offset_ms`、质量指标和输入路径/哈希。
 
 正式使用前需要检查至少 5 张 overlay 中的 ID、角点、pair 方向和 TCP 偏移，并确认
-安装测量/CAD。确认后复制配置为新的版本，将 `verified` 改为 `true`、更新
-`fixture_version`，重新运行标定、MCAP 转换和 Zarr 导出。bootstrap 报告保持原样，
-不能只修改旧报告的 verified 字段。
+安装测量/CAD。更新安装几何或 `fixture_version` 后，应重新运行标定、MCAP 转换和 Zarr
+导出；不能只修改旧报告。`--allow-high-residual` 仅用于在质量门失败时保留零退出码，
+方便检查报告；它不会把失败结果变为 `accepted: true`，也不会生成可消费外参。

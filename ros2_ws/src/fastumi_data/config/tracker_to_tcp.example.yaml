@@ -1,5 +1,7 @@
-# 该文件展示 Tracker 到 UMI TCP 外参的版本化保存格式。
-schema_version: 1
+# 该文件仅展示 Tracker 到 UMI TCP 外参的版本化保存格式。
+# accepted 为 false，严格消费者会拒绝该单位外参。
+schema_version: 2
+accepted: false
 tracker_serial: LHR-XXXXXXXX
 fixture_version: fastumi-rm75-rigid-v1
 calibrated_at: "2026-01-01T00:00:00Z"

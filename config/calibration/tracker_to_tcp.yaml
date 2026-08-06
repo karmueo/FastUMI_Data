@@ -1,5 +1,7 @@
-# 本文件提供仅用于采集链路联调和机器人 dry-run 的未验证 Tracker 到 TCP 单位外参。
-schema_version: 1
+# 本文件仅展示 Tracker 到 TCP 外参格式并用于采集链路联调和机器人 dry-run。
+# accepted 为 false，严格消费者会拒绝该单位外参。
+schema_version: 2
+accepted: false
 tracker_serial: LHR-B77A06A7
 fixture_version: uncalibrated-identity-v1
 method: identity_passthrough_unverified

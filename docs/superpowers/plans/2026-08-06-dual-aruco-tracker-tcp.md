@@ -5,7 +5,7 @@
 
 **Goal:** 从 session 根目录的 `raw/bag` 检测去畸变双 ArUco，生成固定 Tracker→夹爪中心 TCP 外参，并产出可追溯的 11 条 HDF5 和 224×224 Zarr。
 
-**Architecture:** 标定阶段把 ID 0/1 组合成右手 pair 坐标系，以 openness/CAD 模型分别推导 TCP 候选，进行单帧加权融合和跨帧稳健 SE(3) 聚合，最后与既有 `^tracker T_camera` 组合成固定 `^tracker T_tcp`。转换阶段只消费固定外参；未验证 bootstrap 状态通过外参、HDF5 和 JSON 报告全链路传播。
+**Architecture:** 标定阶段把 ID 0/1 组合成右手 pair 坐标系，以 openness/CAD 模型分别推导 TCP 候选，进行单帧加权融合和跨帧稳健 SE(3) 聚合，最后与既有 `^tracker T_camera` 组合成固定 `^tracker T_tcp`。转换阶段只消费 schema v2 且 `accepted: true` 的固定外参，并传播方法、质量指标和 SHA-256 溯源。
 
 **Tech Stack:** Python 3.9/3.12、ROS 2 Jazzy、rosbag2_py、OpenCV 4.11 ArUco/IPPE、NumPy、SciPy Rotation、PyYAML、h5py、pytest、Zarr v2。
 
@@ -17,7 +17,7 @@
 - `+Y` 从 ID 0 指向 ID 1；`marker_normal_sign=-1`；`+X=+Y×+Z`；TCP 偏移 `+12 mm X +18 mm Z`。
 - 全开/闭合 tag 中心距为 126/48.31 mm；openness 为 0 闭合、1 打开；单指行程 38.845 mm。
 - 去畸变投影矩阵复用 Kalibr K，禁止自动新内参默认路径。
-- bootstrap 配置必须写 `verified: false`；`--allow-unverified` 只放行配置状态，不绕过数值质量门。
+- 配置必须使用 schema v2；旧 v1 及已删除验证字段一律拒绝，外参消费者只接受 `accepted: true`。
 - 禁止 Anaconda。纯算法测试使用 `/home/scl/work/UMI/FastUMI_Data/.venv/bin/python`；ROS/MCAP 使用 `/home/scl/work/UMI/UMI/.venv/bin/python`。
 - Luna worktree 的 ROS 命令先 source `/opt/ros/jazzy/setup.bash` 与主工作区 `ros2_ws/install/setup.bash`，再把当前 worktree 源码放在 `PYTHONPATH` 最前。
 - 新建/大幅修改 Python 文件必须有中文模块 docstring；类、函数、方法必须有中文 docstring；遵循现有 PEP 8 风格。
@@ -35,16 +35,16 @@
 
 **Interfaces:**
 - Produces `ArucoTcpConfig`。
-- Produces `load_aruco_tcp_config(path: str, allow_unverified: bool = False) -> ArucoTcpConfig`。
+- Produces `load_aruco_tcp_config(path: str) -> ArucoTcpConfig`。
 - Produces `ArucoTcpConfig.expected_half_distance_m(openness: float) -> float`。
 - Produces `ArucoTcpConfig.pair_from_tcp: np.ndarray`，表示 `^pair T_tcp`。
 
-- [ ] **Step 1: 写配置加载与未验证安全门测试**
+- [ ] **Step 1: 写 schema v2 配置加载测试**
 
-测试 YAML 使用全部确认值：schema 1、`verified: false`、`DICT_4X4_50`、16 mm、ID 0/1、
+测试 YAML 使用全部确认值：schema v2、`DICT_4X4_50`、16 mm、ID 0/1、
 `reuse_kalibr_intrinsics`、`marker_normal_sign=-1`、全开 0.126 m、闭合 0.04831 m、
-`pair_from_tcp.translation_m=[0.012,0,0.018]` 和单位 `xyzw` 四元数。默认加载必须拒绝；
-`allow_unverified=True` 必须成功并保留源文件 SHA-256。
+`pair_from_tcp.translation_m=[0.012,0,0.018]` 和单位 `xyzw` 四元数。旧 v1 和已删除
+验证字段必须拒绝，成功加载保留源文件 SHA-256。
 
 - [ ] **Step 2: 运行 RED**
 
@@ -72,7 +72,7 @@ assert config.expected_half_distance_m(0.5) == pytest.approx(0.0435775)
 
 - [ ] **Step 5: 实现 GREEN 并写示例 YAML**
 
-示例首行添加中文用途说明，字段旁注明单位和变换方向，固定 `verified: false` 与
+示例首行添加中文用途说明，字段旁注明单位和变换方向，固定 `schema_version: 2` 与
 `fixture_version: dual-aruco-bootstrap-v1`。运行测试，Expected: 全部 PASS。
 
 - [ ] **Step 6: 提交 Task 1**
@@ -167,7 +167,7 @@ git commit -m 'feat(calibration): 实现双 ArUco TCP 融合'
 ```bash
 source /opt/ros/jazzy/setup.bash
 source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
-PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
+PYTHONPATH=ros2_ws/src/fastumi_data:$PYTHONPATH \
 /home/scl/work/UMI/UMI/.venv/bin/python -m pytest \
   ros2_ws/src/fastumi_data/test/test_aruco_tcp_bag.py -q
 ```
@@ -189,7 +189,7 @@ Expected: FAIL，因为 bag 模块不存在。
 
 - [ ] **Step 6: 写 CLI/output RED 测试**
 
-parser 参数固定包含 bag_uri、camera/aruco/tracker-camera/tracker config、output-dir、四个 topic、frame-stride、pose/gripper gap、minimum frames、allow-unverified、force。mock 结果后断言外参含 Tracker serial、verified false、method、fixture、time offset、tracker/camera to TCP、两个源 SHA-256、质量指标。
+parser 参数固定包含 bag_uri、camera/aruco/tracker-camera/tracker config、output-dir、四个 topic、frame-stride、pose/gripper gap、minimum frames、force。mock 结果后断言外参含 schema v2、`accepted: true`、Tracker serial、method、fixture、time offset、tracker/camera to TCP、两个源 SHA-256 和质量指标。
 
 - [ ] **Step 7: 实现 CLI 与原子报告**
 
@@ -214,7 +214,7 @@ git commit -m 'feat(calibration): 添加双 ArUco TCP 离线标定'
 
 ---
 
-### Task 4: 未验证状态与溯源贯穿转换
+### Task 4: schema v2 验收门与溯源贯穿转换
 
 **Files:**
 - Modify: `ros2_ws/src/fastumi_data/fastumi_data/extrinsic.py`
@@ -225,35 +225,34 @@ git commit -m 'feat(calibration): 添加双 ArUco TCP 离线标定'
 - Modify: `ros2_ws/src/fastumi_data/test/test_mcap_pipeline.py`
 
 **Interfaces:**
-- Extends `TrackerTcpExtrinsic` with `calibration_verified: bool`、`calibration_method: str`、`aruco_config_sha256: str`。
-- Extends `load_tracker_tcp_extrinsic(path, allow_unverified=False)`。
-- Adds `convert_mcap --allow-unverified-extrinsic`。
+- Extends `TrackerTcpExtrinsic` with `calibration_method: str`、`aruco_config_sha256: str`。
+- Updates `load_tracker_tcp_extrinsic(path)` to require schema v2 and `accepted: true`.
 - Adds trailing optional writer/report parameters without breaking existing calls。
 
 - [ ] **Step 1: 写外参安全门 RED 测试**
 
-显式 `calibration_verified: false` 默认拒绝；allow 后加载并保留 false。旧 schema 缺字段时默认为 true。只接受 YAML bool，不接受字符串真假。
+缺少或不为 YAML bool 的 `accepted` 一律拒绝；`accepted: false`、旧 v1 和已删除字段也必须拒绝。
 
 - [ ] **Step 2: 运行 RED 并实现 loader GREEN**
 
-错误消息提示 `--allow-unverified-extrinsic`；dataclass 新字段置于尾部。运行 `test_extrinsic.py`，Expected: PASS。
+错误消息明确说明 schema v2 和 `accepted: true` 门槛；dataclass 新字段置于尾部。运行 `test_extrinsic.py`，Expected: PASS。
 
 - [ ] **Step 3: 写 HDF5/report 传播 RED 测试**
 
-传 false、method=`dual_aruco_bootstrap`、aruco hash，断言 HDF5 根属性与 JSON 完全一致。
+传 method=`dual_aruco_bootstrap`、aruco hash 和 accepted 结果，断言 HDF5 根属性与 JSON 完全一致。
 
 - [ ] **Step 4: 实现兼容 writer 参数**
 
-在 `write_episode_hdf5` 和 `build_quality_report` 尾部增加 `calibration_verified=True`、
-`calibration_method=''`、`aruco_config_sha256=''`，保留所有原位置参数。
+在 `write_episode_hdf5` 和 `build_quality_report` 尾部增加 `calibration_method=''`、
+`aruco_config_sha256=''`，保留所有原位置参数。
 
 - [ ] **Step 5: 写 converter RED 测试**
 
-默认转换显式未验证外参失败；加 CLI flag 后合成 episode 成功，accepted/rejected 报告和 HDF5 都传播状态/hash。
+默认转换 `accepted: false`、旧 v1 和遗留字段外参均失败；合成 accepted episode 成功，报告和 HDF5 都传播方法与哈希。
 
 - [ ] **Step 6: 实现 converter 传播并运行全包 GREEN**
 
-`McapEpisodeConverter` 尾部增加 allow 参数；所有 rejection/success 分支传播元数据。运行全部 `fastumi_data/test`，Expected: 0 failures、0 skipped。
+所有 rejection/success 分支传播元数据。运行全部 `fastumi_data/test`，Expected: 0 failures、0 skipped。
 
 - [ ] **Step 7: 提交 Task 4**
 
@@ -289,15 +288,15 @@ git commit -m 'feat(data): 传播双 ArUco 标定状态'
 ```bash
 source /opt/ros/jazzy/setup.bash
 source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
-PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
+PYTHONPATH=ros2_ws/src/fastumi_data:$PYTHONPATH \
 /home/scl/work/UMI/UMI/.venv/bin/python -m fastumi_data.aruco_tcp_cli \
   /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
   --camera-config /home/scl/work/UMI/FastUMI_Data/docs/kalibr_data-camchain-imucam.yaml \
-  --aruco-config $PWD/config/calibration/aruco_to_tcp.example.yaml \
+  --aruco-config config/calibration/aruco_to_tcp.example.yaml \
   --tracker-camera-calibration /home/scl/work/UMI/FastUMI_Data/dataset/calibration/tracker_fisheye_20260731_143146/final/calibration.yaml \
   --tracker-config /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/calibration_snapshot/vive_tracker.yaml \
   --output-dir /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806 \
-  --frame-stride 1 --allow-unverified
+  --frame-stride 1
 ```
 
 Expected: exit 0、accepted true、有效帧≥30、平移 P95≤3 mm、旋转 P95≤2°，且生成快照/JSON/CSV/至少 5 张 overlay。
@@ -305,13 +304,13 @@ Expected: exit 0、accepted true、有效帧≥30、平移 P95≤3 mm、旋转 P
 - [ ] **Step 4: 转换 11 条 HDF5**
 
 ```bash
-PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
+PYTHONPATH=ros2_ws/src/fastumi_data:$PYTHONPATH \
 /home/scl/work/UMI/UMI/.venv/bin/python -m fastumi_data.mcap_converter \
   /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
   --extrinsic /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/calibration_snapshot/tracker_to_tcp.yaml \
   --config /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/calibration_snapshot/processing.yaml \
   --output-dir /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806 \
-  --allow-unverified-extrinsic --force
+  --force
 ```
 
 Expected: converted 11、rejected 0。
@@ -319,7 +318,7 @@ Expected: converted 11、rejected 0。
 - [ ] **Step 5: 导出 Zarr**
 
 ```bash
-/home/scl/work/UMI/FastUMI_Data/.venv/bin/python $PWD/data_processing_tcp_to_dp.py \
+/home/scl/work/UMI/FastUMI_Data/.venv/bin/python data_processing_tcp_to_dp.py \
   --input /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/episodes \
   --output /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/pick_place_dp.zarr \
   --image-size 224 224 --force
@@ -334,7 +333,7 @@ ROS：
 ```bash
 source /opt/ros/jazzy/setup.bash
 source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
-PYTHONPATH=$PWD/ros2_ws/src/fastumi_data:$PYTHONPATH \
+PYTHONPATH=ros2_ws/src/fastumi_data:$PYTHONPATH \
 /home/scl/work/UMI/UMI/.venv/bin/python -m pytest \
   ros2_ws/src/fastumi_data/test -q
 ```
@@ -359,7 +358,7 @@ git diff --check
 
 - [ ] **Step 7: 验收产物与不变性**
 
-断言 11 个 accepted HDF5、1205 steps、全部 `calibration_verified=false`、method/hash 一致；注册 JPEG XL codec 后用 ReplayBuffer 断言 Zarr 11/1205/224×224；重算 Step 1 摘要，必须相同。
+断言 11 个 accepted HDF5、1205 steps、method/hash 一致；注册 JPEG XL codec 后用 ReplayBuffer 断言 Zarr 11/1205/224×224；重算 Step 1 摘要，必须相同。
 
 - [ ] **Step 8: 提交文档并回报**
 

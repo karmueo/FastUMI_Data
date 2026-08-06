@@ -1,6 +1,5 @@
 # 双 ArUco 到夹爪中心 TCP 的 bootstrap 配置；长度单位为米，变换方向为 ^pair T_tcp。
-schema_version: 1
-verified: false
+schema_version: 2
 fixture_version: dual-aruco-bootstrap-v1
 
 aruco:

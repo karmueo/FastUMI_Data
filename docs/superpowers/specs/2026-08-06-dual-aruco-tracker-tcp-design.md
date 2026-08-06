@@ -125,8 +125,7 @@ p_tcp_from_tag1 = p_tag1 + 0.012·X - half_distance(o)·Y + 0.018·Z
 配置。核心 schema 为：
 
 ```yaml
-schema_version: 1
-verified: false
+schema_version: 2
 fixture_version: dual-aruco-bootstrap-v1
 
 aruco:
@@ -157,9 +156,9 @@ motion_model:
   open_tag_center_distance_m: 0.126
 ```
 
-加载器严格验证有限值、正距离、ID 唯一性、字典存在、单位四元数、右手旋转和运动范围。
-`verified: false` 的配置只能在标定 CLI 显式指定 `--allow-unverified` 时使用。输出外参、
-质量报告和 HDF5 必须继续记录未验证状态，避免 bootstrap 结果被误认为正式 CAD 标定。
+加载器严格验证 schema v2、有限值、正距离、ID 唯一性、字典存在、单位四元数、右手
+旋转和运动范围。旧 v1 配置及含已删除验证字段的配置一律拒绝；外参消费者还要求
+`accepted: true`，避免质量失败的结果进入后续转换。
 
 ## 5. 离线标定流水线
 
@@ -208,7 +207,7 @@ inverse(^world T_tcp_start) · ^world T_tcp(t)
 - `setup.py`：注册 console script；
 - 两份用户指定文档：补充配置语义、命令、质量判读和完整数据流。
 
-已有 Tracker→鱼眼标定模块保持独立。已有 `convert_mcap` 只扩展溯源字段和未验证状态
+已有 Tracker→鱼眼标定模块保持独立。已有 `convert_mcap` 只扩展溯源字段和 `accepted`
 检查，不在转换阶段重复检测 ArUco。
 
 ## 7. 质量门和失败行为
@@ -225,16 +224,18 @@ inverse(^world T_tcp_start) · ^world T_tcp(t)
 - 稳健聚合后 `^camera T_tcp` 平移 P95 残差不超过 3 mm；
 - 旋转 P95 残差不超过 2°。
 
-质量门失败时 CLI 返回非零并保留报告，不生成可用于正式转换的外参。`--allow-unverified`
-只放行配置验证状态，不绕过数值质量门。输入、配置和源标定均记录 SHA-256。
+质量门失败时 CLI 返回非零并保留报告，不生成可用于转换的外参。`--allow-high-residual`
+只允许诊断流程保留零退出码，报告中的 `accepted=false` 和失败项保持真实状态；它不会
+生成可消费外参。输入、配置和源标定均记录 SHA-256。
 
 ## 8. Bootstrap 与正式标定边界
 
-当前几何值先作为 `verified: false` 的 bootstrap 配置跑通链路。试运行派生目录名称必须
-含 `bootstrap`，外参 method、HDF5 属性和报告均记录 `calibration_verified=false`。
+当前几何值作为 schema v2 的 bootstrap 配置跑通链路。试运行派生目录名称必须含
+`bootstrap`，外参 method、HDF5 属性和报告均记录 `dual_aruco_bootstrap`、质量指标和
+输入 SHA-256。
 
-用户后续确认 CAD、安装测量和叠加图后，把配置改为 `verified: true` 并更新
-`fixture_version`。正式标定需重新运行 CLI、MCAP 转换和 Zarr 导出，不能仅修改旧报告。
+用户后续确认 CAD、安装测量和叠加图后，更新 `fixture_version` 并重新运行 CLI、MCAP
+转换和 Zarr 导出，不能仅修改旧报告。
 
 ## 9. 测试与真实数据验收
 
@@ -242,14 +243,14 @@ inverse(^world T_tcp_start) · ^world T_tcp(t)
 
 自动测试覆盖：
 
-- 配置字段、单位、ID、四元数和 verified 安全门；
+- schema v2 配置字段、单位、ID、四元数和遗留字段拒绝；
 - `+Y` 的 ID 顺序、`marker_normal_sign=-1` 和右手坐标；
 - 全开 tag0/tag1→TCP 平移分别为 `[12,63,18]` 和 `[12,-63,18] mm`；
 - openness=0/1 对应 24.155/63 mm 半间距；
 - 合成去畸变 ArUco 的 PnP、重投影误差和 TCP 恢复；
 - 双候选加权融合、异常 tag 拒绝和旋转聚合；
 - Tracker→Camera→TCP 变换方向；
-- 未验证状态写入外参、报告和 HDF5；
+- `accepted`、质量失败项和溯源哈希写入外参、报告和 HDF5；
 - CLI 的成功、质量失败和配置失败退出码。
 
 真实数据验收要求：
