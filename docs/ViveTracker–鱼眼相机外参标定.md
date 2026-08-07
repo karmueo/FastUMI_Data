@@ -123,13 +123,13 @@ ros2 run fastumi_data calibrate_tracker_camera \
   --bag /path/to/tracker_fisheye_bag \
   --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --target-config docs/april_6x6.yaml \
-  --output-dir dataset/calibration/example/final \
+  --output-dir dataset/calibration/tracker_camera_$(date +%Y%m%d_%H%M%S)/final \
   --tag-family tag36h11 \
   --frame-stride 2 \
   --min-tags 6 \
   --max-pose-gap-ms 50 \
-  --time-offset-min-ms -100 \
-  --time-offset-max-ms 100 \
+  --time-offset-min-ms -20 \
+  --time-offset-max-ms 20 \
   --time-offset-step-ms 2
 ```
 
@@ -203,9 +203,10 @@ ros2 run fastumi_data calibrate_tracker_camera \
 对通过质量门的结果执行：
 
 ```bash
+source ros2_ws/install/setup.bash
 PYTHONPATH=ros2_ws/src/fastumi_data \
 python3 -m fastumi_data.tracker_camera_report \
-  --verify dataset/calibration/example/final/calibration.yaml
+  --verify [前面对应的--output-dir]/calibration.yaml
 ```
 
 复核器检查 schema、正逆矩阵乘积、旋转正交性、旋转行列式、`xyzw` 四元数单位长度、
@@ -301,6 +302,7 @@ dataset/calibration/tracker_fisheye_20260731_143146/detection/
 /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/
 ├── calibration_snapshot/aruco_to_tcp.yaml
 ├── calibration_snapshot/tracker_to_tcp.yaml
+├── tracker_to_tcp_transform.yaml
 ├── calibration_report/summary.json
 ├── calibration_report/frame_metrics.csv
 ├── calibration_report/overlay_*.png
@@ -343,7 +345,13 @@ ID 0/1 分别生成 TCP 位置候选，候选平移按单 tag 重投影 RMSE 的
 ### 11.3 运行双 ArUco 标定
 
 以下命令默认已进入 FastUMI_Data 项目根目录，配置和输出路径均按项目根目录
-解析。标定命令通过 ROS 2 console script 运行：
+解析。标定命令通过 ROS 2 console script 运行。标定 bag 只需包含目标 RGB Image
+话题，默认话题为 `/xv_sdk/SN250801DR48FB26001253/rgb/image`；无需包含 Tracker
+pose/status 或 `GripperState`。程序单遍读取该图像话题，不执行 Tracker 或夹爪状态的
+时间同步。
+
+采样期间夹爪必须全程保持最大开度。程序固定使用 `openness=1.0` 计算双 tag 的全开
+几何关系，不从 bag 读取夹爪开度：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -354,7 +362,7 @@ ros2 run fastumi_data calibrate_aruco_tcp \
   --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --aruco-config config/calibration/aruco_to_tcp.example.yaml \
   --tracker-camera-calibration \
-    config/calibration/tracker_camera_calibration.yaml \
+    [5 完整标定这一节输出的--output-dir/calibration.yaml] \
   --tracker-config \
     config/calibration/vive_tracker.yaml \
   --output-dir \
@@ -370,22 +378,17 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 
 | 参数名 | 默认值 | 参数说明 |
 | --- | --- | --- |
-| `bag_uri` | 无（必填） | 唯一 ROS 2 MCAP/bag 输入目录；读取图像、Tracker 位姿和状态、夹爪开度。 |
+| `bag_uri` | 无（必填） | 唯一 ROS 2 MCAP/bag 输入目录；只读取目标 RGB Image。 |
 | `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，用于加载 `pinhole + equidistant` 模型并生成整幅去畸变映射。 |
-| `--aruco-config` | 无（必填） | 双 ArUco→TCP 配置 YAML 路径，提供 tag ID、尺寸、坐标约定和开度运动模型。 |
+| `--aruco-config` | 无（必填） | 双 ArUco→TCP 配置 YAML 路径，提供 tag ID、尺寸、坐标约定和全开几何模型。 |
 | `--tracker-camera-calibration` | 无（必填） | 已验收的 Tracker→Camera 标定 YAML 路径；提供 `^tracker T_camera` 和 `time_offset_ms`。 |
 | `--tracker-config` | 无（必填） | Vive Tracker 配置 YAML 路径，用于读取并记录 Tracker serial。 |
 | `--output-dir` | 无（必填） | 标定快照、Tracker→TCP 外参、JSON/CSV 报告和 overlay 图的原子输出目录。 |
 | `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 鱼眼图像话题名称。 |
-| `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题名称。 |
-| `--status-topic` | `/vive_tracker/status` | Tracker 状态话题名称；只使用有效状态对应的位姿。 |
-| `--gripper-topic` | `/gripper/state` | 夹爪状态话题名称；从 `raw_openness` 获取 0～1 开度。 |
 | `--frame-stride` | `1` | 图像抽帧步长；每隔指定帧数执行检测与标定。 |
-| `--max-pose-gap-ms` | `50.0` | Tracker 位姿插值和状态查询允许的最大间隔，单位为毫秒。 |
-| `--max-gripper-gap-ms` | `200.0` | 夹爪开度插值允许的最大间隔，单位为毫秒。 |
 | `--minimum-frames` | `30` | 稳健 SE(3) 聚合所需的最少有效双 tag 帧数。 |
 | `--max-reprojection-rmse-px` | `1.5` | 单 tag 重投影 RMSE 上限，单位为像素。 |
-| `--max-distance-error-mm` | `5.0` | 实测 tag 中心距与 openness 运动模型的最大误差，单位为毫米。 |
+| `--max-distance-error-mm` | `5.0` | 实测 tag 中心距与固定 `openness=1.0` 全开模型的最大误差，单位为毫米。 |
 | `--max-candidate-difference-mm` | `5.0` | ID 0/1 两路 TCP 位置候选的最大差值，单位为毫米。 |
 | `--max-translation-p95-mm` | `3.0` | 稳健聚合后平移残差 P95 质量门限，单位为毫米。 |
 | `--max-rotation-p95-deg` | `2.0` | 稳健聚合后旋转残差 P95 质量门限，单位为度。 |
@@ -401,13 +404,25 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 质量门失败时命令返回退出码 2，并保留 `summary.json`、逐帧指标和 overlay 诊断，
 不会生成可由严格消费者使用的外参。质量门通过时，输出
 `calibration_snapshot/tracker_to_tcp.yaml` 必须为 schema v2 且 `accepted: true`；
-严格消费者仅接受此状态。
+严格消费者仅接受这个元数据丰富的标定快照。输出目录根部还会生成
+`tracker_to_tcp_transform.yaml`，它是仅含最终变换的独立文件，顶层只有
+`tracker_to_tcp`，不包含 schema、`accepted`、质量指标、哈希、serial 或时间戳；该文件
+可直接用于位姿转换：
+
+```text
+^world T_tcp = ^world T_tracker @ ^tracker T_tcp
+```
+
+其中 `tracker_to_tcp_transform.yaml` 中的 `tracker_to_tcp` 值就是 `^tracker T_tcp`。
+需要质量门状态、输入溯源和完整标定信息时，使用
+`calibration_snapshot/tracker_to_tcp.yaml`；两个文件的用途不同，独立文件只提供最终
+变换。
 
 默认质量门为：
 
 - 每帧同时得到 ID 0/1 的正深度 IPPE 位姿；
 - 单 tag 重投影 RMSE ≤1.5 px；
-- 实测 tag 中心距与 openness 模型误差 ≤5 mm；
+- 实测 tag 中心距与固定 `openness=1.0` 全开模型误差 ≤5 mm；
 - 两路 TCP 候选差 ≤5 mm；
 - 至少 30 个有效帧；
 - 稳健 SE(3) 聚合后的平移 P95 ≤3 mm；

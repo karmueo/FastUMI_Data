@@ -57,7 +57,7 @@ def test_aprilgrid_tag_corners_use_kalibr_spacing() -> None:
 def test_load_checked_camera_and_target_files() -> None:
     """项目内相机和目标配置应解析为已确认参数。"""
     camera = load_kalibr_camera(
-        str(PROJECT_ROOT / "docs/kalibr_data-camchain-imucam.yaml")
+        str(PROJECT_ROOT / "config/calibration/kalibr_data-camchain-imucam.yaml")
     )
     target = load_aprilgrid(str(PROJECT_ROOT / "docs/april_6x6.yaml"))
     assert camera.resolution == (1280, 1280)

@@ -16,9 +16,6 @@ import cv2
 import numpy as np
 import yaml
 
-from fastumi_data.aruco_tcp_bag import (
-    read_aruco_tcp_timeline,
-)
 from fastumi_data.aruco_tcp_calibration import (
     ArucoTcpCalibrationResult,
     CalibrationThresholds,
@@ -34,18 +31,15 @@ from fastumi_data.aruco_tcp_estimator import (
 )
 from fastumi_data.pose_math import matrix_to_pose
 from fastumi_data.tracker_camera_bag import (
-    ImageFrame,
-    interpolate_world_from_tracker,
     iter_image_frames,
-    tracker_status_valid_at,
 )
 from fastumi_data.tracker_camera_config import load_kalibr_camera
 
 
 DEFAULT_IMAGE_TOPIC = "/xv_sdk/SN250801DR48FB26001253/rgb/image"
-DEFAULT_TRACKER_TOPIC = "/vive_tracker/pose"
-DEFAULT_STATUS_TOPIC = "/vive_tracker/status"
-DEFAULT_GRIPPER_TOPIC = "/gripper/state"
+
+# 双 ArUco 标定仅使用图像帧，统一按夹爪完全张开估计 TCP。
+FIXED_OPENNESS = 1.0
 
 
 def _sha256_path(path: Path | str) -> str:
@@ -230,7 +224,7 @@ def write_calibration_outputs(
     force: bool = False,
     tracker_from_camera: np.ndarray | None = None,
 ) -> dict[str, Path]:
-    """原子写入标定快照、固定外参、JSON/CSV 报告和叠加图。"""
+    """原子写入标定快照、独立外参、JSON/CSV 报告和叠加图。"""
     destination = Path(output_dir).resolve()
     if destination.exists() and not force:
         raise FileExistsError(f"输出目录已存在；使用 --force 明确覆盖: {destination}")
@@ -326,15 +320,55 @@ def write_calibration_outputs(
             )
         else:
             tracker_path = Path("")
+        standalone_transform_path: Path | None = None
+        if result.accepted is True and result.tracker_from_tcp is not None:
+            standalone_matrix = np.asarray(
+                result.tracker_from_tcp, dtype=np.float64
+            )
+            if standalone_matrix.shape == (4, 4) and np.all(
+                np.isfinite(standalone_matrix)
+            ):
+                standalone_transform_path = (
+                    temporary / "tracker_to_tcp_transform.yaml"
+                )
+                standalone_document = {
+                    "tracker_to_tcp": _transform_document(
+                        result.tracker_from_tcp, "tcp", "tracker"
+                    )
+                }
+                _write_text(
+                    standalone_transform_path,
+                    yaml.safe_dump(
+                        standalone_document,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    ),
+                )
         for index, image in enumerate(overlay_images):
             overlay_path = report_dir / f"overlay_{index:03d}.png"
             if not cv2.imwrite(str(overlay_path), np.asarray(image)):
                 raise RuntimeError(f"无法写入标定叠加图: {overlay_path}")
         frame_metrics_path = report_dir / "frame_metrics.csv"
         _write_frame_metrics(frame_metrics_path, frame_metrics)
+        summary_outputs = {
+            "tracker_to_tcp": (
+                "calibration_snapshot/tracker_to_tcp.yaml"
+                if result.accepted
+                else None
+            ),
+            "aruco_to_tcp": "calibration_snapshot/aruco_to_tcp.yaml",
+            "frame_metrics": "calibration_report/frame_metrics.csv",
+        }
+        if standalone_transform_path is not None:
+            summary_outputs["tracker_to_tcp_transform"] = (
+                "tracker_to_tcp_transform.yaml"
+            )
         summary = {
             "accepted": bool(result.accepted),
             "calibration_method": "dual_aruco_bootstrap",
+            "calibration_assumptions": {
+                "fixed_openness": FIXED_OPENNESS,
+            },
             "fixture_version": aruco_config.fixture_version,
             "tracker_serial": tracker_serial,
             "time_offset_ms": float(time_offset_ms),
@@ -343,15 +377,7 @@ def write_calibration_outputs(
             "rejection_histogram": dict(result.rejection_histogram),
             "quality_failures": list(result.failures),
             "inputs": source_inputs,
-            "outputs": {
-                "tracker_to_tcp": (
-                    "calibration_snapshot/tracker_to_tcp.yaml"
-                    if result.accepted
-                    else None
-                ),
-                "aruco_to_tcp": "calibration_snapshot/aruco_to_tcp.yaml",
-                "frame_metrics": "calibration_report/frame_metrics.csv",
-            },
+            "outputs": summary_outputs,
         }
         summary_path = report_dir / "summary.json"
         _write_text(
@@ -375,6 +401,10 @@ def write_calibration_outputs(
         output_paths["tracker_to_tcp"] = (
             destination / "calibration_snapshot" / "tracker_to_tcp.yaml"
         )
+    if standalone_transform_path is not None:
+        output_paths["tracker_to_tcp_transform"] = (
+            destination / "tracker_to_tcp_transform.yaml"
+        )
     return output_paths
 
 
@@ -390,12 +420,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracker-config", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--image-topic", default=DEFAULT_IMAGE_TOPIC)
-    parser.add_argument("--tracker-topic", default=DEFAULT_TRACKER_TOPIC)
-    parser.add_argument("--status-topic", default=DEFAULT_STATUS_TOPIC)
-    parser.add_argument("--gripper-topic", default=DEFAULT_GRIPPER_TOPIC)
     parser.add_argument("--frame-stride", type=int, default=1)
-    parser.add_argument("--max-pose-gap-ms", type=float, default=50.0)
-    parser.add_argument("--max-gripper-gap-ms", type=float, default=200.0)
     parser.add_argument("--minimum-frames", type=int, default=30)
     parser.add_argument("--max-reprojection-rmse-px", type=float, default=1.5)
     parser.add_argument("--max-distance-error-mm", type=float, default=5.0)
@@ -421,7 +446,7 @@ def _thresholds_from_arguments(arguments: argparse.Namespace) -> CalibrationThre
 
 
 def run_calibration(arguments: argparse.Namespace) -> ArucoTcpCalibrationResult:
-    """执行 MCAP 双遍读取、单帧估计、聚合和原子报告输出。"""
+    """单遍读取图像，以固定全开开度估计、聚合并写入标定报告。"""
     if arguments.frame_stride <= 0:
         raise ValueError("frame_stride 必须为正整数")
     camera = load_kalibr_camera(arguments.camera_config)
@@ -430,56 +455,20 @@ def run_calibration(arguments: argparse.Namespace) -> ArucoTcpCalibrationResult:
         arguments.tracker_camera_calibration
     )
     tracker_serial = _load_tracker_config_serial(arguments.tracker_config)
-    timeline = read_aruco_tcp_timeline(
-        arguments.bag_uri,
-        arguments.tracker_topic,
-        arguments.status_topic,
-        arguments.gripper_topic,
-    )
     estimator = DualArucoTcpEstimator(camera, aruco_config)
     frames = []
     frame_metrics = []
     overlays: list[np.ndarray] = []
     rejection_histogram: dict[str, int] = {}
-    decoded = 0
     for image_frame in iter_image_frames(
         arguments.bag_uri,
         arguments.image_topic,
         frame_stride=arguments.frame_stride,
     ):
-        decoded += 1
-        openness = timeline.interpolate_openness(
-            image_frame.timestamp_ns, arguments.max_gripper_gap_ms
-        )
-        tracker_query_ns = image_frame.timestamp_ns + int(
-            round(time_offset_ms * 1.0e6)
-        )
-        pose_result = interpolate_world_from_tracker(
-            timeline.poses,
-            tracker_query_ns,
-            arguments.max_pose_gap_ms,
-            timeline.pose_timestamps_ns,
-        )
-        status_valid = tracker_status_valid_at(
-            timeline.statuses,
-            tracker_query_ns,
-            arguments.max_pose_gap_ms,
-            timeline.status_timestamps_ns,
-        )
-        if openness is None:
-            rejection_histogram["夹爪 raw_openness 无效或超 gap"] = (
-                rejection_histogram.get("夹爪 raw_openness 无效或超 gap", 0) + 1
-            )
-            continue
-        if pose_result is None or not status_valid:
-            rejection_histogram["Tracker 位姿/状态无效或超 gap"] = (
-                rejection_histogram.get("Tracker 位姿/状态无效或超 gap", 0) + 1
-            )
-            continue
         try:
             frame = estimator.estimate(
                 image_frame.image,
-                openness,
+                FIXED_OPENNESS,
                 image_frame.timestamp_ns,
             )
         except FrameEstimationError as error:
@@ -488,7 +477,7 @@ def run_calibration(arguments: argparse.Namespace) -> ArucoTcpCalibrationResult:
             continue
         frames.append(frame)
         metric = _frame_metric(frame)
-        metric["openness"] = openness
+        metric["openness"] = FIXED_OPENNESS
         frame_metrics.append(metric)
         if len(overlays) < 5:
             rectified = cv2.remap(
@@ -498,7 +487,11 @@ def run_calibration(arguments: argparse.Namespace) -> ArucoTcpCalibrationResult:
                 interpolation=cv2.INTER_LINEAR,
             )
             overlays.append(_overlay_image(rectified, frame))
-    result = calibrate_frames(frames, tracker_from_camera, _thresholds_from_arguments(arguments))
+    result = calibrate_frames(
+        frames,
+        tracker_from_camera,
+        _thresholds_from_arguments(arguments),
+    )
     output_dir = Path(arguments.output_dir)
     write_calibration_outputs(
         output_dir,

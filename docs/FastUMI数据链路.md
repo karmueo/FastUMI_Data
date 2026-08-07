@@ -198,8 +198,10 @@ T_tracker_tcp = I
 
 数据集的默认 TCP 原点是双指之间的夹爪中心。标定分成两个固定阶段：首先使用
 `calibrate_tracker_camera` 得到已验收的 `^tracker T_camera`；随后使用同一 session
-的原始鱼眼图像、ID 0/1 双 ArUco 和 `GripperState.raw_openness` 得到固定的
-`^tracker T_tcp`。最终转换使用：
+的原始鱼眼 RGB Image 与 ID 0/1 双 ArUco 得到固定的 `^tracker T_tcp`。双 ArUco
+标定采样期间夹爪全程保持最大开度，程序固定使用 `openness=1.0`。标定 bag 只需
+RGB Image，无需 Tracker pose/status 或 `GripperState`；Tracker→Camera 标定和
+Tracker 配置仍作为独立文件输入。最终转换使用：
 
 ```text
 ^world T_tcp(t) = ^world T_tracker(t + Δt) · ^tracker T_camera · ^camera T_tcp
