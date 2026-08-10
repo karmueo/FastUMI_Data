@@ -45,7 +45,7 @@ class _TerminalKeyReader:
         self.enabled = False
 
     def __enter__(self) -> "_TerminalKeyReader":
-        """进入 cbreak 模式，使 s/e 无需回车即可读取。"""
+        """进入 cbreak 模式，使空格键无需回车即可读取。"""
         if not self._stream.isatty():
             return self
         self._file_descriptor = self._stream.fileno()
@@ -116,11 +116,13 @@ class _EpisodeServiceClient:
         return result.message
 
 
-def _episode_command_from_key(key: Optional[str]) -> Optional[str]:
-    """将 s/e 键映射为 episode 服务命令。"""
-    if key is None:
+def _episode_command_from_key(
+    key: Optional[str], episode_active: bool
+) -> Optional[str]:
+    """根据当前 episode 状态将空格键映射为开始或结束命令。"""
+    if key != " ":
         return None
-    return {"s": "start", "e": "stop"}.get(key.lower())
+    return "stop" if episode_active else "start"
 
 
 def _wait_for_service_readiness(
@@ -132,7 +134,7 @@ def _wait_for_service_readiness(
     except RuntimeError as error:
         print(
             f"Episode 服务尚未就绪: {error}；"
-            "录制继续，按 s/e 时将再次尝试调用"
+            "录制继续，按空格键时将再次尝试调用"
         )
 
 
@@ -235,6 +237,7 @@ def _wait_for_recording_processes(
     command_handler: Optional[Callable[[str], None]] = None,
 ) -> None:
     """监管录制进程，并在交互终端中处理 episode 快捷键。"""
+    episode_active = False  # 当前录制器快捷键对应的 episode 状态。
     while True:
         manager_exit_code = manager_process.poll()
         if manager_exit_code is not None:
@@ -257,11 +260,14 @@ def _wait_for_recording_processes(
             return
         if key_reader is None:
             continue
-        command = _episode_command_from_key(key_reader.read_key(0.2))
+        command = _episode_command_from_key(
+            key_reader.read_key(0.2), episode_active
+        )
         if command is None or command_handler is None:
             continue
         try:
             command_handler(command)
+            episode_active = command == "start"
         except RuntimeError as error:
             print(f"Episode {command} 控制失败: {error}")
 
@@ -353,7 +359,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                 control_node = Node("fastumi_record_session_control")
                 service_client = _EpisodeServiceClient(control_node)
                 _wait_for_service_readiness(service_client)
-                print("快捷键: [s] 开始、[e] 结束、[Ctrl+C] 结束会话")
+                print(
+                    "快捷键: [空格] 开始/结束当前示范、"
+                    "[Ctrl+C] 结束会话"
+                )
 
                 def handle_command(command: str) -> None:
                     """调用服务并在录制终端显示执行结果。"""

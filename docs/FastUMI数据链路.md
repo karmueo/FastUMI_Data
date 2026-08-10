@@ -136,8 +136,10 @@ ROS2 MCAP 转换需要 `rclpy`、`rosbag2_py` 和消息类型支持，建议留�
 
 ## 3. Tracker 到公共 TCP 标定
 
-公共 TCP 原点定义在两指夹持中心，`+Z` 沿手指向前，`+X` 沿两指连线，
-`+Y` 按右手系确定。刚性治具需要让 UMI 和 RM75 在标定过程中保持固定关系。
+公共 TCP 原点定义在两指夹持中心。当前默认双 ArUco 链路中，TCP 与双 tag pair
+坐标系共轴：`+Y` 从 ID 0 指向 ID 1，`+Z` 取修正后的双 tag 融合法向，
+`+X = +Y × +Z`，最终满足右手系。配对姿态和 pivot 标定输入也必须遵循同一 TCP
+坐标约定。刚性治具需要让 UMI 和 RM75 在标定过程中保持固定关系。
 
 复制并填写配对姿态模板：
 
@@ -197,11 +199,12 @@ T_tracker_tcp = I
 ### 3.2 默认 Tracker→鱼眼相机→双 ArUco→夹爪中心 TCP 链路
 
 数据集的默认 TCP 原点是双指之间的夹爪中心。标定分成两个固定阶段：首先使用
-`calibrate_tracker_camera` 得到已验收的 `^tracker T_camera`；随后使用同一 session
-的原始鱼眼 RGB Image 与 ID 0/1 双 ArUco 得到固定的 `^tracker T_tcp`。双 ArUco
-标定采样期间夹爪全程保持最大开度，程序固定使用 `openness=1.0`。标定 bag 只需
-RGB Image，无需 Tracker pose/status 或 `GripperState`；Tracker→Camera 标定和
-Tracker 配置仍作为独立文件输入。最终转换使用：
+`calibrate_tracker_camera` 得到已验收的 `^tracker T_camera`；随后使用保持相机、
+Tracker、双 ArUco 和夹爪安装关系不变的仅图像标定 bag，得到固定的
+`^tracker T_tcp`。两个阶段可以使用不同的 bag。双 ArUco 标定采样期间夹爪全程
+保持最大开度，程序固定使用 `openness=1.0`。该 bag 只需原始鱼眼 RGB Image，
+无需 Tracker pose/status 或 `GripperState`；Tracker→Camera 标定和 Tracker 配置
+仍作为独立文件输入。最终转换使用：
 
 ```text
 ^world T_tcp(t) = ^world T_tracker(t + Δt) · ^tracker T_camera · ^camera T_tcp
@@ -213,22 +216,23 @@ pair 坐标系的 `+Y` 从 ID 0 指向 ID 1，`marker_normal_sign=-1`，`+X=+Y×
 `[0.012, 0.0, 0.018] m`。配置示例位于
 `config/calibration/aruco_to_tcp.example.yaml`。
 
-指定 session 的离线标定命令如下。MCAP 输入固定为 `raw/bag`，全部新结果写入独立
-的 `derived/dual_aruco_tcp_bootstrap_20260806/`：
+以下命令对应 2026-08-07 的实际标定。双 ArUco 输入是独立的仅图像 bag，标定结果
+统一写入仓库的 `dataset/calibration/<calibration-id>/`：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
+ARUCO_BAG=/home/scl/datasets/ros2bag/tracker_fisheye_20260807_133950
+TRACKER_CAMERA_CALIBRATION=dataset/calibration/tracker_camera_20260807_084737/final/calibration.yaml
+CALIBRATION_ID=dual_aruco_tcp_20260807_160129
+CALIBRATION_DIR=dataset/calibration/${CALIBRATION_ID}
 ros2 run fastumi_data calibrate_aruco_tcp \
-  /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
+  "$ARUCO_BAG" \
   --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --aruco-config config/calibration/aruco_to_tcp.example.yaml \
-  --tracker-camera-calibration \
-    config/calibration/tracker_camera_calibration.yaml \
-  --tracker-config \
-    config/calibration/vive_tracker.yaml \
-  --output-dir \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806 \
+  --tracker-camera-calibration "$TRACKER_CAMERA_CALIBRATION" \
+  --tracker-config config/calibration/vive_tracker.yaml \
+  --output-dir "$CALIBRATION_DIR" \
   --frame-stride 1
 ```
 
@@ -241,19 +245,58 @@ SHA-256、Tracker 时间偏移、质量指标、阈值和失败项。数值质�
 单 tag RMSE≤1.5 px、模型距离误差≤5 mm、候选差≤5 mm、至少 30 帧、平移 P95≤3 mm、
 旋转 P95≤2°。
 
+本次 `dual_aruco_tcp_20260807_160129` 标定已通过质量门：1449 个候选帧中有
+1364 个有效帧，平移 P95 为 0.325 mm，旋转 P95 为 0.509°，最大单 tag 重投影
+RMSE 为 1.021 px，Tracker 时间偏移为 +2.968 ms，对应 Tracker serial
+`LHR-B77A06A7`。
+
+输出目录中的两个 Tracker→TCP 文件用途不同：
+
+- `calibration_snapshot/tracker_to_tcp.yaml` 包含 schema、验收状态、Tracker serial、
+  时间偏移、质量指标和溯源信息，供 `record_session`、`convert_mcap` 等严格消费者使用；
+- `tracker_to_tcp_transform.yaml` 只包含最终 `^tracker T_tcp` 变换，供普通位姿计算或
+  只需要变换数值的工具使用，不能传给严格消费者的 `--extrinsic`。
+
 ## 4. 连续 MCAP 会话采集
 
-开始录制前，需要分别启动 XV 相机驱动、夹爪开度估计节点和 VIVE Tracker
-节点。以下命令均从仓库根目录执行；每个节点使用独立终端，所有终端都需要先
-加载 ROS2 和 FastUMI 工作区环境：
+推荐在设备终端使用 `fastumi_collection.launch.py` 一次启动 XV 相机驱动、
+VIVE Tracker 和夹爪开合度估计。该 launch 不启动 `record_session`，
+因此启动后不会创建 session 或写入 MCAP。以下命令从仓库根目录执行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ros2_ws/install/setup.bash
+ros2 launch fastumi_data fastumi_collection.launch.py
 ```
 
-终端 1 启动已移植到本仓库工作区的 XV 相机驱动。SDK 已按第 2.1 节安装，所有
-终端都只需要加载本仓库的 `ros2_ws/install/setup.bash`：
+统一 launch 默认使用相机 `SN250801DR48FB26001253`、Tracker 配置文件中的
+序列号，并关闭 RViz2 和夹爪调试图像。常用覆盖参数如下：
+
+| launch 参数 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `camera_serial` | 否 | `SN250801DR48FB26001253` | 更新夹爪估计使用的 RGB 话题。 |
+| `tracker_serial` | 否 | 空 | 留空时读取 `vive_tracker.yaml`，也可临时指定 Tracker。 |
+| `use_rviz` | 否 | `false` | 是否启动 Tracker RViz2。 |
+| `publish_debug_image` | 否 | `false` | 是否发布夹爪 ArUco 调试图像。 |
+
+例如，临时替换相机、Tracker 并打开 RViz2：
+
+```bash
+ros2 launch fastumi_data fastumi_collection.launch.py \
+  camera_serial:=SNXXXXXXXXXXXX \
+  tracker_serial:=LHR-XXXXXXXX \
+  use_rviz:=true
+```
+
+launch 启动后，先按下文的话题检查方法确认数据流和 Tracker 状态。
+设备节点保持运行后，再在独立的录制终端按第 4.1 节启动
+`record_session`。录制终端的 `Ctrl+C` 只结束当前 session，设备 launch 继续运行；
+需要停止相机、Tracker 和夹爪预测时，在设备终端按 `Ctrl+C`。
+
+以下终端 1～3 命令保留用于分立调试或排查单个节点。所有终端都需要先加载
+ROS2 和 FastUMI 工作区环境。
+
+终端 1 启动已移植到本仓库工作区的 XV 相机驱动。SDK 已按第 2.1 节安装：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -306,7 +349,7 @@ ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py \
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ros2_ws/install/setup.bash
-ros2 launch vive_tracker vive_tracker.launch.py use_rviz:=false
+ros2 launch vive_tracker vive_tracker.launch.py use_rviz:=true
 ```
 
 默认 Tracker 序列号读取自
@@ -328,7 +371,7 @@ ros2 launch fastumi_gripper_estimator gripper_openness.launch.py \
   image_topic:=/xv_sdk/${DEVICE_SERIAL}/rgb/image
 ```
 
-终端 4 在录制前检查数据。相机、夹爪估计和 Tracker 必须位于同一主机时钟域：
+录制终端在启动 session 前检查数据。相机、夹爪估计和 Tracker 必须位于同一主机时钟域：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -342,17 +385,18 @@ ros2 topic echo /vive_tracker/status --once
 
 确认三个流式数据话题持续发布，并且 Tracker 状态为
 `device_connected=true`、`pose_valid=true`、`tracking_state=3`
-（`TRACKING_RUNNING_OK`）后，再在终端 4 启动一个连续会话：
+（`TRACKING_RUNNING_OK`）后，再启动一个连续会话：
 
 ### 4.1 `record_session` 参数
 
 基本用法：
 
 ```bash
+CALIBRATION_DIR=dataset/calibration/dual_aruco_tcp_20260807_160129
 ros2 run fastumi_data record_session \
   --task pick_place \
   --dataset-root dataset \
-  --extrinsic config/calibration/tracker_to_tcp.yaml \
+  --extrinsic "$CALIBRATION_DIR/calibration_snapshot/tracker_to_tcp.yaml" \
   --snapshot ros2_ws/src/fastumi_gripper_estimator/config/gripper_openness.yaml \
   --snapshot ros2_ws/src/vive_tracker/config/vive_tracker.yaml
 ```
@@ -386,17 +430,18 @@ ros2 run fastumi_data record_session \
 该设置优先保证实时写入速度；rosbag2 回放和 `convert_mcap` 转换时会自动解压，
 无需添加额外参数。
 
-实际录制时必须将上述 `--extrinsic` 替换为 `accepted: true` 的标定结果；第 3.1 节的
-单位外参会被严格加载器拒绝。
+实际录制必须使用 `accepted: true` 的完整标定快照。第 3.1 节的单位外参和仅含变换的
+`tracker_to_tcp_transform.yaml` 都会被严格加载器拒绝。更换 Tracker 或重新安装相机、
+双 ArUco、夹爪后，需要重新标定并更新 `CALIBRATION_DIR`。
 
 录制器自动启动 `episode_manager` 和 MCAP rosbag2。外参、同步配置和额外
 配置会复制到 session，`session.yaml` 保存每个快照的 SHA-256。
 
-`record_session` 启动并显示快捷键提示后，直接在该录制终端按下 `s` 开始
-一次示范，按下 `e` 正常结束；按键会立即生效，无需按 Enter：
+`record_session` 启动并显示快捷键提示后，直接在该录制终端按一次空格键开始
+一次示范，再按一次空格键正常结束；按键会立即生效，无需按 Enter：
 
 ```text
-[s] 开始、[e] 结束、[Ctrl+C] 结束会话
+[空格] 开始/结束当前示范、[Ctrl+C] 结束会话
 ```
 
 标准输入不是交互终端时，或当前示范需要放弃时，可在另一终端使用备用命令：
@@ -438,58 +483,23 @@ ros2 run fastumi_data convert_mcap \
   dataset/pick_place/<session>/calibration_snapshot/processing.yaml
 ```
 
-指定 bootstrap 派生目录时，转换器严格消费 schema v2 且 `accepted: true` 的生成外参：
+将指定采集 session 使用当前双 ArUco 标定转换到独立派生目录时，转换器严格消费
+schema v2 且 `accepted: true` 的完整标定快照：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source /home/scl/work/UMI/FastUMI_Data/ros2_ws/install/setup.bash
-PYTHONPATH=ros2_ws/src/fastumi_data:$PYTHONPATH \
-/home/scl/work/UMI/UMI/.venv/bin/python -m fastumi_data.mcap_converter \
-  /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
-  --extrinsic \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/calibration_snapshot/tracker_to_tcp.yaml \
-  --config \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/calibration_snapshot/processing.yaml \
-  --output-dir \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806 \
-  --force
-```
-
-### 5.1 特殊兼容模式：鱼眼相机即公共 TCP
-
-历史数据或特殊安装中，鱼眼相机的光学坐标系可能直接作为公共 TCP。此时可从已验收的
-`tracker_from_camera` 标定生成独立的 `tracker_to_tcp.yaml`。该适配器保留
-`schema_version`、`tracker_serial`、`fixture_version`、`method`、`calibrated_at`、
-`sample_count`、`translation_rmse_mm`、`rotation_rmse_deg` 和 `time_offset_ms`，并在
-`source_calibration` 中记录源文件绝对路径、SHA-256 和源变换名。
-
-这里 `tracker_to_tcp` 直接等于源标定的 `tracker_from_camera`：公共 TCP 即相机，
-因此不对该矩阵或位姿求逆。`camera_from_tracker` 表示相反方向，不能作为本适配器的
-`tracker_to_tcp`。
-
-时间偏移同样属于外参溯源的一部分。对每个图像时间戳 `t_image`，转换器在
-`t_tracker = t_image + Δt` 查询 Tracker 位姿；`Δt` 是适配 YAML 的
-`time_offset_ms`，转换为纳秒后参与位置插值、四元数 SLERP 和 Tracker 状态有效性
-检查。不要在图像时间戳上再次手动补偿该偏移。
-
-需要保留原 session 的快照、episodes 和 reports 时，使用独立输出目录。以下命令只会
-在 `--output-dir` 指向的派生目录创建或在 `--force` 下替换转换产物：
-
-```bash
+SESSION_ROOT=/home/scl/datasets/ros2bag/pick_place/20260731T052137Z
+CALIBRATION_ID=dual_aruco_tcp_20260807_160129
+CALIBRATION_DIR=$PWD/dataset/calibration/${CALIBRATION_ID}
+DERIVED_DIR=${SESSION_ROOT}/derived/${CALIBRATION_ID}
 ros2 run fastumi_data convert_mcap \
-  dataset/pick_place/<session>/raw/bag \
-  --extrinsic dataset/pick_place/<session>/derived/<calibration-id>/calibration_snapshot/tracker_to_tcp.yaml \
-  --config dataset/pick_place/<session>/calibration_snapshot/processing.yaml \
-  --output-dir dataset/pick_place/<session>/derived/<calibration-id> \
+  "$SESSION_ROOT/raw/bag" \
+  --extrinsic "$CALIBRATION_DIR/calibration_snapshot/tracker_to_tcp.yaml" \
+  --config "$SESSION_ROOT/calibration_snapshot/processing.yaml" \
+  --output-dir "$DERIVED_DIR" \
   --force
 ```
-
-每条派生 HDF5 的根属性及对应质量报告都记录
-`calibration_sha256`（外参 YAML 哈希）、`source_calibration_sha256`（源标定哈希）、
-`tracker_time_offset_ms`、`calibration_method` 和 `aruco_config_sha256`。这些字段与
-外参的 Tracker serial、治具、方法和质量指标共同
-构成可复现的转换溯源。默认双 ArUco 链路使用夹爪中心 TCP；相机即 TCP 只在明确选择
-该特殊模式时使用。
 
 转换过程：
 
@@ -539,14 +549,15 @@ python data_processing_tcp_to_dp.py \
   --force
 ```
 
-指定 session 的 bootstrap 结果导出为 224×224 Zarr：
+指定 session 使用当前双 ArUco 外参得到的 HDF5 可继续导出为 224×224 Zarr：
 
 ```bash
+SESSION_ROOT=/home/scl/datasets/ros2bag/pick_place/20260731T052137Z
+CALIBRATION_ID=dual_aruco_tcp_20260807_160129
+DERIVED_DIR=${SESSION_ROOT}/derived/${CALIBRATION_ID}
 /home/scl/work/UMI/FastUMI_Data/.venv/bin/python data_processing_tcp_to_dp.py \
-  --input \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/episodes \
-  --output \
-    /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/derived/dual_aruco_tcp_bootstrap_20260806/pick_place_dp.zarr \
+  --input "$DERIVED_DIR/episodes" \
+  --output "$DERIVED_DIR/pick_place_dp.zarr" \
   --resolution 224,224 --force
 ```
 
@@ -665,8 +676,8 @@ colcon test-result --verbose
 - 标定哈希与 session 快照一致；
 - 派生数据的 HDF5 与 JSON 均保留 `dual_aruco_bootstrap` method 和 ArUco 配置
   SHA-256，且外参 `accepted=true`；
-- `derived/dual_aruco_tcp_bootstrap_20260806/` 包含 11 个 accepted HDF5、共 1205 步，
-  以及 11 episode、1205 步、`(1205,224,224,3)` 的 Zarr；
+- `derived/<calibration-id>/` 中每个有效 episode 都有对应的 accepted HDF5 和 JSON
+  报告，HDF5 汇总步数、Zarr 步数与 `meta/episode_ends` 一致；
 - Zarr 可由 `ReplayBuffer` 加载并取出训练 batch；
 - 同一 checkpoint 的位姿表示、采样率和归一化元数据与部署配置一致；
 - RM75 watchdog、关节限位、错误状态和人工急停均能触发停止。

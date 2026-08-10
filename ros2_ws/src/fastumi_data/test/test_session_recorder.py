@@ -66,8 +66,8 @@ class _KeyReader:
         return next(self._keys, None)
 
 
-def test_keyboard_keys_call_expected_episode_commands() -> None:
-    """验证 s/e（大小写均可）映射到对应的 episode 服务命令。"""
+def test_space_key_toggles_episode_commands() -> None:
+    """验证连续按空格键会在开始和结束 episode 之间切换。"""
     manager_process = Mock()
     manager_process.poll.return_value = None
     bag_process = Mock()
@@ -77,32 +77,37 @@ def test_keyboard_keys_call_expected_episode_commands() -> None:
     _wait_for_recording_processes(
         manager_process,
         bag_process,
-        key_reader=_KeyReader(["s", "S", "x", "e", "E"]),
+        key_reader=_KeyReader([" ", "x", " ", " ", "x"]),
         command_handler=handled_commands.append,
     )
 
-    assert handled_commands == ["start", "start", "stop", "stop"]
+    assert handled_commands == ["start", "stop", "start"]
 
 
 def test_keyboard_command_failure_does_not_stop_recording(capsys) -> None:
-    """验证按键服务调用失败后仍继续监管录制进程。"""
+    """验证按键服务调用失败后仍继续监管录制进程并保留切换状态。"""
     manager_process = Mock()
     manager_process.poll.return_value = None
     bag_process = Mock()
-    bag_process.poll.side_effect = [None, 0]
+    bag_process.poll.side_effect = [None, None, 0]
+    handled_commands: List[str] = []
 
     def raise_service_error(command: str) -> None:
-        """模拟服务调用失败。"""
-        raise RuntimeError(f"{command} 不可用")
+        """首次模拟服务调用失败，随后记录重试命令。"""
+        if not handled_commands:
+            handled_commands.append(command)
+            raise RuntimeError(f"{command} 不可用")
+        handled_commands.append(command)
 
     _wait_for_recording_processes(
         manager_process,
         bag_process,
-        key_reader=_KeyReader(["s"]),
+        key_reader=_KeyReader([" ", " "]),
         command_handler=raise_service_error,
     )
 
     assert "控制失败" in capsys.readouterr().out
+    assert handled_commands == ["start", "start"]
 
 
 def test_terminal_key_reader_restores_terminal_settings(monkeypatch) -> None:
