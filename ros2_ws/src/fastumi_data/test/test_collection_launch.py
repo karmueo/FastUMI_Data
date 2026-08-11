@@ -3,10 +3,14 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+from launch import LaunchContext
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
 )
+from launch.conditions import IfCondition
+from launch.utilities import perform_substitutions
 
 
 # 当前测试文件对应的 fastumi_data 包根目录。
@@ -31,8 +35,8 @@ def _load_launch_module():
     return launch_module
 
 
-def test_collection_launch_only_includes_three_device_subsystems() -> None:
-    """验证统一入口只包含三个设备子 launch。"""
+def test_collection_launch_includes_devices_and_optional_recorder() -> None:
+    """验证统一入口包含三个设备子 launch 和一个录制进程。"""
     # 生成待检查的统一启动描述。
     launch_description = _load_launch_module().generate_launch_description()
     # 全部顶层 launch action。
@@ -43,12 +47,19 @@ def test_collection_launch_only_includes_three_device_subsystems() -> None:
         for entity in entities
         if isinstance(entity, IncludeLaunchDescription)
     ]
+    # 受开关控制的 MCAP 录制进程。
+    recorder_processes = [
+        entity
+        for entity in entities
+        if isinstance(entity, ExecuteProcess)
+    ]
     assert len(included_launches) == 3
-    assert len(entities) == 7
+    assert len(recorder_processes) == 1
+    assert len(entities) == 10
 
 
-def test_collection_launch_only_declares_device_arguments() -> None:
-    """验证统一入口只声明设备节点参数。"""
+def test_collection_launch_declares_recording_arguments_with_safe_defaults() -> None:
+    """验证录制默认关闭且数据集根目录可移植。"""
     # 生成待检查的统一启动描述。
     launch_description = _load_launch_module().generate_launch_description()
     # 按参数名索引所有顶层参数声明。
@@ -63,5 +74,64 @@ def test_collection_launch_only_declares_device_arguments() -> None:
         "tracker_serial",
         "use_rviz",
         "publish_debug_image",
+        "record_mcap",
+        "dataset_root",
     }
     assert arguments["use_rviz"].choices == ["true", "false"]
+    assert arguments["record_mcap"].choices == ["true", "false"]
+    # 空启动上下文足以解析两个纯文本默认值。
+    launch_context = LaunchContext()
+    assert (
+        perform_substitutions(
+            launch_context, arguments["record_mcap"].default_value
+        )
+        == "false"
+    )
+    assert (
+        perform_substitutions(
+            launch_context, arguments["dataset_root"].default_value
+        )
+        == "dataset"
+    )
+
+
+def test_collection_launch_records_timestamped_zstd_mcap() -> None:
+    """验证录制开关、MCAP 格式、压缩方式和输出路径。"""
+    # 生成待检查的统一启动描述。
+    launch_description = _load_launch_module().generate_launch_description()
+    # 顶层唯一的可选录制进程。
+    recorder = next(
+        entity
+        for entity in launch_description.entities
+        if isinstance(entity, ExecuteProcess)
+    )
+    assert isinstance(recorder.condition, IfCondition)
+
+    # 使用测试根目录解析动态 launch substitutions。
+    launch_context = LaunchContext()
+    launch_context.launch_configurations["record_mcap"] = "true"
+    launch_context.launch_configurations["dataset_root"] = "/tmp/fastumi"
+    assert recorder.condition.evaluate(launch_context) is True
+    # 每个命令参数由一组 substitutions 组成，解析后恢复 argv。
+    command = [
+        perform_substitutions(launch_context, argument)
+        for argument in recorder.cmd
+    ]
+
+    assert command[:9] == [
+        "ros2",
+        "bag",
+        "record",
+        "--storage",
+        "mcap",
+        "--storage-preset-profile",
+        "zstd_fast",
+        "--disable-keyboard-controls",
+        "--output",
+    ]
+    assert command[10] == "--all-topics"
+    # 时间戳目录遵循 FastUMI 已有 UTC 会话标识格式。
+    output_path = Path(command[9])
+    assert output_path.parent == Path("/tmp/fastumi")
+    assert output_path.name.startswith("fastumi_20")
+    assert output_path.name.endswith("Z")

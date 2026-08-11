@@ -29,6 +29,8 @@ ROS2 工作区新增以下包：
   `EpisodeEvent` 消息。
 - `fastumi_data`：episode 管理、MCAP 会话录制、外参标定、同步、
   HDF5 写入和质量报告。
+- `fastumi_rviz_plugins`：MCAP 回放标注面板，在 RViz2 中显示夹爪开度、
+  Tracker 位姿和 episode 状态，并提供鼠标、Space 与 Enter 控制。
 - `fastumi_rm75`：相对目标坐标反变换、RM75 安全透传和通用平行夹爪桥。
 
 采集话题：
@@ -83,6 +85,7 @@ colcon build --symlink-install --cmake-clean-cache \
   fastumi_interfaces \
   fastumi_gripper_estimator \
   fastumi_data \
+  fastumi_rviz_plugins \
   fastumi_rm75 \
   vive_tracker
 source install/setup.bash
@@ -102,6 +105,7 @@ colcon test --packages-select \
   fastumi_interfaces \
   fastumi_gripper_estimator \
   fastumi_data \
+  fastumi_rviz_plugins \
   fastumi_rm75 \
   vive_tracker
 colcon test-result --all --verbose
@@ -260,8 +264,8 @@ RMSE 为 1.021 px，Tracker 时间偏移为 +2.968 ms，对应 Tracker serial
 ## 4. 连续 MCAP 会话采集
 
 推荐在设备终端使用 `fastumi_collection.launch.py` 一次启动 XV 相机驱动、
-VIVE Tracker 和夹爪开合度估计。该 launch 不启动 `record_session`，
-因此启动后不会创建 session 或写入 MCAP。以下命令从仓库根目录执行：
+VIVE Tracker 和夹爪开合度估计。统一 launch 还支持随设备直接启动 MCAP
+录制，默认保持关闭。以下命令从仓库根目录执行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -270,28 +274,50 @@ ros2 launch fastumi_data fastumi_collection.launch.py
 ```
 
 统一 launch 默认使用相机 `SN250801DR48FB26001253`、Tracker 配置文件中的
-序列号，并关闭 RViz2 和夹爪调试图像。常用覆盖参数如下：
+序列号，启动 RViz2，并关闭夹爪调试图像和 MCAP 录制。常用覆盖参数如下：
 
 | launch 参数 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `camera_serial` | 否 | `SN250801DR48FB26001253` | 更新夹爪估计使用的 RGB 话题。 |
 | `tracker_serial` | 否 | 空 | 留空时读取 `vive_tracker.yaml`，也可临时指定 Tracker。 |
-| `use_rviz` | 否 | `false` | 是否启动 Tracker RViz2。 |
+| `use_rviz` | 否 | `true` | 是否启动 Tracker RViz2。 |
 | `publish_debug_image` | 否 | `false` | 是否发布夹爪 ArUco 调试图像。 |
+| `record_mcap` | 否 | `false` | 是否随设备启动并立即录制全部 ROS 2 话题。 |
+| `dataset_root` | 否 | `dataset` | MCAP 保存根目录；每次录制创建 `fastumi_<UTC时间戳>` 子目录。 |
 
-例如，临时替换相机、Tracker 并打开 RViz2：
+例如，临时替换相机、Tracker：
 
 ```bash
 ros2 launch fastumi_data fastumi_collection.launch.py \
   camera_serial:=SNXXXXXXXXXXXX \
-  tracker_serial:=LHR-XXXXXXXX \
-  use_rviz:=true
+  tracker_serial:=LHR-XXXXXXXX
 ```
 
-launch 启动后，先按下文的话题检查方法确认数据流和 Tracker 状态。
-设备节点保持运行后，再在独立的录制终端按第 4.1 节启动
-`record_session`。录制终端的 `Ctrl+C` 只结束当前 session，设备 launch 继续运行；
-需要停止相机、Tracker 和夹爪预测时，在设备终端按 `Ctrl+C`。
+需要随启动立即记录压缩 MCAP 时执行：
+
+```bash
+ros2 launch fastumi_data fastumi_collection.launch.py \
+  record_mcap:=true \
+  dataset_root:=dataset
+```
+
+ROS 2 launch 参数使用 `名称:=值` 语法，因此此处写作 `dataset_root:=...`；
+`--dataset-root` 是第 4.1 节 `record_session` 命令的参数形式。录制器显式使用
+MCAP 存储和 `zstd_fast` 块压缩，示例输出目录类似
+`dataset/fastumi_20260810T051219Z/`。停止统一 launch 时，录制进程会一同收到
+退出信号并写完 MCAP 索引。
+
+这种直接录制方式适合设备联调、原始数据留存，以及“先连续录制、后回放标注”流程；
+它不会创建 `session.yaml`、配置快照或 episode 管理节点。采集现场直接划分 episode
+并保留完整标定溯源时，保持 `record_mcap:=false`，再按第 4.1 节启动
+`record_session`。需要先完成动作采集、之后在 RViz2 中仔细划分 episode 时，使用
+`record_mcap:=true` 生成原始包，再按第 4.2 节运行 `annotate_replay`。后一条路径需要
+单独管理转换使用的外参和处理配置。
+
+同一次采集通常只选择一种录包方式。`record_mcap:=true` 与 `record_session` 同时运行
+会产生两份高带宽 MCAP，除非明确需要冗余原始记录，否则不建议同时启用。录制终端的
+`Ctrl+C` 只结束当前 session，设备 launch 继续运行；需要停止相机、Tracker 和
+夹爪预测时，在设备终端按 `Ctrl+C`。
 
 以下终端 1～3 命令保留用于分立调试或排查单个节点。所有终端都需要先加载
 ROS2 和 FastUMI 工作区环境。
@@ -469,6 +495,122 @@ dataset/<task>/<session>/
 
 如相机话题不同，可重复使用 `--topic` 完整覆盖默认话题列表，同时更新
 `processing.yaml` 的 `topics.image`。
+
+### 4.2 `annotate_replay` 回放补标
+
+`annotate_replay` 用于给已经录好的连续 MCAP 离线添加 episode 边界。它启动
+`ros2 bag play` 和专用 RViz2 配置，在 RViz2 中同时显示回放图像、Tracker Pose、
+TF、归一化夹爪开度及有效性。源 MCAP 始终只读；完成标注后生成一个新的 MCAP，
+其中源包已有的 `/fastumi/episode/events` 会被本次标注事件替换。
+
+ROS2 与工作区需在干净环境中加载。当前 Conda 环境如覆盖 Qt 或 `libstdc++`，应先
+退出 Conda：
+
+```bash
+conda deactivate
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+```
+
+以下示例处理第 4 节通过 `record_mcap:=true` 生成的原始包。输出父目录必须已经存在，
+`ANNOTATED_BAG` 必须尚不存在且不能与源路径相同：
+
+```bash
+SOURCE_BAG=$PWD/dataset/fastumi_20260810T051219Z
+ANNOTATED_BAG=$PWD/dataset/fastumi_20260810T051219Z_annotated
+ros2 run fastumi_data annotate_replay \
+  --bag "$SOURCE_BAG" \
+  --output "$ANNOTATED_BAG" \
+  --task pick_place \
+  --rate 1.0
+```
+
+工具默认优先选择唯一的 `/xv_sdk/.../rgb/image`。包中存在多个 RGB 或调试图像话题时，
+必须明确指定需要显示的源图像：
+
+```bash
+ros2 run fastumi_data annotate_replay \
+  --bag "$SOURCE_BAG" \
+  --output "$ANNOTATED_BAG" \
+  --task pick_place \
+  --image-topic /xv_sdk/SN250801DR48FB26001253/rgb/image
+```
+
+RViz2 启动时回放处于暂停状态，操作顺序如下：
+
+1. 按主键盘 Return、数字小键盘 Enter，或点击“继续回放（Enter）”开始播放；
+   播放过程中用相同操作暂停或继续。
+2. 根据画面需要按 ← 切换到 0.5× 慢放、按 ↑ 恢复 1×、按 → 切换到 2× 快放；
+   当前倍率显示在 Panel 中，↓ 保留给 RViz2。
+3. 可拖拽 Panel 时间轴跳转到目标位置；时间轴同时显示
+   `HH:MM:SS.mmm / HH:MM:SS.mmm` 当前/总时长。
+4. 按一次 Space 或点击 episode 按钮写入 START。
+5. 再按一次 Space 或点击 episode 按钮写入 STOP。
+6. Panel 的“已标注 Episode”列表会显示每条正常闭合 episode 的编号、首帧时间和时长；
+   单击一项可暂停并跳到该 episode 的 START 帧。右键选中项可在确认后删除这一条，
+   后续 START、STOP 和 ABORT 编号会自动保持连续。
+7. 如果需要废弃当前全部边界并从头标注，点击“删除所有标记”，核对警告内容后确认。
+8. 重复以上操作标注其余示范。全部目标 episode 均已结束后，点击“结束并保存
+   （Ctrl+S）”或按全局 Ctrl+S；也可以让回放自然到达末尾。
+
+Space 只切换 episode；主键盘 Return 和数字小键盘 Enter 只切换播放状态；Ctrl+S
+冻结当前标注、结束回放并启动保存；←/↑/→ 只选择 0.5×/1×/2× 固定倍率。快捷键在
+RViz2 任意区域全局生效，长按产生的自动重复事件会被忽略。`--rate` 可继续指定任意
+正启动倍率，按 ↑ 后恢复到正常 1×。
+
+“删除所有标记”在当前会话存在任意 START、STOP 或 ABORT 且没有其他控制请求时可用。
+确认后，服务端在同一状态锁内清空全部事件、取消活动 episode、将下一条 episode 编号
+和完整计数重置为 0，并刷新瞬态事件发布器。Panel 同时清除末次边界限制，因此时间轴
+可以重新拖回包起点。删除操作不可撤销，源 MCAP 始终保持只读。
+
+Panel 的 episode 状态和“已标注 Episode”列表都来自 Python 控制节点的带版本权威快照，
+不依赖 EpisodeEvent 瞬态订阅深度，长会话中的全部正常 STOP episode 都会显示。每次成功
+START、STOP、ABORT、清空或单删都会推进单调版本号；Panel 会丢弃晚到的旧快照，并在变更
+请求得到新版本确认前保持相关控件锁定。列表不显示活动 episode 和 ABORT 项。右键删除只
+允许在没有活动 episode、没有其他控制请求且删除服务就绪时执行；删除后对应 START/STOP
+从内存标注集中移除，所有后续边界重新编号，最终保存时仍执行完整序列校验。单条删除同样
+不可撤销，且不会修改源 MCAP。
+
+拖拽时间轴时，Panel 会先记住当前播放状态；播放中的回放会临时 Pause，释放后使用
+rosbag2 Seek 跳转，成功或失败后均尝试恢复拖拽前的播放状态。活动 episode 期间禁止
+拖拽，防止 START/STOP 跨越时间跳转。已有边界事件时，向前回拖会钳制到最后一条
+START、STOP 或 ABORT 的时间，并在 Panel 中显示提示，从而保证后续事件时间非递减。
+Pause/Seek/Resume 请求期间 Space、Enter 和时间轴均受门控；恢复失败时播放器保持暂停。
+列表点选属于只读回看通道，可以跳到早于最后边界的 START 帧，并在 Seek 完成后保持暂停。
+当当前回放时间早于最后一条剩余边界时，START/STOP 按钮和 Space 暂时禁用；按 Enter
+继续播放，追上最后边界后会自动恢复打标能力。
+
+“结束并保存”只在首个有效 `/clock` 已到达、没有活动 episode、结束服务已就绪且没有
+episode、播放、倍率或 Seek 请求在途时可用。服务端会再次原子检查并冻结 EpisodeManager，
+防止绕过 Panel 产生未闭合边界。手动结束只提前停止画面回放；输出 MCAP 仍逐字节保留
+完整源包，并加入截至结束时已经确认的全部 episode 边界。
+
+首个有效 `/clock` 到达前，或 START/STOP 服务尚未就绪时，episode 按钮会保持禁用。
+回放结束时如果仍有活动 episode，工具会拒绝生成输出；先关闭每个 episode，再按
+Ctrl+S 或让回放到达末尾。进入保存阶段后，终端会分别显示源 MCAP 复制和逐字节校验
+百分比；只有出现“标注结果已安全写入”并返回 shell 提示符才表示保存完成。此阶段不要
+按 Ctrl+C。异常退出不会覆盖源包，也不会发布不完整的目标目录。
+
+两种采集路径的选择如下：
+
+| 流程 | 是否需要 `record_session` | 适用情况 |
+| --- | --- | --- |
+| 设备 launch + `record_session` | 需要 | 采集现场直接按空格划分 episode，并自动保存 `session.yaml`、外参和处理配置快照。 |
+| `record_mcap:=true` + `annotate_replay` | 不需要 | 先连续保存原始数据，之后通过视频和状态回放精确划分 episode。 |
+| 已有 `record_session` MCAP + `annotate_replay` | 原会话已经使用 | 修正或替换原有 episode 边界；输出是新的 MCAP，原 session 保持不变。 |
+
+`annotate_replay` 只生成标注后的 bag，不补建 `session.yaml` 或
+`calibration_snapshot/`。将其转换为 HDF5 时，需要显式提供已验收外参和处理配置：
+
+```bash
+CALIBRATION_DIR=$PWD/dataset/calibration/dual_aruco_tcp_20260807_160129
+ANNOTATED_DERIVED_DIR=$PWD/dataset/fastumi_20260810T051219Z_derived
+ros2 run fastumi_data convert_mcap \
+  "$ANNOTATED_BAG" \
+  --extrinsic "$CALIBRATION_DIR/calibration_snapshot/tracker_to_tcp.yaml" \
+  --config ros2_ws/src/fastumi_data/config/processing.yaml \
+  --output-dir "$ANNOTATED_DERIVED_DIR"
+```
 
 ## 5. MCAP 转 FastUMI HDF5
 

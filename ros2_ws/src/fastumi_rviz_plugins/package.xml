@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<!-- 本文件声明 FastUMI RViz2 回放标注面板插件的构建和运行依赖。 -->
+<package format="3">
+  <name>fastumi_rviz_plugins</name>
+  <version>0.1.0</version>
+  <description>FastUMI MCAP 回放 episode 标注 RViz2 Panel。</description>
+  <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>fastumi_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rosbag2_interfaces</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>rviz_common</depend>
+  <exec_depend>rviz_default_plugins</exec_depend>
+  <depend>std_srvs</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

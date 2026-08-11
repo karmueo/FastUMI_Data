@@ -1,0 +1,12 @@
+# 删除指定索引的正常闭合 episode。
+uint32 episode_index
+---
+bool success
+string message
+fastumi_interfaces/EpisodeAnnotation[] episodes
+uint32 next_episode_index
+bool episode_active
+builtin_interfaces/Time last_event_time
+bool has_annotations
+# 删除响应所携带权威状态的单调版本号。
+uint64 revision

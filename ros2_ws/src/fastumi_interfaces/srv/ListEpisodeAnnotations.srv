@@ -1,0 +1,9 @@
+# 请求当前回放会话内全部正常闭合的 episode 摘要。
+---
+fastumi_interfaces/EpisodeAnnotation[] episodes
+uint32 next_episode_index
+bool episode_active
+builtin_interfaces/Time last_event_time
+bool has_annotations
+# 当前权威标注状态的单调版本号。
+uint64 revision

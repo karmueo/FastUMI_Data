@@ -1,10 +1,14 @@
-"""统一启动 FastUMI 相机、Tracker 和夹爪开合度估计。"""
+"""统一启动 FastUMI 设备数据节点，并可选自动录制 MCAP。"""
+
+from datetime import datetime, timezone
 
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -15,11 +19,11 @@ DEFAULT_CAMERA_SERIAL = "SN250801DR48FB26001253"
 
 
 def generate_launch_description() -> LaunchDescription:
-    """创建三个设备数据节点的统一启动描述。
+    """创建设备数据节点和可选 MCAP 录制器的统一启动描述。
 
     Returns:
         包含 XV 相机、VIVE Tracker 和夹爪开合度估计的 ROS 2
-        启动描述。
+        启动描述；启用录制时还包含 MCAP 录制进程。
     """
     # 子包的安装后共享目录，用于复用现有 launch 和配置。
     camera_share = FindPackageShare("xv_sdk_ros2")
@@ -34,6 +38,17 @@ def generate_launch_description() -> LaunchDescription:
     tracker_serial = LaunchConfiguration("tracker_serial")
     use_rviz = LaunchConfiguration("use_rviz")
     publish_debug_image = LaunchConfiguration("publish_debug_image")
+
+    # MCAP 录制开关和数据集保存根目录。
+    record_mcap = LaunchConfiguration("record_mcap")
+    dataset_root = LaunchConfiguration("dataset_root")
+    # 每次 launch 使用独立 UTC 时间戳目录，避免覆盖已有数据。
+    recording_timestamp = datetime.now(timezone.utc).strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
+    mcap_output_dir = PathJoinSubstitution(
+        [dataset_root, f"fastumi_{recording_timestamp}"]
+    )
 
     # Tracker 子节点使用安装后的默认配置。
     tracker_config = PathJoinSubstitution(
@@ -53,7 +68,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             "use_rviz",
-            default_value="false",
+            default_value="true",
             choices=["true", "false"],
             description="是否启动 Tracker RViz2 可视化。",
         ),
@@ -62,6 +77,17 @@ def generate_launch_description() -> LaunchDescription:
             default_value="false",
             choices=["true", "false"],
             description="是否发布夹爪 ArUco 调试图像。",
+        ),
+        DeclareLaunchArgument(
+            "record_mcap",
+            default_value="false",
+            choices=["true", "false"],
+            description="是否随设备节点启动并立即录制 MCAP。",
+        ),
+        DeclareLaunchArgument(
+            "dataset_root",
+            default_value="dataset",
+            description="MCAP 保存根目录；每次录制会创建时间戳子目录。",
         ),
     ]
 
@@ -99,6 +125,25 @@ def generate_launch_description() -> LaunchDescription:
             "publish_debug_image": publish_debug_image,
         }.items(),
     )
+    # 可选录制进程使用 MCAP 原生快速 Zstd 块压缩并持续发现全部话题。
+    mcap_recorder = ExecuteProcess(
+        cmd=[
+            "ros2",
+            "bag",
+            "record",
+            "--storage",
+            "mcap",
+            "--storage-preset-profile",
+            "zstd_fast",
+            "--disable-keyboard-controls",
+            "--output",
+            mcap_output_dir,
+            "--all-topics",
+        ],
+        output="screen",
+        emulate_tty=True,
+        condition=IfCondition(record_mcap),
+    )
 
     return LaunchDescription(
         [
@@ -106,5 +151,6 @@ def generate_launch_description() -> LaunchDescription:
             camera_launch,
             tracker_launch,
             gripper_launch,
+            mcap_recorder,
         ]
     )

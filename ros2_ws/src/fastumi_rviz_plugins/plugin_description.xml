@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<!-- 本文件向 pluginlib 导出 FastUMI 回放标注 RViz2 Panel。 -->
+<library path="fastumi_rviz_plugins">
+  <class name="fastumi_rviz_plugins/ReplayAnnotationPanel"
+         type="fastumi_rviz_plugins::ReplayAnnotationPanel"
+         base_class_type="rviz_common::Panel">
+    <description>显示回放状态并提交 FastUMI episode 边界。</description>
+  </class>
+</library>
