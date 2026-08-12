@@ -418,7 +418,7 @@ ros2 topic echo /vive_tracker/status --once
 基本用法：
 
 ```bash
-CALIBRATION_DIR=dataset/calibration/dual_aruco_tcp_20260807_160129
+CALIBRATION_DIR=dataset/calibration/dual_aruco_tcp_xxxxxx
 ros2 run fastumi_data record_session \
   --task pick_place \
   --dataset-root dataset \

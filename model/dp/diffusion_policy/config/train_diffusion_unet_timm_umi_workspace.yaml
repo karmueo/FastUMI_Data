@@ -172,7 +172,7 @@ ema:
 # 训练数据加载器配置。
 dataloader:
   # 单个训练 batch 的样本数。
-  batch_size: 16
+  batch_size: 32
   # DataLoader 工作进程数量。
   num_workers: 8
   # 是否每个 epoch 打乱训练数据。

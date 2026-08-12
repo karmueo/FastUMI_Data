@@ -29,29 +29,33 @@ canonical checkpoint 的任务配置是 `task: umi`，观测键严格为：
 
 ```bash
 cd model/dp
-WANDB_DIR=wandb/fastumi-dp-run \
+CONFIG_NAME=train_diffusion_unet_timm_umi_workspace
+RUN_DIR="wandb/${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S)"
+WANDB_DIR="$RUN_DIR" \
 WANDB_MODE=offline \
 uv run python train.py \
-  --config-name=train_diffusion_unet_timm_umi_workspace \
+  --config-name="$CONFIG_NAME" \
   task.dataset_path=/absolute/path/to/fastumi_dp_train.zarr.zip \
   logging.mode=offline \
-  hydra.run.dir=wandb/fastumi-dp-run
+  hydra.run.dir="$RUN_DIR"
 ```
 
 这里同时设置 `WANDB_MODE=offline` 和 Hydra 覆盖项 `logging.mode=offline`，
-确保 W&B 以离线模式记录。设置 `WANDB_DIR=wandb/fastumi-dp-run` 后，离线 run
+确保 W&B 以离线模式记录。`RUN_DIR` 根据 `--config-name` 和当前时间生成，效果与
+Hydra 的 `${now:%Y%m%d_%H%M%S}` 时间格式一致；每次训练会使用独立目录。设置
+`WANDB_DIR="$RUN_DIR"` 后，离线 run
 通常保存在：
 
 ```text
-wandb/fastumi-dp-run/wandb/offline-run-<时间戳>-<run-id>/
+wandb/<配置名>_<时间戳>/wandb/offline-run-<时间戳>-<run-id>/
 ```
 
 训练结束后，先登录 W&B，再同步终端提示的离线 run 目录：
 
 ```bash
 uv run wandb login
-find wandb/fastumi-dp-run/wandb -maxdepth 1 -type d -name 'offline-run-*'
-uv run wandb sync wandb/fastumi-dp-run/wandb/offline-run-<时间戳>-<run-id>
+find "$RUN_DIR/wandb" -maxdepth 1 -type d -name 'offline-run-*'
+uv run wandb sync "$RUN_DIR/wandb/offline-run-<时间戳>-<run-id>"
 ```
 
 `wandb sync` 完成后会打印对应的网页地址。当前训练配置默认上传到
@@ -60,7 +64,7 @@ uv run wandb sync wandb/fastumi-dp-run/wandb/offline-run-<时间戳>-<run-id>
 `wandb sync`。当前机器尚未登录时，`wandb login` 会提示输入 API key。
 
 不上传 W&B 时，可读取 Hydra 输出目录中的
-`wandb/fastumi-dp-run/logs.json.txt`，使用绘图脚本查看本地指标。该文件保存
+`$RUN_DIR/logs.json.txt`，使用绘图脚本查看本地指标。该文件保存
 训练过程的逐步 JSON 日志，不提供 W&B 网页的交互式面板。
 
 GPU smoke 应额外传入 `task.dataset.normalizer_num_workers=0`、`dataloader.num_workers=0`、`val_dataloader.num_workers=0`、对应的 `persistent_workers=false` 以及 `training.num_epochs=1`。没有本地 Timm 预训练权重时可显式传入 `policy.obs_encoder.pretrained=false`；常规训练保持配置默认的预训练权重。数据集不会被写入。

@@ -20,7 +20,7 @@ pair_frame:
 full_open_geometry:
   tag_center_distance_m: 0.126  # 全开 ID 0/1 中心距，单位 m。
   pair_from_tcp:  # ^pair T_tcp，TCP 原点相对 pair 原点的平移和旋转。
-    translation_m: [0.012, 0.0, 0.018]  # +12 mm X、+18 mm Z。
+    translation_m: [0.12, 0.0, 0.018]  # +120 mm X、+18 mm Z。
     quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
 
 motion_model:
