@@ -25,6 +25,7 @@ from fastumi_data.replay_annotation import (
     EVENT_TOPIC,
     ManualFinishController,
     PlaybackBounds,
+    _build_annotated_storage_options,
     _wait_for_playback,
     _iter_non_event_messages,
     build_player_command,
@@ -36,6 +37,17 @@ from fastumi_data.replay_annotation import (
 )
 from fastumi_data.episode_manager import EpisodeSnapshot
 from std_srvs.srv import Trigger
+
+
+def test_annotated_writer_uses_fast_zstd_mcap(tmp_path: Path) -> None:
+    """验证补标输出固定使用 MCAP 原生快速 Zstd 块压缩。"""
+    output = tmp_path / "annotated"
+
+    options = _build_annotated_storage_options(output)
+
+    assert options.uri == str(output)
+    assert options.storage_id == "mcap"
+    assert options.storage_preset_profile == "zstd_fast"
 
 
 def _event(timestamp_ns: int, event_type: int, index: int) -> CachedEvent:
@@ -90,6 +102,11 @@ def test_merge_replaces_source_events_preserves_bytes_and_orders_ties(tmp_path: 
     assert [(topic, bytes(data), stamp) for topic, data, stamp in actual if topic != EVENT_TOPIC] == original
     assert [topic for topic, _, _ in actual] == [EVENT_TOPIC, "/camera/image", "/vive_tracker/pose", EVENT_TOPIC]
     assert not source.joinpath("metadata.yaml").samefile(output.joinpath("metadata.yaml"))
+    metadata = rosbag2_py.MetadataIo().read_metadata(str(output))
+    assert metadata.relative_file_paths == ["output_0.mcap"]
+    assert len(metadata.files) == 1
+    assert metadata.files[0].path == "output_0.mcap"
+    assert metadata.files[0].message_count == metadata.message_count == 4
 
 
 def test_strict_event_validation_and_player_options() -> None:

@@ -1,0 +1,58 @@
+# FastUMI 固定 batch 过拟合训练配置。
+# 数据集路径保持为示例值，实际路径通过 task.dataset_path=<path> 传入。
+
+defaults:
+  - train_diffusion_unet_timm_umi_workspace
+  - _self_
+
+name: train_diffusion_unet_timm_fastumi_overfit
+exp_name: fastumi_fixed_batch_overfit
+
+task:
+  # FastUMI 首轮训练不连接真实机器人或环境评估 runner。
+  env_runner: null
+
+dataloader:
+  # 固定 batch 过拟合使用较小 batch，并保持样本顺序稳定。
+  batch_size: 4
+  num_workers: 4
+  shuffle: false
+  pin_memory: true
+  persistent_workers: true
+
+val_dataloader:
+  # 当前 workspace 不执行验证 DataLoader，但保留兼容配置。
+  batch_size: 4
+  num_workers: 1
+  shuffle: false
+  pin_memory: true
+  persistent_workers: true
+
+training:
+  seed: 42
+  debug: false
+  resume: false
+  num_epochs: 300
+  lr_warmup_steps: 10
+  freeze_encoder: true
+  rollout_every: 999999
+  checkpoint_every: 10
+  val_every: 999999
+  sample_every: 5
+  max_train_steps: 1
+  max_val_steps: 1
+  # 恢复训练时由命令行显式传入 training.ckpt_path=<absolute.ckpt>。
+  ckpt_path: null
+
+logging:
+  project: fastumi-pick-place
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+checkpoint:
+  save_last_ckpt: true
+  save_last_snapshot: false
+  topk:
+    monitor_key: train_action_mse_error
+    mode: min
+    k: 3

@@ -1,0 +1,327 @@
+# train_diffusion_unet_timm_umi_workspace.yaml
+# 本配置用于训练 UMI 图像条件 Diffusion Policy。
+# 主要包含任务配置引用、策略网络、视觉编码器、扩散调度器、数据加载器、优化器、训练流程、日志与 checkpoint 输出设置。
+
+# Hydra 默认配置列表。
+# _self_ 表示先加载当前文件；task: umi 表示加载 config/task/umi.yaml 作为 task 子配置。
+defaults:
+  - _self_
+  - task: umi
+
+# 实验名称前缀，用于日志、输出目录和 checkpoint 命名。
+name: train_diffusion_unet_timm
+# 训练 workspace 类，Hydra 会根据该路径实例化训练入口。
+_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+
+# 当前任务名称，来自 task 配置。
+task_name: ${task.name}
+# 观测和动作的形状元信息，来自 task 配置。
+shape_meta: ${task.shape_meta}
+# 实验备注名，可通过命令行覆盖，例如 exp_name=my_exp。
+exp_name: "default"
+
+# 推理时每次输出并执行的动作步数。
+n_action_steps: 8
+
+# 策略模型配置，定义 Diffusion Policy 的主体网络和条件编码方式。
+policy:
+  # 使用基于 Timm 视觉编码器的 UNet diffusion policy。
+  _target_: diffusion_policy.policy.diffusion_unet_timm_policy.DiffusionUnetTimmPolicy
+
+  # 策略读取的观测和动作 shape 信息。
+  shape_meta: ${shape_meta}
+
+  # 扩散噪声调度器配置，控制训练和推理时的去噪时间步。
+  noise_scheduler:
+    # DDIM 调度器，推理步数较少时常用于加速采样。
+    _target_: diffusers.DDIMScheduler
+    # 训练扩散过程的总时间步数量。
+    num_train_timesteps: 50
+    # beta 噪声日程的起始值。
+    beta_start: 0.0001
+    # beta 噪声日程的结束值。
+    beta_end: 0.02
+    # beta_schedule is important
+    # this is the best we found
+    # beta 调度曲线，当前使用 squared cosine 变体。
+    beta_schedule: squaredcos_cap_v2
+    # 是否裁剪采样结果，避免预测值过大。
+    clip_sample: True
+    # DDIM 中 alpha 累积项的边界处理方式。
+    set_alpha_to_one: True
+    # 调度器时间步偏移量。
+    steps_offset: 0
+    # 模型预测目标；epsilon 表示预测噪声，sample 表示预测样本。
+    prediction_type: epsilon # or sample
+
+  # 图像观测编码器配置，负责把相机图像编码为策略条件特征。
+  obs_encoder:
+    # 使用 timm 模型作为视觉 backbone。
+    _target_: diffusion_policy.model.vision.timm_obs_encoder.TimmObsEncoder
+    # 编码器根据 shape_meta 判断需要处理哪些观测。
+    shape_meta: ${shape_meta}
+
+    ##### from scratch #####
+    # model_name: 'vit_base_patch16_224'
+    # model_name: 'resnet34'
+    # model_name: 'vit_tiny_patch16_224'
+    # model_name: 'efficientnet_b0'
+    # model_name: 'efficientnet_b3'
+    # pretrained: False
+    # frozen: False
+
+    ##### from scratch #####
+    # model_name: 'resnet34.a1_in1k'
+    # 当前视觉 backbone，使用 OpenAI CLIP 预训练的 ViT-B/16。
+    model_name: 'vit_base_patch16_clip_224.openai'
+    # model_name: 'convnext_base.clip_laion2b_augreg_ft_in12k'
+    # 是否加载 timm 提供的预训练权重。
+    pretrained: True
+    # 是否冻结视觉编码器参数；False 表示训练时会更新编码器。
+    frozen: False
+
+
+    # 全局池化方式；空字符串表示交给后续 feature_aggregation 处理。
+    global_pool: ''
+
+    # 'avg' or 'max' or 'soft_attention' or 'spatial_embedding' or 'transformer' or 'attention_pool_2d'
+    # 多视角或空间 token 的特征聚合方式。
+    feature_aggregation: 'attention_pool_2d'
+    # feature_aggregation: null
+    # 位置编码类型；当前只在 transformer 类聚合方式中生效。
+    position_encording: 'sinusoidal' # 'learnable' or 'sinusoidal'. it only works for transformer
+
+    # it only works for resnet. 32 (7x7) or 16 (14x14)
+    # ResNet backbone 的下采样比例；当前 ViT 配置通常不会使用该项。
+    downsample_ratio: 32
+
+    # 图像数据增强配置，只在训练阶段用于提升视觉泛化能力。
+    transforms:
+      # 随机裁剪，保留原图 95% 区域后缩放到模型输入尺寸。
+      - type: RandomCrop
+        ratio: 0.95
+      # RandomRotation is not compatible with BF16
+      # - _target_: torchvision.transforms.RandomRotation
+      #   degrees:
+      #     - -5.0
+      #     - 5.0
+      #   expand: false
+      - _target_: torchvision.transforms.ColorJitter
+        brightness: 0.3
+        contrast: 0.4
+        saturation: 0.5
+        hue: 0.08
+      # - _target_: torchvision.transforms.RandomPerspective
+      #   distortion_scale: 0.5
+      #   p: 1.0
+      # - _target_: torchvision.transforms.ElasticTransform
+      #   alpha: 50.0
+      #   sigma: 5.0
+      # - _target_: torchvision.transforms.RandomPerspective
+      #   distortion_scale: 0.5
+      #   p: 1.0
+      # - _target_: torchvision.transforms.ElasticTransform
+      #   alpha: 50.0
+      #   sigma: 5.0
+      # - _target_: torchvision.transforms.RandomCrop
+      #   size: 192
+
+
+    # 是否在模型内部使用 GroupNorm，常与 EMA 配合以避免 BatchNorm 统计量问题。
+    use_group_norm: True
+    # 多个 RGB 输入是否共享同一个视觉 backbone。
+    share_rgb_model: False
+    # 是否使用 ImageNet/CLIP 风格归一化。
+    imagenet_norm: True
+
+  # 推理阶段 DDIM 去噪步数；越大通常越慢，可能更稳定。
+  num_inference_steps: 16
+  # 是否把观测编码结果作为 UNet 的全局条件。
+  obs_as_global_cond: True
+  # 扩散时间步 embedding 的维度。
+  diffusion_step_embed_dim: 128
+  # UNet 各层通道宽度。
+  down_dims: [256,512,1024]
+  # UNet 卷积核大小。
+  kernel_size: 5
+  # GroupNorm 分组数量。
+  n_groups: 8
+  # 是否让条件分支预测缩放参数。
+  cond_predict_scale: True
+  # 输入扰动强度，用于提升 diffusion 训练稳定性。
+  input_pertub: 0.1 # reference: https://github.com/forever208/DDPM-IP
+  # train multiple diffusion steps per obs encoder forward pass
+  # doing this too much will cause instability!
+  # 每次视觉编码器前向对应采样的 diffusion 训练样本数。
+  train_diffusion_n_samples: 1
+
+# EMA 模型配置，用于维护参数滑动平均版本。
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  # 从第几个优化步开始更新 EMA。
+  update_after_step: 0
+  # EMA 衰减曲线参数。
+  inv_gamma: 1.0
+  # EMA 衰减曲线幂指数。
+  power: 0.75
+  # EMA 衰减率下限。
+  min_value: 0.0
+  # EMA 衰减率上限。
+  max_value: 0.9999
+
+# 训练数据加载器配置。
+dataloader:
+  # 单个训练 batch 的样本数。
+  batch_size: 16
+  # DataLoader 工作进程数量。
+  num_workers: 8
+  # 是否每个 epoch 打乱训练数据。
+  shuffle: True
+  # 是否使用 pinned memory 加速 CPU 到 GPU 拷贝。
+  pin_memory: True
+  # 是否在 epoch 间复用 worker 进程。
+  persistent_workers: True
+
+# 验证数据加载器配置。
+val_dataloader:
+  # 单个验证 batch 的样本数。
+  batch_size: 4
+  # 验证 DataLoader 工作进程数量。
+  num_workers: 8
+  # 验证集通常不打乱，便于复现实验结果。
+  shuffle: False
+  # 是否使用 pinned memory。
+  pin_memory: True
+  # 是否在验证轮次间复用 worker 进程。
+  persistent_workers: True
+
+# dataloader:
+#   batch_size: 64
+#   num_workers: 16
+#   shuffle: True
+#   pin_memory: True
+#   persistent_workers: True
+
+# val_dataloader:
+#   batch_size: 64
+#   num_workers: 16
+#   shuffle: False
+#   pin_memory: True
+#   persistent_workers: True
+
+# 优化器配置。
+optimizer:
+  # 使用 AdamW 优化器。
+  _target_: torch.optim.AdamW
+  # 初始学习率。
+  lr: 3.0e-4
+  # AdamW 的一阶和二阶动量参数。
+  betas: [0.95, 0.999]
+  # 数值稳定项。
+  eps: 1.0e-8
+  # 权重衰减系数。
+  weight_decay: 1.0e-6
+
+# 训练流程配置。
+training:
+  # 训练使用的设备。
+  device: "cuda:0"
+  # 随机种子。
+  seed: 42
+  # 是否启用 debug 模式。
+  debug: False
+  # 是否从上次运行状态恢复训练。
+  resume: False
+  # optimization
+  # 学习率调度器类型。
+  lr_scheduler: cosine
+  # 学习率 warmup 步数。
+  lr_warmup_steps: 2000
+  # 训练 epoch 总数。
+  num_epochs: 120
+  # 梯度累积步数，用于等效增大 batch size。
+  gradient_accumulate_every: 1
+  # EMA destroys performance when used with BatchNorm
+  # replace BatchNorm with GroupNorm.
+  # 是否启用 EMA 权重。
+  use_ema: True
+  # 是否冻结视觉编码器。
+  freeze_encoder: False
+  # training loop control
+  # in epochs
+  # 每隔多少个 epoch 做一次 rollout 评估。
+  rollout_every: 999999
+  # 每隔多少个 epoch 保存一次 checkpoint。
+  checkpoint_every: 50
+  # 每隔多少个 epoch 跑一次验证集。
+  val_every: 5
+  # 每隔多少个 epoch 做一次采样可视化或样本记录。
+  sample_every: 5
+  # steps per epoch
+  # 每个 epoch 最大训练 step；null 表示跑完整训练集。
+  max_train_steps: null
+  # 每次验证最大 step；null 表示跑完整验证集。
+  max_val_steps: null
+  # misc
+  # tqdm 进度条刷新间隔，单位为秒。
+  tqdm_interval_sec: 1.0
+  # 备用恢复开关，当前配置未作为主 resume 字段使用。
+  resume_: False
+  # 恢复训练时必须通过命令行显式指定 checkpoint 路径。
+  ckpt_path: null
+
+# Weights & Biases 日志配置。
+logging:
+  # wandb project 名称。
+  project: umi
+  # wandb 是否恢复已有 run。
+  resume: False
+  # wandb 运行模式；online 会上传到 wandb 服务。
+  mode: online
+  # wandb run 名称，包含时间、配置名和任务名。
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  # wandb 标签。
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  # wandb run id；null 表示自动生成。
+  id: null
+  # wandb group；null 表示不分组。
+  group: null
+
+# checkpoint 保存策略。
+checkpoint:
+  # top-k checkpoint 配置。
+  topk:
+    # 用于排序 checkpoint 的指标。
+    monitor_key: train_loss
+    # min 表示指标越小越好。
+    mode: min
+    # 最多保留多少个 top checkpoint。
+    k: 5
+    # checkpoint 文件名格式。
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  # 是否保存最后一个 checkpoint。
+  save_last_ckpt: True
+  # 是否保存完整 workspace snapshot。
+  save_last_snapshot: False
+
+# 多次运行时的输出目录和 wandb 名称基础配置。
+multi_run:
+  # 多运行输出目录。
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  # 多运行 wandb 名称前缀。
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+# Hydra 自身的运行目录配置。
+hydra:
+  # Hydra job 配置。
+  job:
+    # 覆盖参数目录名，使用当前实验 name。
+    override_dirname: ${name}
+  # 单次运行输出目录。
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  # sweep 多运行输出目录。
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    # 每个 sweep 子任务使用 Hydra job 编号区分。
+    subdir: ${hydra.job.num}

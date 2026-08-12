@@ -614,6 +614,67 @@ ros2 run fastumi_data convert_mcap \
 
 ## 5. MCAP 转 FastUMI HDF5
 
+### 5.1 调用入口与实现
+
+本步骤通过 ROS 2 包安装的命令行可执行程序调用：
+
+```bash
+ros2 run fastumi_data convert_mcap <bag_uri> --extrinsic <外参 YAML> [参数]
+```
+
+| 层级 | 名称 | 位置或调用方式 | 作用 |
+| --- | --- | --- | --- |
+| ROS 2 可执行程序 | `convert_mcap` | `ros2 run fastumi_data convert_mcap ...` | `fastumi_data` 包注册的 `console_scripts` 入口，负责解析命令行参数并启动一次离线转换。 |
+| Python 入口函数 | `fastumi_data.mcap_converter:main` | `ros2_ws/src/fastumi_data/fastumi_data/mcap_converter.py` | 加载外参和处理配置，初始化 ROS 2 消息类型支持，创建并执行转换器。 |
+| 转换器 | `McapEpisodeConverter` | 同上 | 使用 `rosbag2_py.SequentialReader` 单遍读取 MCAP，按事件切分 episode、同步传感器数据并写出 HDF5 和质量报告。 |
+
+`convert_mcap` 是离线批处理进程。它会调用 `rclpy.init()` 以使用 ROS 2 的消息类型和
+序列化支持，但不会创建常驻 ROS 2 节点，也不会订阅正在发布的实时话题。输入话题名称
+来自 `processing.yaml`，读取对象是已经落盘的 rosbag2 MCAP 目录。执行前需要加载 ROS 2
+和本工作区环境：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+```
+
+### 5.2 命令行参数
+
+| 参数 | 必填 | 默认值 | 参数说明 |
+| --- | --- | --- | --- |
+| `bag_uri` | 是 | 无 | 位置参数。输入 rosbag2 MCAP 目录，例如 `<session>/raw/bag`；传入目录，不直接传 `.mcap` 分片文件。 |
+| `--extrinsic <YAML>` | 是 | 无 | Tracker→TCP 外参 YAML。转换器要求 schema v2 且标定结果 `accepted: true`，并校验 Tracker 序列号。 |
+| `--config <YAML>` | 否 | 已安装包中的 `share/fastumi_data/config/processing.yaml` | 同步、质量门和输入话题配置。需要复现采集时处理条件时，应显式使用 session 的 `calibration_snapshot/processing.yaml`。 |
+| `--output-dir <DIR>` | 否 | 从 `bag_uri` 推导 session 根目录 | HDF5 和报告的输出根目录。标准输入为 `<session>/raw/bag` 时，默认输出到 `<session>/episodes` 和 `<session>/reports`。 |
+| `--force` | 否 | `false` | 允许覆盖已存在的同名 `episode_XXXX.hdf5`。未指定时，遇到同名 HDF5 会终止转换。 |
+| `-h`、`--help` | 否 | — | 显示帮助并退出。 |
+
+### 5.3 `processing.yaml` 参数
+
+同步与质量参数如下。时间单位均为秒；表中默认值来自随包安装的
+`ros2_ws/src/fastumi_data/config/processing.yaml`。
+
+| 配置键 | 默认值 | 参数说明 |
+| --- | --- | --- |
+| `sample_rate_hz` | `20.0` | 输出时间网格频率，即每秒生成的目标样本数。 |
+| `max_image_delta_s` | `0.03` | 目标时间与最近图像时间允许的最大差值；超限样本无效。 |
+| `max_pose_gap_s` | `0.10` | Tracker 位姿插值两侧有效样本允许的最大时间跨度。 |
+| `max_gripper_gap_s` | `0.20` | 夹爪开度允许插值的最大无效时间跨度。 |
+| `minimum_samples` | `10` | 首尾裁剪后可接受 episode 的最少样本数。 |
+| `require_tracker_status` | `true` | 是否要求 Tracker 状态话题，并使用状态阻止跨跟踪失效区间插值。设为 `true` 时必须配置 `topics.tracker_status`。 |
+
+话题映射如下。若设备序列号或上游节点命名不同，需要修改 session 快照中的对应值：
+
+| 配置键 | 默认值 | 参数说明 |
+| --- | --- | --- |
+| `topics.image` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | XV 鱼眼 RGB 图像话题。 |
+| `topics.tracker_pose` | `/vive_tracker/pose` | Vive Tracker 位姿话题。 |
+| `topics.tracker_status` | `/vive_tracker/status` | Vive Tracker 连接、位姿有效性和跟踪状态话题。 |
+| `topics.gripper_state` | `/gripper/state` | 夹爪开度与检测有效性话题。 |
+| `topics.episode_event` | `/fastumi/episode/events` | START、STOP、ABORT episode 边界事件话题。 |
+
+### 5.4 调用示例
+
 使用 session 内的不可变快照转换：
 
 ```bash
@@ -678,6 +739,39 @@ HDF5 主结构：
 `[x,y,z,qx,qy,qz,qw,openness]`，坐标系是 episode 起始 TCP。
 
 ## 6. HDF5 转 Diffusion Policy Zarr
+
+### 6.1 调用入口与实现
+
+本步骤使用仓库根目录的独立离线脚本：
+
+```bash
+python data_processing_tcp_to_dp.py [参数]
+```
+
+| 层级 | 名称 | 位置或调用方式 | 作用 |
+| --- | --- | --- | --- |
+| Python 脚本 | `data_processing_tcp_to_dp.py` | 在仓库根目录执行 `python data_processing_tcp_to_dp.py ...` | 解析导出参数，发现 HDF5 episode，并把全部 episode 增量导出到一个 Diffusion Policy Zarr。 |
+| 输入发现函数 | `discover_hdf5_files()` | 同一脚本 | 接受单个 `.hdf5`/`.h5` 文件，或递归查找目录中的 `episode_*.hdf5`，再按 session 路径和 episode 编号稳定排序。 |
+| 导出函数 | `export_zarr()` | 同一脚本 | 分 episode、分图像批次写入 Zarr，生成数值状态、轴角旋转、RGB 图像和 `episode_ends`；完成后原子替换正式目标。 |
+
+该脚本不依赖 ROS 2 节点或实时话题，使用离线 `.venv` 中的 `h5py`、OpenCV、Zarr、
+SciPy 和 `imagecodecs`。脚本启动时总会从相对路径 `config/config.json` 读取兼容默认值，
+因此即使显式传入所有参数，也应从仓库根目录执行。
+
+### 6.2 命令行参数
+
+| 参数 | 必填 | 默认值 | 参数说明 |
+| --- | --- | --- | --- |
+| `--input <PATH>` | 否 | `./dataset/test_tcp_with_gripper` | 输入单个 `.hdf5`/`.h5` 文件或目录。目录输入会递归发现全部 `episode_*.hdf5`。默认值来自 `config/config.json` 的 `data_process_config.output_tcp_dir`。 |
+| `--output <PATH>` | 否 | `./dataset/dp_train_data.zarr.zip` | 输出 Zarr 路径。以 `.zip` 结尾时生成 ZIP Store，其余名称生成目录 Store。默认值来自 `data_process_config.dp_train_data_dir`。 |
+| `--resolution <W,H>` | 否 | `224, 224` | 输出图像宽、高，必须是两个正整数。图像先按目标宽高比居中裁剪，再缩放到该分辨率。默认值来自 `data_process_config.dp_data_res`。 |
+| `--compression-level <INT>` | 否 | `99` | `imagecodecs_jpegxl.JpegXl` 图像压缩级别。默认值来自 `data_process_config.compression_level`。 |
+| `--batch-size <INT>` | 否 | `32` | 每批从 HDF5 读取、颜色转换、裁剪缩放并写入 Zarr 的图像帧数；必须为正整数，只影响峰值内存和吞吐。 |
+| `--legacy-bgr` | 否 | `false` | 强制把输入图像按 BGR 转换为 RGB。带有 `image_encoding=bgr8` 属性的旧 HDF5 会自动转换；此开关用于属性缺失或标注错误的历史数据。 |
+| `--force` | 否 | `false` | 允许替换已存在的输出及残留 `.building` 临时产物。未指定时目标已存在会终止。 |
+| `-h`、`--help` | 否 | — | 显示帮助并退出。 |
+
+### 6.3 调用示例
 
 导出一个任务下的全部 session：
 

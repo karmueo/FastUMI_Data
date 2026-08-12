@@ -484,6 +484,41 @@ def _open_reader(uri: Path) -> rosbag2_py.SequentialReader:
     return reader
 
 
+def _build_annotated_storage_options(uri: Path) -> rosbag2_py.StorageOptions:
+    """构造启用 MCAP 原生快速 Zstd 块压缩的补标输出选项。"""
+    return rosbag2_py.StorageOptions(
+        uri=str(uri),
+        storage_id="mcap",
+        storage_preset_profile="zstd_fast",
+    )
+
+
+def _finalize_annotated_metadata(uri: Path, output_name: str) -> None:
+    """规范化单分片文件名，并修正 Jazzy Writer 的单文件消息计数。"""
+    metadata_io = rosbag2_py.MetadataIo()
+    metadata = metadata_io.read_metadata(str(uri))
+    if len(metadata.relative_file_paths) != 1:
+        raise RuntimeError("补标输出必须恰好包含一个 MCAP 分片")
+    source_name = metadata.relative_file_paths[0]
+    source_path = uri / source_name
+    destination_name = f"{output_name}_0.mcap"
+    destination_path = uri / destination_name
+    if not source_path.is_file() or destination_path.exists():
+        raise RuntimeError("补标输出 MCAP 分片状态无效")
+    source_path.rename(destination_path)
+    metadata.relative_file_paths = [destination_name]
+    metadata.files = [
+        rosbag2_py.FileInformation(
+            destination_name,
+            metadata.starting_time,
+            metadata.duration,
+            metadata.message_count,
+        )
+    ]
+    metadata.bag_size = destination_path.stat().st_size
+    metadata_io.write_metadata(str(uri), metadata)
+
+
 def _close_if_supported(resource: object) -> None:
     """在当前 rosbag2 版本提供 close() 时显式释放其文件句柄。"""
     close = getattr(resource, "close", None)
@@ -601,7 +636,7 @@ def merge_annotated_bag(
     try:
         writer = rosbag2_py.SequentialWriter()
         writer.open(
-            rosbag2_py.StorageOptions(uri=str(temporary), storage_id="mcap"),
+            _build_annotated_storage_options(temporary),
             rosbag2_py.ConverterOptions("", ""),
         )
         for metadata in source_metadata.values():
@@ -652,6 +687,7 @@ def merge_annotated_bag(
             validation_progress.advance,
         )
         validation_progress.complete()
+        _finalize_annotated_metadata(temporary, output.name)
         os.replace(temporary, output)
         print(f"[保存] 标注结果已安全写入：{output}", flush=True)
     except BaseException:

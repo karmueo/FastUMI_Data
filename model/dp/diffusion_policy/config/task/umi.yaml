@@ -1,0 +1,188 @@
+# umi.yaml
+# 本配置定义 UMI 任务的数据集、观测空间、动作空间和数据读取方式。
+# 训练主配置通过 defaults 中的 task: umi 加载本文件，并通过 ${task.xxx} 引用这些字段。
+
+# 任务名称，会被训练主配置中的 task_name: ${task.name} 引用。
+name: umi
+
+# 相机观测相对真实采集时间的延迟，单位为秒。
+camera_obs_latency: 0.125
+# 机器人末端位姿观测延迟，单位为秒。
+robot_obs_latency: 0.0001
+# 夹爪宽度观测延迟，单位为秒。
+gripper_obs_latency: 0.02
+# 数据集采样频率；为 0 时延迟步数计算结果为 0，注释中的 59.94 是常见视频采样频率。
+dataset_frequeny: 0 #59.94
+# 观测下采样步长；1 表示不下采样。
+obs_down_sample_steps: 1 # 3, 1
+
+# 低维状态观测历史长度。
+low_dim_obs_horizon: 2
+# 图像观测历史长度。
+img_obs_horizon: 2
+# 训练样本中动作序列长度。
+action_horizon: 16
+# 是否让策略忽略低维本体状态，仅使用图像观测。
+ignore_proprioception: False
+
+# 观测和动作的形状元信息。
+# &shape_meta 定义 YAML anchor，后续 dataset.shape_meta 可通过 *shape_meta 复用同一份配置。
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  # 策略可读取的观测项配置。
+  obs:
+    # 腕部或外部相机 RGB 图像观测。
+    camera0_rgb:
+      # 图像张量形状，格式为 [通道, 高, 宽]。
+      shape: [3, 224, 224]
+      # 图像历史帧数量。
+      horizon: ${task.img_obs_horizon} # int
+      # 图像延迟步数；这里固定为 0，作为其他传感器对齐基准。
+      latency_steps: 0 # float
+      # 图像下采样步长。
+      down_sample_steps: ${task.obs_down_sample_steps} # int
+      # 观测类型，rgb 表示图像输入。
+      type: rgb
+      # 是否在策略中忽略该观测。
+      ignore_by_policy: False
+    # 机器人末端执行器位置观测。
+    robot0_eef_pos:
+      # 末端位置维度 [x, y, z]。
+      shape: [3]
+      # 低维状态历史长度。
+      horizon: ${task.low_dim_obs_horizon} # int
+      # 依据相机和机器人观测延迟差计算对齐步数。
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      # 低维状态下采样步长。
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      # 观测类型，low_dim 表示低维数值输入。
+      type: low_dim
+      # 是否根据 ignore_proprioception 忽略该本体状态观测。
+      ignore_by_policy: ${task.ignore_proprioception}
+    # robot0_eef_pos_abs:
+    #   shape: [1]
+    #   axis: [2] # 2 means z-axis
+    #   horizon: ${task.low_dim_obs_horizon} # int
+    #   latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+    #   down_sample_steps: ${task.obs_down_sample_steps} # float
+    #   type: low_dim
+    # robot0_eef_rot_axis_angle_abs:
+    #   shape: [2]
+    #   axis: [0, 1] # yaw and pitch
+    #   horizon: ${task.low_dim_obs_horizon} # int
+    #   latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+    #   down_sample_steps: ${task.obs_down_sample_steps} # float
+    #   type: low_dim
+    # 机器人末端执行器旋转观测，原始为 axis-angle，输入策略前转换为 6D rotation 表示。
+    robot0_eef_rot_axis_angle:
+      # 数据集中原始旋转向量维度。
+      raw_shape: [3]
+      # 策略侧使用的 6D rotation 表示维度。
+      shape: [6]
+      # 低维状态历史长度。
+      horizon: ${task.low_dim_obs_horizon} # int
+      # 依据相机和机器人观测延迟差计算对齐步数。
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      # 低维状态下采样步长。
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      # 观测类型，low_dim 表示低维数值输入。
+      type: low_dim
+      # 旋转表示转换方式。
+      rotation_rep: rotation_6d
+      # 是否根据 ignore_proprioception 忽略该本体状态观测。
+      ignore_by_policy: ${task.ignore_proprioception}
+    # 机器人夹爪宽度观测。
+    robot0_gripper_width:
+      # 夹爪宽度为 1 维数值。
+      shape: [1]
+      # 低维状态历史长度。
+      horizon: ${task.low_dim_obs_horizon} # int
+      # 依据相机和夹爪观测延迟差计算对齐步数。
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.gripper_obs_latency}) * ${task.dataset_frequeny}'} # float
+      # 低维状态下采样步长。
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      # 观测类型，low_dim 表示低维数值输入。
+      type: low_dim
+      # 是否根据 ignore_proprioception 忽略该本体状态观测。
+      ignore_by_policy: ${task.ignore_proprioception}
+
+    # pose with respect to episode start
+    # robot0_eef_pos_wrt_start:
+    #   shape: [3]
+    #   horizon: ${task.low_dim_obs_horizon} # int
+    #   latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+    #   down_sample_steps: ${task.obs_down_sample_steps} # float
+    #   type: low_dim
+    #   ignore_by_policy: ${task.ignore_proprioception}
+    # 相对 episode 起始姿态的末端旋转观测。
+    robot0_eef_rot_axis_angle_wrt_start:
+      # 数据集中原始旋转向量维度。
+      raw_shape: [3]
+      # 策略侧使用的 6D rotation 表示维度。
+      shape: [6]
+      # 低维状态历史长度。
+      horizon: ${task.low_dim_obs_horizon} # int
+      # 依据相机和机器人观测延迟差计算对齐步数。
+      latency_steps: ${eval:'(${task.camera_obs_latency} - ${task.robot_obs_latency}) * ${task.dataset_frequeny}'} # float
+      # 低维状态下采样步长。
+      down_sample_steps: ${task.obs_down_sample_steps} # float
+      # 观测类型，low_dim 表示低维数值输入。
+      type: low_dim
+      # 是否根据 ignore_proprioception 忽略该观测。
+      ignore_by_policy: ${task.ignore_proprioception}
+  # 策略训练目标动作配置。
+  action:
+    # 动作维度；当前为位置、旋转 6D 表示和夹爪等信息组合后的总维度。
+    shape: [10]
+    # 动作序列 horizon。
+    horizon: ${task.action_horizon}
+    # 动作延迟步数。
+    latency_steps: 0 # float
+    # 动作下采样步长。
+    down_sample_steps: ${task.obs_down_sample_steps} # int
+    # 动作中的旋转表示方式。
+    rotation_rep: rotation_6d
+
+# 任务名称 anchor，保留给需要 *task_name 复用的配置项。
+task_name: &task_name umi
+# 训练数据集路径，可在命令行中通过 task.dataset_path=... 覆盖。
+dataset_path: example_demo_session/dataset.zarr.zip
+# 姿态表达配置。
+# &pose_repr 定义 YAML anchor，dataset.pose_repr 通过 *pose_repr 复用。
+pose_repr: &pose_repr
+  # 观测姿态表示方式；relative 表示相对 episode 起始状态。
+  obs_pose_repr: relative # abs or rel
+  # 动作姿态表示方式；relative 表示相对表示，delta 表示增量动作。
+  action_pose_repr: relative # abs or rel or delta
+
+# 环境评估 runner 配置，用于训练过程中 rollout 或评估。
+env_runner:
+  # 当前使用 RealPushTImageRunner；UMI 图像任务沿用该 runner 实现。
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+# 数据集实例化配置。
+dataset:
+  # UMI 数据集类，负责读取 zarr 数据、构造训练样本和归一化统计。
+  _target_: diffusion_policy.dataset.umi_dataset.UmiDataset
+  # 传入上方定义的观测和动作 shape 元信息。
+  shape_meta: *shape_meta
+  # 数据集文件路径。
+  dataset_path: ${task.dataset_path}
+  # 缓存目录；null 表示使用默认逻辑或不启用显式缓存目录。
+  cache_dir: null
+  # 姿态表示方式配置。
+  pose_repr: *pose_repr
+  # 是否对动作序列做 padding。
+  action_padding: False
+  # 是否对不同时间步分别做归一化统计。
+  temporally_independent_normalization: False
+  # 重复上一帧图像的概率，用于数据增强或鲁棒性训练。
+  repeat_frame_prob: 0.0
+  # 单个 episode 最大持续时间；null 表示不限制。
+  max_duration: null
+  # 归一化统计使用的 DataLoader worker 数量；smoke 可通过命令行覆盖为 0。
+  normalizer_num_workers: 32
+  # 数据集划分和采样使用的随机种子。
+  seed: 42
+  # 验证集比例。
+  val_ratio: 0.05

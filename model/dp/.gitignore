@@ -1,0 +1,39 @@
+# uv 本地环境与缓存
+.venv/
+.uv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.py[cod]
+
+# Hydra、训练、日志与模型产物
+outputs/
+multirun/
+wandb/
+data/output/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# 本地数据集和媒体文件
+/dataset/
+# 覆盖仓库根目录的 `dataset/` 规则，确保迁移的 Python 数据集模块可纳入 Git。
+!/diffusion_policy/dataset/
+!/diffusion_policy/dataset/**
+# 反向规则之后重申缓存排除，避免测试字节码成为迁移内容。
+__pycache__/
+*.py[cod]
+*.zarr/
+*.zarr.zip
+*.hdf5
+*.h5
+*.mp4
+*.avi
+*.csv
+
+# 编辑器与系统文件
+.DS_Store
+.idea/
+.vscode/
