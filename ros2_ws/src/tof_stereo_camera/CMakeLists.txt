@@ -60,7 +60,7 @@ else()
   install(FILES "${STEREO_CAMERA_LIBRARY}" "${STEREO_CAMERA_DEBUG_LIBRARY}"
     DESTINATION lib/${PROJECT_NAME})
 endif()
-install(DIRECTORY launch rviz
+install(DIRECTORY config launch rviz
   DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY include/
   DESTINATION include)
