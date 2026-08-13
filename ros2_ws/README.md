@@ -2,7 +2,7 @@
 
 # FastUMI ROS 2 工作空间
 
-`ros2_ws` 是 FastUMI 的 ROS 2 Jazzy 工作空间，覆盖 XV 相机与 IMU 数据发布、
+`ros2_ws` 是 FastUMI 的 ROS 2 Jazzy 工作空间，覆盖 ToF 双目相机、XV 相机与 IMU 数据发布、
 VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转换、回放补标，
 以及 RM75 机械臂策略部署。
 
@@ -15,6 +15,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_interfaces`](src/fastumi_interfaces/) | CMake 接口包 | 定义 FastUMI 内部共享的 episode、夹爪、Tracker 消息和回放标注服务。 |
 | [`xv_ros2_msgs`](src/xv_ros2_msgs/) | CMake 接口包 | 定义 XV 设备驱动使用的姿态、控制器、彩色深度消息及设备查询服务。 |
 | [`xv_sdk_ros2`](src/xv_sdk_ros2/) | C++ 驱动包 | 将 XV 设备的 IMU、RGB、ToF 等数据发布为 ROS 2 话题，并提供图像截图功能。 |
+| [`tof_stereo_camera`](src/tof_stereo_camera/) | C++ 驱动包 | 使用随包内置的 stereo_camera SDK 发布 RGB、iTOF 深度/灰度和 IMU 数据。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
@@ -24,7 +25,8 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 ## 包之间的数据关系
 
 ```text
-xv_ros2_msgs ───────► xv_sdk_ros2 ───────► RGB / IMU / ToF
+xv_ros2_msgs ───────► xv_sdk_ros2 ─────────► RGB / IMU / ToF
+tof_stereo_camera ─────────────────────────► RGB / IMU / iTOF
                                              │
                                              ▼
 fastumi_interfaces ─► fastumi_gripper_estimator ─► 夹爪状态
@@ -82,6 +84,14 @@ XV 驱动的配套接口。`fastumi_data` 位于数据链路中心，组合相�
 
 默认数据位于 `/xv_sdk/SN<序列号>/...` 命名空间。详细安装和启动方法见
 [`src/xv_sdk_ros2/README.md`](src/xv_sdk_ros2/README.md)。
+
+### `tof_stereo_camera`
+
+该包封装随包内置的 `stereo_camera` SDK，在 `/tof_stereo_camera` 命名空间发布
+RGB、iTOF 深度/灰度和原始 IMU 话题，并可选启动 Madgwick 或互补 IMU 姿态滤波器及 RViz。
+它的 SDK 头文件和 x86-64 Linux 预编译共享库均位于包内 `sdk/`，构建和运行不依赖
+`Umi_Hardware_SDK` 源仓库。详细话题、参数和设备限制见
+[`src/tof_stereo_camera/README.md`](src/tof_stereo_camera/README.md)。
 
 ### `vive_tracker`
 
@@ -179,7 +189,8 @@ source install/setup.bash
 ```
 
 `vive_tracker` 构建时需要提供 OpenVR SDK 根目录，`xv_sdk_ros2` 需要预先安装
-匹配版本的 XV SDK；RM75 实机部署还需要官方驱动及接口包。只使用部分功能时，
+匹配版本的 XV SDK；`tof_stereo_camera` 仅支持随包提供的 Linux x86-64 SDK 二进制；
+RM75 实机部署还需要官方驱动及接口包。只使用部分功能时，
 可通过 `colcon build --packages-up-to <包名>` 构建目标包及其工作空间内依赖。
 
 运行测试：
