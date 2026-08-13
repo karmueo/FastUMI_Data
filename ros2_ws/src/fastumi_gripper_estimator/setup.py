@@ -33,6 +33,8 @@ setup(
         "console_scripts": [
             "gripper_openness_node = "
             "fastumi_gripper_estimator.gripper_openness_node:main",
+            "gripper_openness_calibrate = "
+            "fastumi_gripper_estimator.gripper_calibration_cli:main",
         ],
     },
 )

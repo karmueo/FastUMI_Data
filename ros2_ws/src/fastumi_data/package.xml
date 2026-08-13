@@ -33,7 +33,7 @@
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>vive_tracker</exec_depend>
   <exec_depend>fastumi_rviz_plugins</exec_depend>
-  <exec_depend>xv_sdk_ros2</exec_depend>
+  <exec_depend>tof_stereo_camera</exec_depend>
 
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

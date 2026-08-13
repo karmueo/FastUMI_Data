@@ -12,7 +12,7 @@ ID 1，使用相机鱼眼标定和标记实际边长计算两个标签的三维�
 默认输入为原始 RGB 话题：
 
 ```text
-/xv_sdk/SN250801DR48FB26001253/rgb/image
+/tof_stereo_camera/rgb/image_raw
 ```
 
 默认输出为：
@@ -55,28 +55,32 @@ gripper_range:
   gripper_id: 0
   left_finger_tag_id: 0
   right_finger_tag_id: 1
-  min_marker_dist_mm: 48.31
-  max_marker_dist_mm: 129.0
+  min_marker_dist_mm: 48.168
+  max_marker_dist_mm: 126.372
 ```
 
-空的 `camera_calibration_path` 会使用随包安装的
-`config/camera_calibration.yaml`。其他相机可在启动时覆盖：
+空的 `camera_calibration_path` 会使用安装后的
+`tof_stereo_camera/config/calibration.yaml`。文件的 RGB 标定分辨率严格为
+`2048x1536`，输入图像宽高必须完全一致。显式路径仍支持 legacy Kalibr 标定覆盖：
 
 ```bash
 ros2 launch fastumi_gripper_estimator gripper_openness.launch.py \
   camera_calibration_path:=/path/to/camera.yaml
 ```
 
-相机 YAML 必须包含 Kalibr `cam0`，并满足：
+默认 ToF YAML 使用唯一的 `rgb` 块并要求：
 
 ```yaml
-camera_model: pinhole
-distortion_model: equidistant
+distortion_model: fisheye
 ```
+
+显式 legacy Kalibr 覆盖使用唯一的 `cam0` 块，并要求 `camera_model: pinhole`
+和 `distortion_model: equidistant`。两种模式均要求四个有限内参、四个有限畸变
+系数和两个正整数像素分辨率。
 
 `gripper_range` 是 ROS 参数子项。夹爪距离严格使用毫米，最小距离必须为
 非负有限数值且小于最大距离。相机标定文件缺失、字段无效或夹爪范围非法时，
-节点会拒绝启动。输入图像宽高必须与 `cam0.resolution` 完全一致；不匹配的
+节点会拒绝启动。输入图像宽高必须与所选标定的 `resolution` 完全一致；不匹配的
 帧会记录限频错误且不会发布距离，避免使用错误像素尺度生成三维结果。
 
 ## 构建
@@ -103,7 +107,7 @@ ros2 launch fastumi_gripper_estimator gripper_openness.launch.py
 ```bash
 source /opt/ros/jazzy/setup.bash
 ros2 bag play <bag_path> \
-  --topics /xv_sdk/SN250801DR48FB26001253/rgb/image
+  --topics /tof_stereo_camera/rgb/image_raw
 ```
 
 终端 3：
@@ -126,6 +130,13 @@ ros2 launch fastumi_gripper_estimator gripper_openness.launch.py \
 - 两枚标记的原始图像中心和连接线
 - 内部三维距离，单位为毫米
 - 最终无量纲 `openness`
+- 每枚配置的 ArUco ID、`t=(x,y,z)mm` 和
+  `rpy=(roll,pitch,yaw)deg`；位姿表示标记坐标系相对于 RGB 光学相机
+- 在原始畸变鱼眼图上投影的三维坐标轴，轴长等于 `marker_size_mm`：
+  X 为红色、Y 为绿色、Z 为蓝色
+
+RPY 使用 XYZ roll-pitch-yaw 约定：
+`R = Rz(yaw) @ Ry(pitch) @ Rx(roll)`。
 
 ## 重新标定
 
@@ -133,3 +144,31 @@ ros2 launch fastumi_gripper_estimator gripper_openness.launch.py \
 `equidistant` 鱼眼解算流程下重新测量完全闭合和完全张开距离，并更新
 `config/gripper_openness.yaml` 中 `gripper_range` 子项。范围数值的单位始终
 为毫米。
+
+## 开合端点标定命令
+
+`gripper_openness_calibrate` 会保留输入 ROS 参数 YAML 的完整结构，并只在
+独立输出文件中更新 `gripper_range.min_marker_dist_mm` 与
+`max_marker_dist_mm`。离线 bag 以确定性一维二均值划分两个端点，再按迭代
+中位数/MAD 剔除过渡和异常帧；实时模式按“闭合、张开”顺序引导固定时长采样。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+ros2 run fastumi_gripper_estimator gripper_openness_calibrate bag \
+  /path/to/bag --output /tmp/gripper_openness_calibrated.yaml
+```
+
+可使用 `--config` 指定输入参数 YAML，使用 `--camera-calibration`、
+`--image-topic` 覆盖默认相机标定与图像话题；`bag` 还支持
+`--frame-stride`。实时标定命令如下：
+
+```bash
+ros2 run fastumi_gripper_estimator gripper_openness_calibrate live \
+  --output /tmp/gripper_openness_calibrated.yaml
+```
+
+实时模式每个端点默认倒计时 3 秒、采样 5 秒，使用与估计节点相同的
+BEST_EFFORT/VOLATILE 图像 QoS。输出路径必须存在于输入文件之外；已有输出
+需要显式 `--force`，该选项也绝不允许覆盖输入配置。命令会打印总/有效帧、
+端点 raw/retained 数量、MAD、robust sigma、估计范围和输出路径。

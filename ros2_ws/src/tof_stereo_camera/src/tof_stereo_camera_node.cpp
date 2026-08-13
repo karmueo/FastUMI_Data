@@ -57,8 +57,9 @@ class StereoCameraNode final : public rclcpp::Node {
     const bool enable_itof_gray =
         this->declare_parameter<bool>("enable_itof_gray", true);
     const bool enable_imu = this->declare_parameter<bool>("enable_imu", true);
-    const int width = this->declare_parameter<int>("width", 1920);
-    const int height = this->declare_parameter<int>("height", 2362);
+    // 2048 系完整复合帧对应标定使用的 2048x1536 RGB 子帧。
+    const int width = this->declare_parameter<int>("width", 2048);
+    const int height = this->declare_parameter<int>("height", 2738);
     const std::string pixel_format =
         this->declare_parameter<std::string>("pixel_format", "YUYV");
     const std::string device_path =

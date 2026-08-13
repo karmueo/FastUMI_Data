@@ -14,25 +14,24 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
-# 默认 XV 相机序列号，与采集和处理配置保持一致。
-DEFAULT_CAMERA_SERIAL = "SN250801DR48FB26001253"
+# 统一采集入口使用的 ToF 原始 RGB 话题。
+TOF_RGB_IMAGE_TOPIC = "/tof_stereo_camera/rgb/image_raw"
 
 
 def generate_launch_description() -> LaunchDescription:
     """创建设备数据节点和可选 MCAP 录制器的统一启动描述。
 
     Returns:
-        包含 XV 相机、VIVE Tracker 和夹爪开合度估计的 ROS 2
+        包含 ToF 相机、VIVE Tracker 和夹爪开合度估计的 ROS 2
         启动描述；启用录制时还包含 MCAP 录制进程。
     """
     # 子包的安装后共享目录，用于复用现有 launch 和配置。
-    camera_share = FindPackageShare("xv_sdk_ros2")
+    camera_share = FindPackageShare("tof_stereo_camera")
     tracker_share = FindPackageShare("vive_tracker")
     gripper_share = FindPackageShare("fastumi_gripper_estimator")
 
-    # 相机序列号决定夹爪估计订阅的图像话题。
-    camera_serial = LaunchConfiguration("camera_serial")
-    image_topic = ["/xv_sdk/", camera_serial, "/rgb/image"]
+    # ToF 设备路径支持临时指定，留空时由驱动自动发现设备。
+    device_path = LaunchConfiguration("device_path")
 
     # Tracker 和调试显示的可选覆盖。
     tracker_serial = LaunchConfiguration("tracker_serial")
@@ -57,9 +56,9 @@ def generate_launch_description() -> LaunchDescription:
     # 统一入口对外暴露的启动参数。
     launch_arguments = [
         DeclareLaunchArgument(
-            "camera_serial",
-            default_value=DEFAULT_CAMERA_SERIAL,
-            description="XV 相机序列号，用于构造 RGB 图像话题。",
+            "device_path",
+            default_value="",
+            description="可选 ToF 设备路径；留空时由驱动自动发现设备。",
         ),
         DeclareLaunchArgument(
             "tracker_serial",
@@ -91,14 +90,17 @@ def generate_launch_description() -> LaunchDescription:
         ),
     ]
 
-    # 终端 1：复用 XV SDK 相机 launch。
+    # 终端 1：复用 ToF 相机 launch，并避免与 Tracker 重复启动 RViz2。
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
-                [camera_share, "launch", "xv_sdk_node_launch.py"]
+                [camera_share, "launch", "tof_stereo_camera.launch.py"]
             )
         ),
-        launch_arguments={"record_bag": "false"}.items(),
+        launch_arguments={
+            "device_path": device_path,
+            "enable_rviz": "false",
+        }.items(),
     )
     # 终端 2：复用 VIVE Tracker launch，采集时默认不启动 RViz2。
     tracker_launch = IncludeLaunchDescription(
@@ -113,7 +115,7 @@ def generate_launch_description() -> LaunchDescription:
             "use_rviz": use_rviz,
         }.items(),
     )
-    # 终端 3：夹爪开合度估计共享同一个相机图像话题。
+    # 终端 3：夹爪开合度估计订阅固定 ToF RGB 话题。
     gripper_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -121,7 +123,7 @@ def generate_launch_description() -> LaunchDescription:
             )
         ),
         launch_arguments={
-            "image_topic": image_topic,
+            "image_topic": TOF_RGB_IMAGE_TOPIC,
             "publish_debug_image": publish_debug_image,
         }.items(),
     )

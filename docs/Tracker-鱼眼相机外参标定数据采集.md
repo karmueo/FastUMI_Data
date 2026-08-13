@@ -2,7 +2,7 @@
 
 # Tracker 与鱼眼相机外参标定数据采集
 
-本文档适用于 ROS2 Jazzy、VIVE Tracker 和 XV 1280×1280 鱼眼相机。采集结果
+本文档适用于 ROS2、VIVE Tracker 和 XV 或 ToF 双目鱼眼相机。采集结果
 使用压缩 MCAP；标定板固定在环境中，Tracker 与鱼眼相机保持刚性连接。
 
 ## 1. 启动设备
@@ -14,6 +14,10 @@ source /opt/ros/jazzy/setup.bash
 source ros2_ws/install/setup.bash
 ```
 
+根据实际连接的相机，在以下两种方式中选择一种。两个相机驱动不要同时启动。
+
+### 1.1 XV 相机
+
 启动 XV 相机，并关闭驱动自带的全话题录制：
 
 ```bash
@@ -23,16 +27,38 @@ ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py \
   tof_enable:=false
 ```
 
-另开终端启动 VIVE Tracker：
+使用去畸变图像进行标定时，增加 `rgb_fisheye_undistort_enable:=true`。
+
+### 1.2 ToF 相机
+
+启动 `tof_stereo_camera` 的 RGB 图像输出。外参采集不使用深度、灰度和 IMU 数据，
+因此在此处关闭对应输出以及 RViz：
+
+```bash
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  enable_rgb:=true \
+  enable_itof_depth:=false \
+  enable_itof_gray:=false \
+  enable_imu:=false \
+  enable_imu_filter:=false \
+  enable_rviz:=false
+```
+
+驱动默认自动选择 UVC 设备。需要指定设备时，在命令中增加
+`device_path:=/dev/videoN`，并将 `N` 替换为实际设备编号。
+
+启动选定的相机后，另开终端启动 VIVE Tracker：
 
 ```bash
 ros2 launch vive_tracker vive_tracker.launch.py \
-  use_rviz:=false
+  use_rviz:=true
 ```
 
 ## 2. 录制前检查
 
-将实际相机序列号写入当前终端变量：
+根据已启动的相机选择对应检查命令。
+
+XV 相机需要将实际序列号写入当前终端变量：
 
 ```bash
 DEVICE_SERIAL=SN250801DR48FB26001253
@@ -45,14 +71,27 @@ ros2 topic list | rg \
   "/xv_sdk/${DEVICE_SERIAL}/rgb|/vive_tracker/(pose|status)"
 ```
 
+使用 ToF 双目相机时，确认 RGB 图像和 Tracker 话题存在：
+
+```bash
+ros2 topic list | rg \
+  "/tof_stereo_camera/rgb/image_raw|/vive_tracker/(pose|status)"
+```
+
 检查图像与 Tracker 的发布频率和时间戳：
 
 ```bash
-ros2 topic hz /xv_sdk/${DEVICE_SERIAL}/rgb/image
+# XV 相机
+IMAGE_TOPIC=/xv_sdk/${DEVICE_SERIAL}/rgb/image
+
+# ToF 双目相机改用下面这一行
+# IMAGE_TOPIC=/tof_stereo_camera/rgb/image_raw
+
+ros2 topic hz "${IMAGE_TOPIC}"
 ros2 topic hz /vive_tracker/pose
 
 ros2 topic echo --once --qos-reliability best_effort \
-  /xv_sdk/${DEVICE_SERIAL}/rgb/image --field header
+  "${IMAGE_TOPIC}" --field header
 ros2 topic echo --once /vive_tracker/pose --field header
 ros2 topic echo --once /vive_tracker/status
 date +%s
@@ -66,7 +105,7 @@ Tracker 状态应满足 `device_connected=true`、`pose_valid=true` 和
 
 ## 3. 采集 ROS2 bag
 
-创建输出目录名称，然后只录制外参标定所需话题：
+根据实际相机选择一条录制命令。XV 相机同时录制图像和 `CameraInfo`：
 
 ```bash
 DEVICE_SERIAL=SN250801DR48FB26001253
@@ -84,6 +123,23 @@ ros2 bag record \
   /tf_static
 ```
 
+ToF 双目相机只录制 RGB 图像。当前驱动不发布 `CameraInfo`，采集前需要另行保存
+与当前分辨率匹配的鱼眼相机内参和畸变参数：
+
+```bash
+BAG_OUTPUT=/home/scl/datasets/ros2bag/tracker_fisheye_$(date +%Y%m%d_%H%M%S)
+
+ros2 bag record \
+  --storage mcap \
+  --storage-preset-profile zstd_fast \
+  --output "${BAG_OUTPUT}" \
+  --topics \
+  /tof_stereo_camera/rgb/image_raw \
+  /vive_tracker/pose \
+  /vive_tracker/status \
+  /tf_static
+```
+
 `--storage-preset-profile zstd_fast` 对 MCAP 数据块进行快速 Zstandard
 压缩。回放时由 rosbag2 自动解压，无需额外处理。
 
@@ -94,7 +150,7 @@ ros2 bag record \
 3. 每个姿态停稳 0.5～1 秒，避免运动模糊和 Tracker 丢失跟踪。
 4. 完成后按 `Ctrl+C`，等待 MCAP 索引写入完成。
 
-默认录制原始鱼眼图像。如果标定程序使用去畸变图像，启动相机时增加
+XV 相机默认录制原始鱼眼图像。如果标定程序使用去畸变图像，启动相机时增加
 `rgb_fisheye_undistort_enable:=true`，并将两个 RGB 话题替换为：
 
 ```text
@@ -112,8 +168,10 @@ ros2 bag record \
 ros2 bag info "${BAG_OUTPUT}"
 ```
 
-确认结果中包含一路鱼眼图像及对应 `CameraInfo`、`/vive_tracker/pose`、
+确认结果中包含一路鱼眼图像、`/vive_tracker/pose`、
 `/vive_tracker/status` 和 `/tf_static`。图像数量应与采集时长和帧率基本一致。
+XV 相机的 bag 还应包含与图像对应的 `CameraInfo`；ToF 双目相机使用采集前
+单独保存的相机内参和畸变参数。
 Tracker 丢失有效 6DoF 跟踪时可能没有对应的 Pose，标定程序应丢弃该样本。
 
 ## 5. 回放数据

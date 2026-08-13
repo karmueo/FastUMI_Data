@@ -263,7 +263,7 @@ RMSE 为 1.021 px，Tracker 时间偏移为 +2.968 ms，对应 Tracker serial
 
 ## 4. 连续 MCAP 会话采集
 
-推荐在设备终端使用 `fastumi_collection.launch.py` 一次启动 XV 相机驱动、
+推荐在设备终端使用 `fastumi_collection.launch.py` 一次启动 ToF 双目相机驱动、
 VIVE Tracker 和夹爪开合度估计。统一 launch 还支持随设备直接启动 MCAP
 录制，默认保持关闭。以下命令从仓库根目录执行：
 
@@ -273,23 +273,25 @@ source ros2_ws/install/setup.bash
 ros2 launch fastumi_data fastumi_collection.launch.py
 ```
 
-统一 launch 默认使用相机 `SN250801DR48FB26001253`、Tracker 配置文件中的
-序列号，启动 RViz2，并关闭夹爪调试图像和 MCAP 录制。常用覆盖参数如下：
+统一 launch 默认使用 `/tof_stereo_camera/rgb/image_raw` 作为夹爪估计图像、
+Tracker 配置文件中的序列号，启动 Tracker RViz2，并关闭 ToF 子 launch 的 RViz2，
+从而避免重复 RViz2。ToF RGB 标定分辨率严格为 `2048x1536`，夹爪节点不会缩放内参。
+常用覆盖参数如下：
 
 | launch 参数 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `camera_serial` | 否 | `SN250801DR48FB26001253` | 更新夹爪估计使用的 RGB 话题。 |
+| `device_path` | 否 | 空 | 指定 ToF 设备路径；留空时由驱动自动发现设备。 |
 | `tracker_serial` | 否 | 空 | 留空时读取 `vive_tracker.yaml`，也可临时指定 Tracker。 |
 | `use_rviz` | 否 | `true` | 是否启动 Tracker RViz2。 |
 | `publish_debug_image` | 否 | `false` | 是否发布夹爪 ArUco 调试图像。 |
 | `record_mcap` | 否 | `false` | 是否随设备启动并立即录制全部 ROS 2 话题。 |
 | `dataset_root` | 否 | `dataset` | MCAP 保存根目录；每次录制创建 `fastumi_<UTC时间戳>` 子目录。 |
 
-例如，临时替换相机、Tracker：
+例如，临时指定 ToF 设备路径、Tracker：
 
 ```bash
 ros2 launch fastumi_data fastumi_collection.launch.py \
-  camera_serial:=SNXXXXXXXXXXXX \
+  device_path:=/dev/video0 \
   tracker_serial:=LHR-XXXXXXXX
 ```
 

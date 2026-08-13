@@ -1,30 +1,22 @@
-# 该文件保存三维夹爪归一化距离估计节点的默认运行参数。
 gripper_openness_estimator:
   ros__parameters:
-    # 原始鱼眼 RGB 图像用于 equidistant 角点校正和三维 PnP。
-    image_topic: /xv_sdk/SN250801DR48FB26001253/rgb/image
+    image_topic: /tof_stereo_camera/rgb/image_raw
     openness_topic: /gripper/openness
     state_topic: /gripper/state
     debug_image_topic: /gripper/openness/debug_image
     publish_debug_image: false
-
-    # 空值使用随包安装的 camera_calibration.yaml，也可通过 launch 参数覆盖。
-    camera_calibration_path: ""
-
-    # 夹爪左右两侧标记使用 OpenCV 4x4 字典中的 ID 0 和 ID 1。
+    camera_calibration_path: ''
     dictionary_name: DICT_4X4_50
     marker_size_mm: 16.0
-
-    # 夹爪标识、左右标签 ID 及完全闭合/张开时的标签中心毫米距离。
     gripper_range:
       gripper_id: 0
       left_finger_tag_id: 0
       right_finger_tag_id: 1
-      min_marker_dist_mm: 48.31
-      max_marker_dist_mm: 129.0
-
-    # 平滑对象是最终无量纲 [0,1] 归一化距离。
+      min_marker_dist_mm: 48.168
+      max_marker_dist_mm: 126.372
     smoothing_alpha: 0.35
-
-    # 相对图像宽高的 [x_min, y_min, x_max, y_max]，覆盖画面下部夹爪区域。
-    roi_ratios: [0.15, 0.58, 0.85, 0.82]
+    roi_ratios:
+    - 0.15
+    - 0.58
+    - 0.85
+    - 0.82

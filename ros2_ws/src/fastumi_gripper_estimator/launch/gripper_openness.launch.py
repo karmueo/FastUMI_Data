@@ -15,20 +15,22 @@ def generate_launch_description() -> LaunchDescription:
     Returns:
         包含夹爪开合度估计节点的启动描述。
     """
-    # 安装后的包共享目录。
+    # 估计包安装后的共享目录。
     package_share = get_package_share_directory("fastumi_gripper_estimator")
+    # ToF 相机安装后的共享目录。
+    tof_camera_share = get_package_share_directory("tof_stereo_camera")
     # 默认节点参数文件路径。
     parameter_file = os.path.join(
         package_share, "config", "gripper_openness.yaml"
     )
-    # 随包安装的默认相机标定文件路径。
+    # ToF 驱动随包安装的默认相机标定文件路径。
     default_calibration_file = os.path.join(
-        package_share, "config", "camera_calibration.yaml"
+        tof_camera_share, "config", "calibration.yaml"
     )
-    # 输入话题参数默认选择三维鱼眼解算使用的原始 RGB 图像。
+    # 输入话题参数默认选择 ToF 三维鱼眼解算使用的原始 RGB 图像。
     image_topic_argument = DeclareLaunchArgument(
         "image_topic",
-        default_value="/xv_sdk/SN250801DR48FB26001253/rgb/image",
+        default_value="/tof_stereo_camera/rgb/image_raw",
         description="用于三维夹爪距离估计的原始 sensor_msgs/Image 话题",
     )
     # 调试图像开关允许通过 launch 命令行覆盖 YAML 默认值。
@@ -41,7 +43,7 @@ def generate_launch_description() -> LaunchDescription:
     calibration_argument = DeclareLaunchArgument(
         "camera_calibration_path",
         default_value=default_calibration_file,
-        description="Kalibr equidistant 相机标定 YAML 路径",
+        description="ToF 或 Kalibr 鱼眼相机标定 YAML 路径",
     )
     # 夹爪估计节点启动动作。
     estimator_node = Node(

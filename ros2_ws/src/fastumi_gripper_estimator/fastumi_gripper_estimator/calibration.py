@@ -14,7 +14,7 @@ class CameraCalibration:
 
     Attributes:
         camera_matrix: 形状为 ``(3, 3)`` 的针孔投影矩阵。
-        distortion_coefficients: 四个 equidistant 鱼眼畸变系数。
+        distortion_coefficients: 四个 fisheye 兼容畸变系数。
         resolution: 标定图像的宽、高，单位为像素。
     """
 
@@ -37,7 +37,7 @@ class GripperDistanceRange:
 
 
 def load_camera_calibration(path: str) -> CameraCalibration:
-    """从 Kalibr YAML 加载 equidistant 鱼眼标定参数。
+    """从 ToF 或 Kalibr YAML 加载鱼眼标定参数。
 
     Args:
         path: 标定 YAML 文件路径。
@@ -55,34 +55,13 @@ def load_camera_calibration(path: str) -> CameraCalibration:
     except (OSError, yaml.YAMLError) as error:
         raise ValueError(f"读取相机标定 YAML 失败: {error}") from error
 
-    try:
-        camera_data = document["cam0"]
-        camera_model = str(camera_data["camera_model"])
-        distortion_model = str(camera_data["distortion_model"])
-        intrinsics = np.asarray(camera_data["intrinsics"], dtype=np.float64)
-        distortion = np.asarray(
-            camera_data["distortion_coeffs"], dtype=np.float64
-        )
-        resolution_values = tuple(
-            int(value) for value in camera_data["resolution"]
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError(f"相机标定 YAML 缺少有效的 cam0 字段: {error}") from error
-
-    if camera_model != "pinhole":
-        raise ValueError(f"仅支持 pinhole 相机模型，当前为 {camera_model}")
-    if distortion_model != "equidistant":
-        raise ValueError(
-            f"仅支持 equidistant 鱼眼畸变模型，当前为 {distortion_model}"
-        )
-    if intrinsics.shape != (4,) or not np.all(np.isfinite(intrinsics)):
-        raise ValueError("cam0.intrinsics 必须包含四个有限数值")
-    if distortion.shape != (4,) or not np.all(np.isfinite(distortion)):
-        raise ValueError("cam0.distortion_coeffs 必须包含四个有限数值")
-    if len(resolution_values) != 2 or any(
-        value <= 0 for value in resolution_values
-    ):
-        raise ValueError("cam0.resolution 必须包含正数宽度和高度")
+    camera_key, camera_data = _select_camera_block(document)
+    _validate_camera_model(camera_key, camera_data)
+    intrinsics = _load_finite_values(camera_data, "intrinsics", camera_key)
+    distortion = _load_finite_values(
+        camera_data, "distortion_coeffs", camera_key
+    )
+    resolution_values = _load_resolution(camera_data, camera_key)
 
     focal_x, focal_y, center_x, center_y = intrinsics
     if focal_x <= 0.0 or focal_y <= 0.0:
@@ -101,6 +80,104 @@ def load_camera_calibration(path: str) -> CameraCalibration:
         distortion_coefficients=distortion.reshape(4, 1),
         resolution=(resolution_values[0], resolution_values[1]),
     )
+
+
+def _select_camera_block(document) -> Tuple[str, dict]:
+    """选择唯一支持的 ToF ``rgb`` 或 Kalibr ``cam0`` 相机块。"""
+    if not isinstance(document, dict):
+        raise ValueError("相机标定 YAML 顶层必须是映射")
+    has_rgb = "rgb" in document
+    has_cam0 = "cam0" in document
+    if has_rgb and has_cam0:
+        raise ValueError("相机标定 YAML 同时包含 rgb 和 cam0，无法确定标定来源")
+    if not has_rgb and not has_cam0:
+        raise ValueError("相机标定 YAML 必须包含 rgb 或 cam0")
+
+    camera_key = "rgb" if has_rgb else "cam0"
+    camera_data = document[camera_key]
+    if not isinstance(camera_data, dict):
+        raise ValueError(f"{camera_key} 必须是相机参数映射")
+    return camera_key, camera_data
+
+
+def _validate_camera_model(camera_key: str, camera_data: dict) -> None:
+    """验证不同来源标定文件的相机和畸变模型约束。"""
+    try:
+        distortion_model = str(camera_data["distortion_model"])
+    except KeyError as error:
+        raise ValueError(
+            f"{camera_key} 缺少 distortion_model 字段"
+        ) from error
+
+    if camera_key == "rgb":
+        if distortion_model != "fisheye":
+            raise ValueError(
+                "仅支持 ToF rgb.fisheye 畸变模型，"
+                f"当前为 {distortion_model}"
+            )
+        return
+
+    try:
+        camera_model = str(camera_data["camera_model"])
+    except KeyError as error:
+        raise ValueError("cam0 缺少 camera_model 字段") from error
+    if camera_model != "pinhole":
+        raise ValueError(f"仅支持 cam0.pinhole 相机模型，当前为 {camera_model}")
+    if distortion_model != "equidistant":
+        raise ValueError(
+            "仅支持 cam0.equidistant 鱼眼畸变模型，"
+            f"当前为 {distortion_model}"
+        )
+
+
+def _load_finite_values(
+    camera_data: dict,
+    field: str,
+    camera_key: str,
+) -> np.ndarray:
+    """读取恰含四个有限数值的相机参数数组。"""
+    try:
+        values = np.asarray(camera_data[field], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"{camera_key}.{field} 必须包含四个有限数值: {error}"
+        ) from error
+    if values.shape != (4,) or not np.all(np.isfinite(values)):
+        raise ValueError(f"{camera_key}.{field} 必须包含四个有限数值")
+    return values
+
+
+def _load_resolution(camera_data: dict, camera_key: str) -> Tuple[int, int]:
+    """读取两个正整数像素尺寸，拒绝隐式截断的小数值。"""
+    try:
+        raw_resolution = camera_data["resolution"]
+        if not isinstance(raw_resolution, (list, tuple)):
+            raise ValueError("必须是 YAML 序列")
+        if len(raw_resolution) != 2:
+            raise ValueError("长度必须为 2")
+        resolution_values = tuple(
+            _validate_resolution_value(value) for value in raw_resolution
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"{camera_key}.resolution 必须包含两个正整数像素值: {error}"
+        ) from error
+    return resolution_values
+
+
+def _validate_resolution_value(value) -> int:
+    """验证单个分辨率值为有限且无小数部分的正数。"""
+    if isinstance(value, bool):
+        raise ValueError("布尔值不能作为分辨率")
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"值必须为数值: {error}") from error
+    if not np.isfinite(numeric_value) or numeric_value <= 0.0:
+        raise ValueError("值必须为正有限数")
+    if not numeric_value.is_integer():
+        raise ValueError("值必须为整数")
+    return int(numeric_value)
 
 
 def validate_gripper_distance_range(

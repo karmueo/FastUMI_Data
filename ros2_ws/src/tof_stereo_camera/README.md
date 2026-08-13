@@ -47,8 +47,8 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `device_path` | 空 | 指定 `/dev/video*`；空值表示自动选择 |
 | `enable_sdk_log` | `false` | 启用 SDK 内部文件日志，仅用于真机排障 |
 | `sdk_log_path` | 空 | SDK 日志文件路径；空值使用 SDK 默认路径 `/tmp/imu_head_dump.log` |
-| `width` | `1920` | 请求的复合图像宽度 |
-| `height` | `2362` | 请求的复合图像高度 |
+| `width` | `2048` | 请求的复合图像宽度；默认档位发布 `2048x1536` RGB 子帧 |
+| `height` | `2738` | 请求的完整复合图像高度，包含 RGB、iTOF 和元数据 |
 | `pixel_format` | `YUYV` | 请求的像素格式，可选 `YUYV` 或 `NV12` |
 | `enable_rgb` | `true` | 发布 RGB 图像 |
 | `enable_itof_depth` | `true` | 发布 iTOF 深度图 |
@@ -85,7 +85,8 @@ RViz 的 IMU 显示订阅 `/tof_stereo_camera/imu/data`，显示姿态坐标轴�
 
 ## 0.3.0 行为
 
-默认复合帧规格为 `1920x2362 YUYV`。驱动适配 SDK 38bc222 的批量 IMU ABI：每个结构有效的
+默认复合帧规格为 `2048x2738 YUYV`，其中 RGB 子帧为与标定文件一致的
+`2048x1536 bgr8`。驱动适配 SDK 38bc222 的批量 IMU ABI：每个结构有效的
 IMU 帧会复制并发布其中全部样本，避免下一次 `stereo_camera_parse_frame()` 覆盖 SDK 内部缓冲区。
 `data_size=0` 的空批次是成功的无操作，不发布消息也不记录警告。
 

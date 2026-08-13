@@ -6,7 +6,6 @@ from typing import List, Optional
 from ament_index_python.packages import get_package_share_directory
 import cv2
 from cv_bridge import CvBridge
-from fastumi_interfaces.msg import GripperState
 from fastumi_gripper_estimator.calibration import (
     load_camera_calibration,
     validate_gripper_distance_range,
@@ -15,6 +14,8 @@ from fastumi_gripper_estimator.estimator import (
     GripperOpennessEstimator,
     OpennessEstimate,
 )
+from fastumi_interfaces.msg import GripperState
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -22,18 +23,16 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
 
 
-# 默认原始 RGB 图像话题。
-DEFAULT_IMAGE_TOPIC = "/xv_sdk/SN250801DR48FB26001253/rgb/image"
-# 随包安装的默认 Kalibr equidistant 鱼眼标定文件名。
-DEFAULT_CAMERA_CALIBRATION_FILENAME = "camera_calibration.yaml"
+# 默认 ToF 原始 RGB 图像话题。
+DEFAULT_IMAGE_TOPIC = "/tof_stereo_camera/rgb/image_raw"
 # 默认夹爪编号。
 DEFAULT_GRIPPER_ID = 0
 # 默认左右手指 ArUco 标记编号。
 DEFAULT_LEFT_FINGER_TAG_ID = 0
 DEFAULT_RIGHT_FINGER_TAG_ID = 1
 # 默认闭合和张开标签中心距离，单位为毫米。
-DEFAULT_MIN_MARKER_DIST_MM = 48.31
-DEFAULT_MAX_MARKER_DIST_MM = 129.0
+DEFAULT_MIN_MARKER_DIST_MM = 48.168
+DEFAULT_MAX_MARKER_DIST_MM = 126.372
 
 
 class GripperOpennessNode(Node):
@@ -49,7 +48,7 @@ class GripperOpennessNode(Node):
         openness_topic = str(self.get_parameter("openness_topic").value)
         state_topic = str(self.get_parameter("state_topic").value)
         debug_image_topic = str(self.get_parameter("debug_image_topic").value)
-        # 空参数使用包共享目录中的默认标定，也允许 launch 传入外部标定。
+        # 空参数使用 ToF 包共享目录中的默认标定，也允许传入外部 Kalibr 标定。
         camera_calibration_path = str(
             self.get_parameter("camera_calibration_path").value
         )
@@ -166,15 +165,10 @@ class GripperOpennessNode(Node):
         """返回随 ROS 包安装的默认相机标定文件路径。
 
         Returns:
-            package share 中默认 Kalibr YAML 的绝对路径。
+            tof_stereo_camera package share 中默认 YAML 的绝对路径。
         """
-        package_share = get_package_share_directory(
-            "fastumi_gripper_estimator"
-        )
-        return (
-            f"{package_share}/config/"
-            f"{DEFAULT_CAMERA_CALIBRATION_FILENAME}"
-        )
+        package_share = get_package_share_directory("tof_stereo_camera")
+        return f"{package_share}/config/calibration.yaml"
 
     def _declare_parameters(self) -> None:
         """声明节点支持的全部 ROS 参数及默认值。"""
@@ -270,9 +264,10 @@ class GripperOpennessNode(Node):
             debug_message.header = message.header
             self._debug_publisher.publish(debug_message)
 
-    @staticmethod
-    def _draw_debug_image(image, estimate: OpennessEstimate):
-        """绘制 ROI、标记中心、内部毫米距离和无量纲输出。
+    def _draw_debug_image(
+        self, image: np.ndarray, estimate: OpennessEstimate
+    ) -> np.ndarray:
+        """在原始鱼眼图像绘制 ROI、距离及两枚标记的相机相对位姿。
 
         Args:
             image: BGR 原始鱼眼图像。
@@ -313,7 +308,144 @@ class GripperOpennessNode(Node):
             2,
             cv2.LINE_AA,
         )
+        self._draw_marker_pose(
+            debug_image,
+            estimate.left_center,
+            self._estimator.left_marker_id,
+            estimate.left_pose,
+        )
+        self._draw_marker_pose(
+            debug_image,
+            estimate.right_center,
+            self._estimator.right_marker_id,
+            estimate.right_pose,
+        )
+        cv2.putText(
+            debug_image,
+            "pose: tag -> RGB optical camera; X=red Y=green Z=blue",
+            (x_min, min(debug_image.shape[0] - 10, y_max + 28)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
         return debug_image
+
+    def _draw_marker_pose(
+        self, debug_image: np.ndarray, center: tuple, marker_id: int, pose
+    ) -> None:
+        """绘制单枚标记的鱼眼坐标轴和相对相机的位姿文本。
+
+        姿态文本采用 XYZ 轴的 roll-pitch-yaw 约定，满足
+        ``R = Rz(yaw) @ Ry(pitch) @ Rx(roll)``。坐标轴用原始鱼眼内参、
+        畸变系数投影，长度为实际标记边长。
+
+        Args:
+            debug_image: 待绘制的原始 BGR 鱼眼图像。
+            center: 标记在原始图像中的像素中心。
+            marker_id: 当前配置中对应的 ArUco 标记 ID。
+            pose: 标记坐标系相对于 RGB 光学相机的有限 PnP 位姿。
+        """
+        projected_axes = self._project_marker_axes(pose)
+        if projected_axes is not None:
+            origin, axis_x, axis_y, axis_z = (
+                tuple(int(round(value)) for value in point)
+                for point in projected_axes
+            )
+            # BGR：X 红、Y 绿、Z 蓝，长度与实际标记边长一致。
+            cv2.line(debug_image, origin, axis_x, (0, 0, 255), 2)
+            cv2.line(debug_image, origin, axis_y, (0, 255, 0), 2)
+            cv2.line(debug_image, origin, axis_z, (255, 0, 0), 2)
+
+        rpy_degrees = self._rotation_vector_to_rpy_degrees(
+            pose.rotation_vector
+        )
+        image_height, image_width = debug_image.shape[:2]
+        text_x = min(max(5, int(round(center[0])) + 12), image_width - 255)
+        text_y = min(max(18, int(round(center[1])) - 24), image_height - 45)
+        translation = pose.translation_mm
+        labels = (
+            f"tag={marker_id}",
+            "t=(%.1f,%.1f,%.1f)mm" % translation,
+            "rpy=(%.1f,%.1f,%.1f)deg" % rpy_degrees,
+        )
+        for index, label in enumerate(labels):
+            cv2.putText(
+                debug_image,
+                label,
+                (text_x, text_y + index * 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+    def _project_marker_axes(self, pose) -> Optional[np.ndarray]:
+        """投影标记原点和三根实际长度坐标轴到原始鱼眼图像。
+
+        Args:
+            pose: 标记坐标系相对于 RGB 光学相机的有限 PnP 位姿。
+
+        Returns:
+            原点、X、Y、Z 的 ``(4, 2)`` 像素坐标；投影失败或含非有限数值
+            时返回 ``None``。
+        """
+        axis_length_mm = self._estimator.marker_size_mm
+        object_points = np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [axis_length_mm, 0.0, 0.0],
+                [0.0, axis_length_mm, 0.0],
+                [0.0, 0.0, axis_length_mm],
+            ],
+            dtype=np.float64,
+        ).reshape(-1, 1, 3)
+        try:
+            image_points, _ = cv2.fisheye.projectPoints(
+                object_points,
+                np.asarray(pose.rotation_vector, dtype=np.float64),
+                np.asarray(pose.translation_mm, dtype=np.float64),
+                self._estimator.camera_matrix,
+                self._estimator.distortion_coefficients,
+            )
+        except cv2.error:
+            return None
+        projected_axes = np.asarray(
+            image_points, dtype=np.float64
+        ).reshape(4, 2)
+        if not np.all(np.isfinite(projected_axes)):
+            return None
+        return projected_axes
+
+    @staticmethod
+    def _rotation_vector_to_rpy_degrees(rotation_vector: tuple) -> tuple:
+        """按 XYZ roll-pitch-yaw 约定转换 Rodrigues 旋转向量。
+
+        该约定满足 ``R = Rz(yaw) @ Ry(pitch) @ Rx(roll)``，返回值单位为度。
+
+        Args:
+            rotation_vector: 三维 Rodrigues 旋转向量。
+
+        Returns:
+            roll、pitch、yaw 的角度元组。
+        """
+        rotation_matrix, _ = cv2.Rodrigues(
+            np.asarray(rotation_vector, dtype=np.float64)
+        )
+        cosine_pitch = float(
+            np.hypot(rotation_matrix[0, 0], rotation_matrix[1, 0])
+        )
+        if cosine_pitch > 1e-6:
+            roll = math.atan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+            pitch = math.atan2(-rotation_matrix[2, 0], cosine_pitch)
+            yaw = math.atan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+        else:
+            roll = math.atan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
+            pitch = math.atan2(-rotation_matrix[2, 0], cosine_pitch)
+            yaw = 0.0
+        return tuple(math.degrees(value) for value in (roll, pitch, yaw))
 
 
 def main(args: Optional[List[str]] = None) -> None:

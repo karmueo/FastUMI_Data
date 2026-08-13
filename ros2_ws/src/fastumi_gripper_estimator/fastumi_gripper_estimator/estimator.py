@@ -8,6 +8,45 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class MarkerPose:
+    """保存标记坐标系相对于 RGB 光学相机的有限 PnP 位姿。
+
+    ``rotation_vector`` 是 Rodrigues 旋转向量；
+    ``translation_mm`` 是从 RGB 光学相机原点指向标记原点的毫米平移向量。
+    两个字段使用元组，以保证结果对象及其向量值不可变。
+
+    Attributes:
+        rotation_vector: 形状为 ``(3,)`` 的有限 Rodrigues 旋转向量。
+        translation_mm: 形状为 ``(3,)`` 的有限毫米平移向量。
+    """
+
+    rotation_vector: Tuple[float, float, float]
+    translation_mm: Tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        """验证、规范化位姿向量，并保持 dataclass 的冻结语义。
+
+        Raises:
+            ValueError: 任一向量不是三个有限数值时抛出。
+        """
+        rotation = np.asarray(self.rotation_vector, dtype=np.float64)
+        translation = np.asarray(self.translation_mm, dtype=np.float64)
+        if (
+            rotation.shape != (3,)
+            or translation.shape != (3,)
+            or not np.all(np.isfinite(rotation))
+            or not np.all(np.isfinite(translation))
+        ):
+            raise ValueError("标记位姿必须包含两个有限的三维向量")
+        object.__setattr__(
+            self, "rotation_vector", tuple(float(value) for value in rotation)
+        )
+        object.__setattr__(
+            self, "translation_mm", tuple(float(value) for value in translation)
+        )
+
+
+@dataclass(frozen=True)
 class OpennessEstimate:
     """保存单帧夹爪归一化距离估计结果。
 
@@ -17,6 +56,8 @@ class OpennessEstimate:
         distance_mm: 两枚 ArUco 标记中心的三维距离，单位为毫米。
         left_center: 左侧标记中心在原始图像中的像素坐标。
         right_center: 右侧标记中心在原始图像中的像素坐标。
+        left_pose: 左侧标记相对于 RGB 光学相机的 PnP 位姿。
+        right_pose: 右侧标记相对于 RGB 光学相机的 PnP 位姿。
         roi: 检测区域，顺序为 x_min、y_min、x_max、y_max。
     """
 
@@ -25,6 +66,8 @@ class OpennessEstimate:
     distance_mm: float
     left_center: Tuple[float, float]
     right_center: Tuple[float, float]
+    left_pose: MarkerPose
+    right_pose: MarkerPose
     roi: Tuple[int, int, int, int]
 
 
@@ -251,16 +294,17 @@ class GripperOpennessEstimator:
         """
         return self._last_detected_marker_count
 
-    def estimate_marker_position(
+    def estimate_marker_pose(
         self, distorted_corners: np.ndarray
-    ) -> Optional[np.ndarray]:
-        """从原始鱼眼角点估计标记中心的三维毫米坐标。
+    ) -> Optional[MarkerPose]:
+        """从原始鱼眼角点估计标记相对于 RGB 光学相机的位姿。
 
         Args:
             distorted_corners: 原始图像中的四个角点，顺序遵循 ArUco 输出。
 
         Returns:
-            形状为 ``(3,)`` 的毫米平移向量；位姿无效时返回 ``None``。
+            有效的 Rodrigues 旋转和毫米平移；PnP 无效或位于相机后方时
+            返回 ``None``。
 
         Raises:
             ValueError: 角点数量或数值无效时抛出。
@@ -276,7 +320,7 @@ class GripperOpennessEstimator:
             self.distortion_coefficients,
             P=self.camera_matrix,
         ).reshape(4, 2)
-        success, _, translation = cv2.solvePnP(
+        success, rotation, translation = cv2.solvePnP(
             self._marker_object_points,
             undistorted_corners,
             self.camera_matrix,
@@ -285,10 +329,37 @@ class GripperOpennessEstimator:
         )
         if not success:
             return None
+        rotation_vector = np.asarray(rotation, dtype=np.float64).reshape(3)
         position_mm = np.asarray(translation, dtype=np.float64).reshape(3)
-        if not np.all(np.isfinite(position_mm)) or position_mm[2] <= 0.0:
+        if (
+            not np.all(np.isfinite(rotation_vector))
+            or not np.all(np.isfinite(position_mm))
+            or position_mm[2] <= 0.0
+        ):
             return None
-        return position_mm
+        return MarkerPose(
+            rotation_vector=tuple(float(value) for value in rotation_vector),
+            translation_mm=tuple(float(value) for value in position_mm),
+        )
+
+    def estimate_marker_position(
+        self, distorted_corners: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """兼容旧接口，仅返回从原始鱼眼角点恢复的毫米平移向量。
+
+        Args:
+            distorted_corners: 原始图像中的四个角点，顺序遵循 ArUco 输出。
+
+        Returns:
+            形状为 ``(3,)`` 的毫米平移向量；位姿无效时返回 ``None``。
+
+        Raises:
+            ValueError: 角点数量或数值无效时抛出。
+        """
+        pose = self.estimate_marker_pose(distorted_corners)
+        if pose is None:
+            return None
+        return np.asarray(pose.translation_mm, dtype=np.float64)
 
     def estimate(self, image: np.ndarray) -> Optional[OpennessEstimate]:
         """估计单帧原始鱼眼图像中的无量纲夹爪距离。
@@ -357,12 +428,14 @@ class GripperOpennessEstimator:
 
         left_corners = marker_corners[self.left_marker_id]
         right_corners = marker_corners[self.right_marker_id]
-        left_position_mm = self.estimate_marker_position(left_corners)
-        right_position_mm = self.estimate_marker_position(right_corners)
-        if left_position_mm is None or right_position_mm is None:
+        left_pose = self.estimate_marker_pose(left_corners)
+        right_pose = self.estimate_marker_pose(right_corners)
+        if left_pose is None or right_pose is None:
             return None
 
         # PnP 平移向量和距离都使用毫米；对外输出只使用无量纲结果。
+        left_position_mm = np.asarray(left_pose.translation_mm)
+        right_position_mm = np.asarray(right_pose.translation_mm)
         distance_mm = float(
             np.linalg.norm(left_position_mm - right_position_mm)
         )
@@ -392,6 +465,8 @@ class GripperOpennessEstimator:
             distance_mm=distance_mm,
             left_center=left_center,
             right_center=right_center,
+            left_pose=left_pose,
+            right_pose=right_pose,
             roi=roi,
         )
 

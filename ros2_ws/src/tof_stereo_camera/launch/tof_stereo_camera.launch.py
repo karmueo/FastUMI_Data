@@ -34,8 +34,9 @@ def generate_launch_description():
             choices=["madgwick", "complementary"],
         ),
         DeclareLaunchArgument("enable_rviz", default_value="true"),
-        DeclareLaunchArgument("width", default_value="1920"),
-        DeclareLaunchArgument("height", default_value="2362"),
+        # 2048 系完整复合帧对应 2048x1536 的 RGB 标定分辨率。
+        DeclareLaunchArgument("width", default_value="2048"),
+        DeclareLaunchArgument("height", default_value="2738"),
         DeclareLaunchArgument("enable_sdk_log", default_value="false"),
         DeclareLaunchArgument("sdk_log_path", default_value=""),
         DeclareLaunchArgument("pixel_format", default_value="YUYV"),

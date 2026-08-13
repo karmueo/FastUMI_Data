@@ -150,8 +150,8 @@ def test_invalid_estimator_parameters_are_rejected() -> None:
         )
 
 
-def test_fisheye_projected_corners_recover_position_in_mm() -> None:
-    """验证 equidistant 合成角点可恢复毫米平移向量。"""
+def test_fisheye_projected_corners_recover_full_pose_in_mm() -> None:
+    """验证 equidistant 合成角点可恢复毫米平移和旋转向量。"""
     estimator = make_estimator()
     half_size = 8.0
     object_points = np.asarray(
@@ -173,10 +173,30 @@ def test_fisheye_projected_corners_recover_position_in_mm() -> None:
         FISHEYE_DISTORTION,
     )
 
+    pose = estimator.estimate_marker_pose(distorted_corners)
+
+    assert pose is not None
+    assert pose.translation_mm == pytest.approx(expected_position_mm, abs=1e-4)
+    assert pose.rotation_vector == pytest.approx(rotation_vector, abs=1e-4)
+
+
+def test_estimate_marker_position_remains_pose_translation_compatible() -> None:
+    """验证旧位置接口继续返回新位姿接口中的毫米平移向量。"""
+    estimator = make_estimator()
+    distorted_corners, _ = cv2.fisheye.projectPoints(
+        estimator._marker_object_points.reshape(-1, 1, 3),
+        np.asarray([0.02, -0.03, 0.01], dtype=np.float64),
+        np.asarray([15.0, -8.0, 190.0], dtype=np.float64),
+        CAMERA_MATRIX,
+        FISHEYE_DISTORTION,
+    )
+
+    pose = estimator.estimate_marker_pose(distorted_corners)
     position_mm = estimator.estimate_marker_position(distorted_corners)
 
+    assert pose is not None
     assert position_mm is not None
-    assert position_mm == pytest.approx(expected_position_mm, abs=1e-4)
+    assert position_mm == pytest.approx(pose.translation_mm, abs=1e-8)
 
 
 def test_empty_and_missing_marker_images_return_no_estimate() -> None:

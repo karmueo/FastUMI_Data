@@ -2,6 +2,7 @@
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from xml.etree import ElementTree
 
 from launch import LaunchContext
 from launch.actions import (
@@ -26,7 +27,9 @@ def _load_launch_module():
         已执行并可调用 `generate_launch_description` 的模块。
     """
     # 独立模块规格，避免将 launch 文件当作普通包导入。
-    module_spec = spec_from_file_location("fastumi_collection_launch", LAUNCH_FILE)
+    module_spec = spec_from_file_location(
+        "fastumi_collection_launch", LAUNCH_FILE
+    )
     assert module_spec is not None
     assert module_spec.loader is not None
     # 根据规格创建待执行的 launch 模块。
@@ -57,8 +60,29 @@ def test_collection_launch_includes_devices_and_optional_recorder() -> None:
     assert len(recorder_processes) == 1
     assert len(entities) == 10
 
+    camera_launch, _tracker_launch, gripper_launch = included_launches
+    assert "tof_stereo_camera.launch.py" in str(
+        camera_launch.launch_description_source.location
+    )
+    camera_arguments = dict(camera_launch.launch_arguments)
+    assert set(camera_arguments) == {"device_path", "enable_rviz"}
+    assert camera_arguments["enable_rviz"] == "false"
+    launch_context = LaunchContext()
+    launch_context.launch_configurations["device_path"] = "/dev/video0"
+    assert (
+        perform_substitutions(
+            launch_context, [camera_arguments["device_path"]]
+        )
+        == "/dev/video0"
+    )
+    gripper_arguments = dict(gripper_launch.launch_arguments)
+    assert gripper_arguments["image_topic"] == (
+        "/tof_stereo_camera/rgb/image_raw"
+    )
 
-def test_collection_launch_declares_recording_arguments_with_safe_defaults() -> None:
+
+def test_collection_launch_declares_recording_arguments_with_safe_defaults(
+) -> None:
     """验证录制默认关闭且数据集根目录可移植。"""
     # 生成待检查的统一启动描述。
     launch_description = _load_launch_module().generate_launch_description()
@@ -70,13 +94,14 @@ def test_collection_launch_declares_recording_arguments_with_safe_defaults() -> 
     }
 
     assert set(arguments) == {
-        "camera_serial",
+        "device_path",
         "tracker_serial",
         "use_rviz",
         "publish_debug_image",
         "record_mcap",
         "dataset_root",
     }
+    assert "camera_serial" not in arguments
     assert arguments["use_rviz"].choices == ["true", "false"]
     assert arguments["record_mcap"].choices == ["true", "false"]
     # 空启动上下文足以解析两个纯文本默认值。
@@ -135,3 +160,21 @@ def test_collection_launch_records_timestamped_zstd_mcap() -> None:
     assert output_path.parent == Path("/tmp/fastumi")
     assert output_path.name.startswith("fastumi_20")
     assert output_path.name.endswith("Z")
+
+
+def test_package_dependencies_select_tof_camera() -> None:
+    """验证统一采集与夹爪估计均声明 ToF 运行时依赖。"""
+    data_package = ElementTree.parse(PACKAGE_ROOT / "package.xml")
+    estimator_package = ElementTree.parse(
+        PACKAGE_ROOT.parent / "fastumi_gripper_estimator" / "package.xml"
+    )
+    data_dependencies = {
+        element.text for element in data_package.findall("exec_depend")
+    }
+    estimator_dependencies = {
+        element.text for element in estimator_package.findall("exec_depend")
+    }
+
+    assert "tof_stereo_camera" in data_dependencies
+    assert "xv_sdk_ros2" not in data_dependencies
+    assert "tof_stereo_camera" in estimator_dependencies
