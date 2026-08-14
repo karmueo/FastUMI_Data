@@ -201,7 +201,7 @@ def test_empty_rate_overrides_preserve_config_file():
 
 
 def test_explicit_rate_overrides_are_numeric():
-    """显式频率覆盖应以数值参数覆盖配置文件并支持 90 Hz/10 Hz."""
+    """显式频率覆盖应以数值参数覆盖配置文件并支持 60 Hz/10 Hz."""
     # 待测试的 launch 模块。
     launch_module = _load_launch_module()
     # 模拟调用者显式指定采样和 Path 更新频率。
@@ -210,7 +210,7 @@ def test_explicit_rate_overrides_are_numeric():
         'config_file': '/tmp/custom.yaml',
         'serial': '',
         'reorder_pose_axes': '',
-        'publish_rate_hz': '90.0',
+        'publish_rate_hz': '60.0',
         'path_publish_rate_hz': '10.0',
     })
 
@@ -219,5 +219,5 @@ def test_explicit_rate_overrides_are_numeric():
         launch_context
     )
 
-    assert tracker_parameters[1] == {'publish_rate_hz': 90.0}
+    assert tracker_parameters[1] == {'publish_rate_hz': 60.0}
     assert tracker_parameters[2] == {'path_publish_rate_hz': 10.0}

@@ -2,13 +2,23 @@
 
 /vive_tracker/pose_publisher:
   ros__parameters:
+    # 目标 VIVE Tracker 的硬件序列号，用于从 OpenVR 设备列表中选择指定 Tracker。
     serial: LHR-B77A06A7
-    publish_rate_hz: 90.0
+    # OpenVR 位姿查询及 Pose、Status、Odometry 和动态 TF 的发布频率，单位为 Hz，取值范围为 (0, 1000]。
+    publish_rate_hz: 60.0
+    # Path 轨迹追加和发布的最大频率，单位为 Hz，取值范围为 (0, publish_rate_hz]。
     path_publish_rate_hz: 10.0
-    tracking_origin: standing
+    # OpenVR 跟踪原点模式，可选值为 standing、seated 或 raw。
+    tracking_origin: raw
+    # 是否将 OpenVR 全局坐标轴重排为 ROS 跟踪坐标轴。
     reorder_pose_axes: false
+    # OpenVR 原始全局坐标系名称；关闭坐标轴重排时作为 Pose、Path 和里程计静态原点的父坐标系。
     openvr_frame: steamvr_tracking
+    # ROS 跟踪全局坐标系名称；开启坐标轴重排时作为 Pose、Path 和里程计静态原点的父坐标系。
     parent_frame: steamvr_tracking_ros
+    # 由第一条有效 Tracker 位姿确定的固定里程计坐标系名称。
     odom_frame: vive_tracker_odom
+    # Tracker 子坐标系名称，供 Odometry 消息和动态 TF 使用。
     child_frame: vive_tracker
+    # Path 中最多保留的轨迹点数量，必须为正整数；超过上限时移除最早的点。
     max_path_points: 3000

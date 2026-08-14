@@ -206,6 +206,7 @@ SETTING_GROUPS = {
         "frame_stride": "frame_stride",
         "min_tags": "min_tags",
         "max_pose_gap_ms": "max_pose_gap_ms",
+        "sample_end_offset_s": "sample_end_offset_s",
     },
     "optimization": {
         "time_offset_min_ms": "time_offset_min_ms",
@@ -230,6 +231,17 @@ def _finite_positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError("必须是浮点数") from error
     if not np.isfinite(parsed) or parsed <= 0.0:
         raise argparse.ArgumentTypeError("必须是有限正数")
+    return parsed
+
+
+def _finite_nonnegative_float(value: str) -> float:
+    """解析有限非负浮点数，供样本时间上界参数使用。"""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("必须是浮点数") from error
+    if not np.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("必须是有限非负数")
     return parsed
 
 
@@ -258,6 +270,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-tags", type=int, default=defaults.min_tags)
     parser.add_argument(
         "--max-pose-gap-ms", type=float, default=defaults.max_pose_gap_ms
+    )
+    parser.add_argument(
+        "--sample-end-offset-s",
+        type=_finite_nonnegative_float,
+        help=(
+            "仅使用首个抽帧图像 header 时间之后指定秒数内的样本；"
+            "默认处理完整记录"
+        ),
     )
     parser.add_argument(
         "--time-offset-min-ms", type=float,
@@ -329,6 +349,13 @@ def apply_settings_file(
         for key, value in values.items():
             attribute = mappings[key]
             if getattr(arguments, attribute) == parser.get_default(attribute):
+                if attribute == "sample_end_offset_s" and value is not None:
+                    try:
+                        value = _finite_nonnegative_float(value)
+                    except argparse.ArgumentTypeError as error:
+                        raise ValueError(
+                            f"设置 filtering.{key} {error}"
+                        ) from error
                 setattr(arguments, attribute, value)
     return arguments
 
@@ -389,9 +416,7 @@ def _run_detection_only(
     rejected = 0
     if progress is not None:
         progress.start_stage("detection_only", "开始全 bag AprilGrid 检测预检")
-    for frame in iter_image_frames(
-        arguments.bag, arguments.image_topic, arguments.frame_stride
-    ):
+    for frame in _iter_sample_frames(arguments):
         decoded += 1
         if progress is not None:
             progress.update(
@@ -494,6 +519,21 @@ def _motion_diverse_indices(transforms: Sequence[np.ndarray]) -> list[int]:
     return selected
 
 
+def _iter_sample_frames(arguments: argparse.Namespace):
+    """按首个抽帧图像的 header 时间应用可选样本结束上界。"""
+    first_timestamp_ns = None
+    end_offset_s = getattr(arguments, "sample_end_offset_s", None)
+    for frame in iter_image_frames(
+        arguments.bag, arguments.image_topic, arguments.frame_stride
+    ):
+        if first_timestamp_ns is None:
+            first_timestamp_ns = frame.timestamp_ns
+        elapsed_s = (frame.timestamp_ns - first_timestamp_ns) * 1.0e-9
+        if end_offset_s is not None and elapsed_s > end_offset_s:
+            break
+        yield frame
+
+
 def _collect_samples(
     arguments: argparse.Namespace,
     detector: Any,
@@ -516,9 +556,7 @@ def _collect_samples(
         progress.start_stage(
             "sample_collection", "开始解码图像、检测 AprilGrid 并估计 PnP"
         )
-    for frame in iter_image_frames(
-        arguments.bag, arguments.image_topic, arguments.frame_stride
-    ):
+    for frame in _iter_sample_frames(arguments):
         counters["decoded"] += 1
         if progress is not None:
             progress.update(
@@ -767,6 +805,7 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                 "frame_stride": arguments.frame_stride,
                 "min_tags": arguments.min_tags,
                 "max_pose_gap_ms": arguments.max_pose_gap_ms,
+                "sample_end_offset_s": arguments.sample_end_offset_s,
                 "time_offset_min_ms": arguments.time_offset_min_ms,
                 "time_offset_max_ms": arguments.time_offset_max_ms,
                 "time_offset_step_ms": arguments.time_offset_step_ms,

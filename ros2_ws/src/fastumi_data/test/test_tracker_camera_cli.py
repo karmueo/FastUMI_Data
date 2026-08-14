@@ -15,6 +15,7 @@ from fastumi_data.tracker_camera_cli import (
     _OptimizationProgressAdapter,
     PipelineOutcome,
     _collect_samples,
+    _iter_sample_frames,
     _run_detection_only,
     apply_settings_file,
     build_argument_parser,
@@ -44,12 +45,13 @@ def test_parser_defaults_match_target_bag_topics() -> None:
     """默认话题应匹配已确认的 Tracker–鱼眼 bag。"""
     arguments = build_argument_parser().parse_args(minimum_arguments())
     assert arguments.image_topic == "/tof_stereo_camera/rgb/image_raw"
-    assert arguments.tracker_topic == "/vive_tracker/pose"
+    assert arguments.tracker_topic == "/vive_tracker/odom"
     assert arguments.status_topic == "/vive_tracker/status"
     assert arguments.camera_config == "camera.yaml"
     assert arguments.tag_family == "tag36h11"
     assert arguments.frame_stride == 2
     assert arguments.min_tags == 6
+    assert arguments.sample_end_offset_s is None
     assert arguments.progress_interval_seconds == pytest.approx(30.0)
 
 
@@ -81,6 +83,36 @@ def test_parser_rejects_invalid_progress_interval(value: str) -> None:
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_parser_rejects_invalid_sample_end_offset(value: str) -> None:
+    """样本结束偏移必须是有限非负数。"""
+    with pytest.raises(SystemExit) as error:
+        build_argument_parser().parse_args(
+            minimum_arguments(["--sample-end-offset-s", value])
+        )
+    assert error.value.code == 2
+
+
+def test_sample_window_stops_after_header_time_limit(monkeypatch) -> None:
+    """样本结束偏移应以首个抽帧图像 header 时间为基准并包含边界。"""
+    frames = [
+        ImageFrame(timestamp, timestamp, np.zeros((2, 2, 3), np.uint8))
+        for timestamp in (1_000_000_000, 2_000_000_000, 3_000_000_001)
+    ]
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.iter_image_frames",
+        lambda *args, **kwargs: iter(frames),
+    )
+    arguments = SimpleNamespace(
+        bag="unused", image_topic="/camera/image", frame_stride=1,
+        sample_end_offset_s=1.0,
+    )
+    selected = list(_iter_sample_frames(arguments))
+    assert [frame.timestamp_ns for frame in selected] == [
+        1_000_000_000, 2_000_000_000,
+    ]
+
+
 def test_settings_file_overrides_defaults_but_cli_wins(tmp_path: Path) -> None:
     """设置 YAML 应覆盖默认值，显式命令行参数保持最高优先级。"""
     settings_path = tmp_path / "settings.yaml"
@@ -90,6 +122,7 @@ def test_settings_file_overrides_defaults_but_cli_wins(tmp_path: Path) -> None:
 filtering:
   frame_stride: 4
   min_tags: 8
+  sample_end_offset_s: 90.0
 optimization:
   time_offset_min_ms: -40.0
 """,
@@ -110,7 +143,49 @@ optimization:
     assert merged.image_topic == "/configured/rgb/image"
     assert merged.frame_stride == 4
     assert merged.min_tags == 10
+    assert merged.sample_end_offset_s == pytest.approx(90.0)
     assert merged.time_offset_min_ms == pytest.approx(-40.0)
+
+
+def test_settings_file_converts_sample_end_offset_string(
+    tmp_path: Path,
+) -> None:
+    """设置文件中的数值字符串应按 CLI 规则转换为浮点数。"""
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        'filtering:\n  sample_end_offset_s: "90.0"\n',
+        encoding="utf-8",
+    )
+    parser = build_argument_parser()
+    arguments = parser.parse_args(
+        minimum_arguments(["--settings-config", str(settings_path)])
+    )
+
+    merged = apply_settings_file(arguments, parser)
+
+    assert merged.sample_end_offset_s == pytest.approx(90.0)
+    assert isinstance(merged.sample_end_offset_s, float)
+
+
+@pytest.mark.parametrize("value", ["-1", ".nan", ".inf", "invalid"])
+def test_settings_file_rejects_invalid_sample_end_offset(
+    tmp_path: Path, value: str,
+) -> None:
+    """设置文件中的样本结束偏移也必须是有限非负数。"""
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(
+        f"filtering:\n  sample_end_offset_s: {value}\n",
+        encoding="utf-8",
+    )
+    parser = build_argument_parser()
+    arguments = parser.parse_args(
+        minimum_arguments(["--settings-config", str(settings_path)])
+    )
+
+    with pytest.raises(
+        ValueError, match=r"filtering\.sample_end_offset_s"
+    ):
+        apply_settings_file(arguments, parser)
 
 
 def test_main_exits_nonzero_when_quality_gate_fails(monkeypatch) -> None:

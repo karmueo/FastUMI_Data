@@ -1,7 +1,7 @@
 # Tracker–鱼眼相机离线外参标定的默认运行参数。
 topics:
   image: /tof_stereo_camera/rgb/image_raw
-  tracker_pose: /vive_tracker/pose
+  tracker_pose: /vive_tracker/odom
   tracker_status: /vive_tracker/status
 
 target:
@@ -11,6 +11,8 @@ filtering:
   frame_stride: 2
   min_tags: 6
   max_pose_gap_ms: 50.0
+  # Tracker 漂移或重定位已确认时，可限制首帧后的有效标定时长。
+  sample_end_offset_s: null
 
 optimization:
   time_offset_min_ms: -100.0

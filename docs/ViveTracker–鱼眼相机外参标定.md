@@ -13,7 +13,7 @@
 标定工具使用以下输入：
 
 - 图像：`sensor_msgs/msg/Image`，时间只读取 `Image.header.stamp`。
-- Tracker 位姿：`geometry_msgs/msg/PoseStamped`。
+- Tracker 里程计：`nav_msgs/msg/Odometry`，标定位姿读取 `Odometry.pose.pose`。
 - Tracker 状态：`fastumi_interfaces/msg/TrackerStatus`，有效状态要求
   `device_connected=true`、`pose_valid=true`、`tracking_state=3`。
 - 相机模型：默认读取已安装的 `tof_stereo_camera/config/calibration.yaml`，使用其中
@@ -89,7 +89,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | `--output-dir` | 无（必填） | 检测统计和叠加图的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
 | `--image-topic` | `/tof_stereo_camera/rgb/image_raw` | 图像话题名称。预检从该话题读取图像。 |
-| `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题。预检不使用。 |
+| `--tracker-topic` | `/vive_tracker/odom` | Tracker 位姿话题。预检不使用。 |
 | `--status-topic` | `/vive_tracker/status` | Tracker 状态话题。预检不使用。 |
 | `--tag-family` | `tag36h11` | AprilTag 标签族，必须与目标板配置和实际打印板一致。 |
 | `--frame-stride` | `2` | 图像抽帧步长；每隔指定帧数处理一帧。 |
@@ -144,12 +144,13 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | `--output-dir` | 无（必填） | 标定 YAML、质量报告、逐帧指标、诊断图和进度日志的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
 | `--image-topic` | `/tof_stereo_camera/rgb/image_raw` | 图像话题名称。 |
-| `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题名称。 |
+| `--tracker-topic` | `/vive_tracker/odom` | Tracker 位姿话题名称。 |
 | `--status-topic` | `/vive_tracker/status` | Tracker 状态话题名称；仅使用有效状态的位姿。 |
 | `--tag-family` | `tag36h11` | AprilTag 标签族，必须与目标板配置和实际打印板一致。 |
 | `--frame-stride` | `2` | 图像抽帧步长；每隔指定帧数参与检测和标定。 |
 | `--min-tags` | `6` | 一帧进入 PnP 和后续优化所需的最少有效标签数。 |
 | `--max-pose-gap-ms` | `50.0` | Tracker 位姿插值允许的最大间隔，单位为毫秒；超过该间隔的帧会被拒绝。 |
+| `--sample-end-offset-s` | 无 | 可选样本结束偏移，单位为秒；以首个抽帧图像的 header 时间为零点并包含边界，默认处理完整记录。 |
 | `--time-offset-min-ms` | `-100.0` | 图像与 Tracker 时间偏移搜索下界，单位为毫秒。 |
 | `--time-offset-max-ms` | `100.0` | 图像与 Tracker 时间偏移搜索上界，单位为毫秒。 |
 | `--time-offset-step-ms` | `2.0` | 时间偏移粗搜索步长，单位为毫秒。 |
@@ -204,8 +205,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 
 ```bash
 source ros2_ws/install/setup.bash
-PYTHONPATH=ros2_ws/src/fastumi_data \
-python3 -m fastumi_data.tracker_camera_report \
+ros2 run fastumi_data tracker_camera_report \
   --verify [前面对应的--output-dir]/calibration.yaml
 ```
 
@@ -225,8 +225,14 @@ python3 -m fastumi_data.tracker_camera_report \
 
 ### Tracker 插值失败
 
-检查 pose/status 频率、`header.stamp` 单调性和 `tracking_state=3`。不要用 bag 写入时间
-替代消息 header 时间。连续 pose 间隔超过 `--max-pose-gap-ms` 的帧会被拒绝。
+检查 odom/status 频率、`header.stamp` 单调性和 `tracking_state=3`。不要用 bag 写入时间
+替代消息 header 时间。连续 odom 位姿间隔超过 `--max-pose-gap-ms` 的帧会被拒绝。
+
+### Tracker 漂移或重定位
+
+若单帧 PnP 误差稳定，但固定板闭环误差在快速运动后突增并缓慢恢复，可判定该时段不满足
+刚性标定假设。先通过逐帧指标和叠加图确认突变点，再用 `--sample-end-offset-s` 只选取
+突变前的连续稳定区间；质量阈值保持不变。
 
 ### 时间偏移触边
 
@@ -349,7 +355,7 @@ ID 0/1 分别生成 TCP 位置候选，候选平移按单 tag 重投影 RMSE 的
 以下命令默认已进入 FastUMI_Data 项目根目录，配置和输出路径均按项目根目录
 解析。标定命令通过 ROS 2 console script 运行。标定 bag 只需包含目标 RGB Image
 话题，默认话题为 `/tof_stereo_camera/rgb/image_raw`；无需包含 Tracker
-pose/status 或 `GripperState`。程序单遍读取该图像话题，不执行 Tracker 或夹爪状态的
+Odometry/status 或 `GripperState`。程序单遍读取该图像话题，不执行 Tracker 或夹爪状态的
 时间同步。
 
 采样期间夹爪必须全程保持最大开度。程序固定使用 `openness=1.0` 计算双 tag 的全开

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from builtin_interfaces.msg import Time
 from fastumi_interfaces.msg import TrackerStatus
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
 import numpy as np
 import pytest
 from rclpy.serialization import serialize_message
@@ -141,27 +142,39 @@ def write_topic(
     )
 
 
-def write_test_bag(path: Path) -> None:
-    """写入包含 pose、status 和两帧图像的最小 MCAP。"""
+def write_test_bag(
+    path: Path, tracker_message_type: str = "nav_msgs/msg/Odometry"
+) -> None:
+    """写入包含 Odometry、status 和两帧图像的最小 MCAP。"""
     writer = rosbag2_py.SequentialWriter()
     writer.open(
         rosbag2_py.StorageOptions(uri=str(path), storage_id="mcap"),
         rosbag2_py.ConverterOptions("", ""),
     )
     topics = [
-        ("/vive_tracker/pose", "geometry_msgs/msg/PoseStamped"),
+        ("/vive_tracker/odom", tracker_message_type),
         ("/vive_tracker/status", "fastumi_interfaces/msg/TrackerStatus"),
         ("/camera/rgb/image", "sensor_msgs/msg/Image"),
     ]
     for topic_id, (name, message_type) in enumerate(topics):
         write_topic(writer, topic_id, name, message_type)
     for timestamp_ns in (100, 200):
-        pose = PoseStamped()
-        pose.header.stamp = make_stamp(timestamp_ns)
-        pose.pose.position.x = timestamp_ns / 100.0
-        pose.pose.orientation.w = 1.0
+        tracker_message = (
+            Odometry()
+            if tracker_message_type == "nav_msgs/msg/Odometry"
+            else PoseStamped()
+        )
+        tracker_message.header.stamp = make_stamp(timestamp_ns)
+        pose = (
+            tracker_message.pose.pose
+            if isinstance(tracker_message, Odometry)
+            else tracker_message.pose
+        )
+        pose.position.x = timestamp_ns / 100.0
+        pose.orientation.w = 1.0
         writer.write(
-            topics[0][0], serialize_message(pose), timestamp_ns + 10_000
+            topics[0][0], serialize_message(tracker_message),
+            timestamp_ns + 10_000,
         )
         status = TrackerStatus()
         status.header.stamp = make_stamp(timestamp_ns)
@@ -189,7 +202,7 @@ def test_two_pass_reader_preserves_header_and_stride(tmp_path: Path) -> None:
     bag_path = tmp_path / "bag"
     write_test_bag(bag_path)
     timeline = read_tracker_timeline(
-        str(bag_path), "/vive_tracker/pose", "/vive_tracker/status"
+        str(bag_path), "/vive_tracker/odom", "/vive_tracker/status"
     )
     assert [sample.timestamp_ns for sample in timeline.poses] == [100, 200]
     assert len(timeline.statuses) == 2
@@ -210,3 +223,11 @@ def test_reader_reports_missing_topics(tmp_path: Path) -> None:
         read_tracker_timeline(
             str(bag_path), "/missing/pose", "/vive_tracker/status"
         )
+
+
+def test_reader_rejects_non_odometry_tracker_topic(tmp_path: Path) -> None:
+    """Tracker 输入必须为 Odometry，旧 PoseStamped bag 应明确报错。"""
+    bag_path = tmp_path / "pose_stamped_bag"
+    write_test_bag(bag_path, "geometry_msgs/msg/PoseStamped")
+    with pytest.raises(ValueError, match="必须使用 nav_msgs/msg/Odometry"):
+        read_tracker_timeline(str(bag_path))

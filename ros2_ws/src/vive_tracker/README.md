@@ -134,7 +134,7 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `serial` | `LHR-B77A06A7` | 目标 Tracker 序列号 |
-| `publish_rate_hz` | `90.0` | OpenVR 查询以及 Pose、Status、Odometry 和动态 TF 的频率，范围为 `(0, 1000]` Hz |
+| `publish_rate_hz` | `60.0` | OpenVR 查询以及 Pose、Status、Odometry 和动态 TF 的频率，范围为 `(0, 1000]` Hz |
 | `path_publish_rate_hz` | `10.0` | Path 追加和发布的最大频率，必须位于 `(0, publish_rate_hz]` |
 | `tracking_origin` | `standing` | OpenVR 原点，可选 `standing`、`seated`、`raw` |
 | `reorder_pose_axes` | `false` | 是否将 OpenVR 全局坐标轴重排为 ROS 跟踪坐标轴 |

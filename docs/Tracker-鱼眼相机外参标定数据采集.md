@@ -94,14 +94,14 @@ DEVICE_SERIAL=SN250801DR48FB26001253
 
 ```bash
 ros2 topic list | rg \
-  "/xv_sdk/${DEVICE_SERIAL}/rgb|/vive_tracker/(pose|status)"
+  "/xv_sdk/${DEVICE_SERIAL}/rgb|/vive_tracker/(odom|status)"
 ```
 
 使用 ToF 双目相机时，确认 RGB 图像和 Tracker 话题存在：
 
 ```bash
 ros2 topic list | rg \
-  "/tof_stereo_camera/rgb/image_raw|/vive_tracker/(pose|status)"
+  "/tof_stereo_camera/rgb/image_raw|/vive_tracker/(odom|status)"
 ```
 
 检查图像与 Tracker 的发布频率和时间戳：
@@ -114,11 +114,11 @@ IMAGE_TOPIC=/tof_stereo_camera/rgb/image_raw
 # IMAGE_TOPIC=/xv_sdk/${DEVICE_SERIAL}/rgb/image
 
 ros2 topic hz "${IMAGE_TOPIC}"
-ros2 topic hz /vive_tracker/pose
+ros2 topic hz /vive_tracker/odom
 
 ros2 topic echo --once --qos-reliability best_effort \
   "${IMAGE_TOPIC}" --field header
-ros2 topic echo --once /vive_tracker/pose --field header
+ros2 topic echo --once /vive_tracker/odom --field header
 ros2 topic echo --once /vive_tracker/status
 date +%s
 ```
@@ -144,7 +144,7 @@ ros2 bag record \
   --topics \
   /xv_sdk/${DEVICE_SERIAL}/rgb/image \
   /xv_sdk/${DEVICE_SERIAL}/rgb/camera_info \
-  /vive_tracker/pose \
+  /vive_tracker/odom \
   /vive_tracker/status \
   /tf_static
 ```
@@ -161,7 +161,7 @@ ros2 bag record \
   --output "${BAG_OUTPUT}" \
   --topics \
   /tof_stereo_camera/rgb/image_raw \
-  /vive_tracker/pose \
+  /vive_tracker/odom \
   /vive_tracker/status \
   /tf_static
 ```
@@ -194,7 +194,7 @@ XV 相机默认录制原始鱼眼图像。如果标定程序使用去畸变图�
 ros2 bag info "${BAG_OUTPUT}"
 ```
 
-确认结果中包含一路鱼眼图像、`/vive_tracker/pose`、
+确认结果中包含一路鱼眼图像、`/vive_tracker/odom`、
 `/vive_tracker/status` 和 `/tf_static`。图像数量应与采集时长和帧率基本一致。
 XV 相机的 bag 还应包含与图像对应的 `CameraInfo`；ToF 双目相机使用采集前
 单独保存的相机内参和畸变参数。
@@ -232,6 +232,6 @@ ros2 bag play "${BAG_OUTPUT}" --clock 100
 ```
 
 回放消息会保留录制时的原始 `header.stamp`。外参标定应使用图像消息时间戳作为
-同步基准，在相邻 `/vive_tracker/pose` 之间对平移做线性插值、对四元数做
+同步基准，在相邻 `/vive_tracker/odom` 的 `pose.pose` 之间对平移做线性插值、对四元数做
 SLERP 插值。旧版驱动录制的 bag 可能仍包含 `steady_clock` 时间戳，本次修改不会
 自动重写历史数据。

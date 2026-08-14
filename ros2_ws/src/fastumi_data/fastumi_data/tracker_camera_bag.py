@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from cv_bridge import CvBridge
 import numpy as np
@@ -81,8 +81,9 @@ def _open_reader(bag_uri: str) -> rosbag2_py.SequentialReader:
 def _topic_message_types(
     reader: rosbag2_py.SequentialReader,
     required_topics: Sequence[str],
+    expected_types: Mapping[str, str] | None = None,
 ) -> dict[str, type]:
-    """解析 bag 话题消息类并检查所有必需话题存在。"""
+    """解析 bag 话题消息类，并检查必需话题及指定消息类型。"""
     topic_types = {
         metadata.name: metadata.type
         for metadata in reader.get_all_topics_and_types()
@@ -92,6 +93,12 @@ def _topic_message_types(
     ]
     if missing_topics:
         raise ValueError(f"MCAP 缺少话题: {', '.join(missing_topics)}")
+    for topic, expected_type in (expected_types or {}).items():
+        actual_type = topic_types[topic]
+        if actual_type != expected_type:
+            raise ValueError(
+                f"话题 {topic} 必须使用 {expected_type}，实际为 {actual_type}"
+            )
     return {
         topic: get_message(topic_types[topic]) for topic in required_topics
     }
@@ -123,13 +130,15 @@ def image_message_to_frame(
 
 def read_tracker_timeline(
     bag_uri: str,
-    tracker_topic: str = "/vive_tracker/pose",
+    tracker_topic: str = "/vive_tracker/odom",
     status_topic: str = "/vive_tracker/status",
 ) -> TrackerTimeline:
-    """第一遍流式读取 Tracker pose/status 并返回 header 时间线。"""
+    """第一遍流式读取 Tracker Odometry/status 并返回 header 时间线。"""
     reader = _open_reader(bag_uri)
     message_types = _topic_message_types(
-        reader, (tracker_topic, status_topic)
+        reader,
+        (tracker_topic, status_topic),
+        {tracker_topic: "nav_msgs/msg/Odometry"},
     )
     poses = []
     statuses = []
@@ -146,7 +155,7 @@ def read_tracker_timeline(
         _check_monotonic(previous_timestamps[topic], timestamp_ns, topic)
         previous_timestamps[topic] = timestamp_ns
         if topic == tracker_topic:
-            pose = message.pose
+            pose = message.pose.pose
             poses.append(
                 PoseSample(
                     timestamp_ns=timestamp_ns,
@@ -175,7 +184,7 @@ def read_tracker_timeline(
                 )
             )
     if len(poses) < 2:
-        raise ValueError("Tracker pose 话题至少需要两个样本")
+        raise ValueError("Tracker Odometry 话题至少需要两个样本")
     if not statuses:
         raise ValueError("Tracker status 话题没有样本")
     return TrackerTimeline(tuple(poses), tuple(statuses))

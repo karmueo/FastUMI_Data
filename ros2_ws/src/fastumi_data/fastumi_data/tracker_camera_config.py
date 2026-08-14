@@ -119,7 +119,7 @@ class CalibrationSettings:
     """保存标定话题、筛选、时间搜索和默认质量门。"""
 
     image_topic: str = "/tof_stereo_camera/rgb/image_raw"
-    tracker_topic: str = "/vive_tracker/pose"
+    tracker_topic: str = "/vive_tracker/odom"
     status_topic: str = "/vive_tracker/status"
     tag_family: str = "tag36h11"
     frame_stride: int = 2

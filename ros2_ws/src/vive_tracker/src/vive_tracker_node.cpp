@@ -144,7 +144,7 @@ public:
    */
   ViveTrackerNode() : Node("pose_publisher") {
     serial_ = declare_parameter<std::string>("serial", "LHR-B77A06A7");
-    publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 90.0);
+    publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 60.0);
     path_publish_rate_hz_ =
         declare_parameter<double>("path_publish_rate_hz", 10.0);
     clock_anchor_ = CaptureClockAnchor();
@@ -410,7 +410,7 @@ private:
   /** 待读取的 Tracker 序列号。 */
   std::string serial_{};
   /** OpenVR 位姿采样和 ROS 发布频率，单位为 Hz。 */
-  double publish_rate_hz_{90.0};
+  double publish_rate_hz_{60.0};
   /** Path 追加和发布的最大更新频率，单位为 Hz。 */
   double path_publish_rate_hz_{10.0};
   /** SteamVR 查询使用的跟踪原点。 */
