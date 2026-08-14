@@ -5,6 +5,7 @@
  * @date 创建：待确认
  * @date 修改：2026-08-14
  */
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -37,10 +38,10 @@ constexpr std::uint32_t MakeFourcc(char a, char b, char c, char d) {
  * @param[in] samples 待编码的 IMU 样本。
  * @return 独立持有样本字节副本的 payload。
  */
-std::vector<unsigned char> EncodeImuSamples(
-    const std::vector<stereo_camera_imu_data_t> &samples) {
-  std::vector<unsigned char> payload(
-      samples.size() * sizeof(stereo_camera_imu_data_t));
+std::vector<unsigned char>
+EncodeImuSamples(const std::vector<stereo_camera_imu_data_t> &samples) {
+  std::vector<unsigned char> payload(samples.size() *
+                                     sizeof(stereo_camera_imu_data_t));
   std::memcpy(payload.data(), samples.data(), payload.size());
   return payload;
 }
@@ -63,7 +64,8 @@ TEST(FrameUtils, ConvertsYuyvToBgr8) {
   EXPECT_EQ(image.data.size(), 6U);
 }
 
-/** @brief 验证 `FrameUtils::RejectsWrongMono16PayloadSize` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::RejectsWrongMono16PayloadSize` 所覆盖的帧转换行为。
+ */
 TEST(FrameUtils, RejectsWrongMono16PayloadSize) {
   std::vector<unsigned char> payload(7, 0);
   stereo_camera_frame_t frame{};
@@ -78,7 +80,8 @@ TEST(FrameUtils, RejectsWrongMono16PayloadSize) {
   EXPECT_FALSE(error.empty());
 }
 
-/** @brief 验证 `FrameUtils::CopiesMono16PayloadBeforeSdkBufferChanges` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::CopiesMono16PayloadBeforeSdkBufferChanges`
+ * 所覆盖的帧转换行为。 */
 TEST(FrameUtils, CopiesMono16PayloadBeforeSdkBufferChanges) {
   std::vector<unsigned char> payload{1, 2, 3, 4};
   stereo_camera_frame_t frame{};
@@ -94,7 +97,8 @@ TEST(FrameUtils, CopiesMono16PayloadBeforeSdkBufferChanges) {
   EXPECT_EQ(image.data[0], 1U);
 }
 
-/** @brief 验证 `FrameUtils::AcceptsOnlyDocumentedTofMatchStates` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::AcceptsOnlyDocumentedTofMatchStates`
+ * 所覆盖的帧转换行为。 */
 TEST(FrameUtils, AcceptsOnlyDocumentedTofMatchStates) {
   EXPECT_TRUE(IsPublishableTofMatchState(STEREO_MATCH_EXACT));
   EXPECT_TRUE(IsPublishableTofMatchState(STEREO_MATCH_APPROX));
@@ -103,16 +107,8 @@ TEST(FrameUtils, AcceptsOnlyDocumentedTofMatchStates) {
   EXPECT_FALSE(IsPublishableTofMatchState(STEREO_MATCH_LOST));
 }
 
-/** @brief 验证 SDK 微秒时间戳会正确映射为 ROS 纳秒时间。 */
-TEST(FrameUtils, MapsSdkMonotonicMicrosecondsAndUsesFallbackForZero) {
-  TimestampMapper mapper(1'000, 10'000);
-  const rclcpp::Time fallback(static_cast<std::int64_t>(50'000),
-                              RCL_SYSTEM_TIME);
-  EXPECT_EQ(mapper.Map(1'500, fallback).nanoseconds(), 510'000);
-  EXPECT_EQ(mapper.Map(0, fallback).nanoseconds(), fallback.nanoseconds());
-}
-
-/** @brief 验证 `FrameUtils::DecodesSingleImuSampleFields` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::DecodesSingleImuSampleFields` 所覆盖的帧转换行为。
+ */
 TEST(FrameUtils, DecodesSingleImuSampleFields) {
   stereo_camera_imu_data_t sample{};
   sample.timestamp = 1'234;
@@ -145,8 +141,8 @@ TEST(FrameUtils, DecodesSingleImuSampleFields) {
   EXPECT_FLOAT_EQ(decoded[0].gz, 6.0F);
 }
 
-
-/** @brief 验证 `FrameUtils::DecodesAndCopiesMultipleImuSamples` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::DecodesAndCopiesMultipleImuSamples`
+ * 所覆盖的帧转换行为。 */
 TEST(FrameUtils, DecodesAndCopiesMultipleImuSamples) {
   stereo_camera_imu_data_t first{};
   first.timestamp = 1'000;
@@ -185,8 +181,7 @@ TEST(FrameUtils, DecodesAndCopiesMultipleImuSamples) {
 
 /** @brief 验证 `FrameUtils::RejectsMalformedImuPayload` 所覆盖的帧转换行为。 */
 TEST(FrameUtils, RejectsMalformedImuPayload) {
-  std::vector<unsigned char> payload(
-      sizeof(stereo_camera_imu_data_t) + 1U, 0U);
+  std::vector<unsigned char> payload(sizeof(stereo_camera_imu_data_t) + 1U, 0U);
   stereo_camera_frame_t frame{};
   frame.data = payload.data();
   frame.data_size = static_cast<int>(payload.size());
@@ -198,45 +193,8 @@ TEST(FrameUtils, RejectsMalformedImuPayload) {
   EXPECT_FALSE(error.empty());
 }
 
-/** @brief 验证 IMU 微秒时间戳映射以及无效值回退。 */
-TEST(FrameUtils, MapsImuSampleTimeAndFallsBackForInvalidValues) {
-  TimestampMapper mapper(1'000, 10'000);
-  const rclcpp::Time frame_time(static_cast<std::int64_t>(50'000),
-                                RCL_SYSTEM_TIME);
-  EXPECT_EQ(mapper.MapImuSample(1'500, frame_time).nanoseconds(), 510'000);
-  EXPECT_EQ(mapper.MapImuSample(0, frame_time).nanoseconds(),
-            frame_time.nanoseconds());
-  EXPECT_EQ(mapper.MapImuSample(-1, frame_time).nanoseconds(),
-            frame_time.nanoseconds());
-}
-
-/** @brief 验证微秒换算、锚点和 ROS 时间加法溢出时均安全回退。 */
-TEST(FrameUtils, FallsBackWhenMicrosecondTimeMappingOverflows) {
-  const rclcpp::Time fallback(static_cast<std::int64_t>(50'000),
-                              RCL_SYSTEM_TIME);
-  const std::int64_t maximum = std::numeric_limits<std::int64_t>::max();
-
-  TimestampMapper positive_delta_overflow(1, 0);
-  EXPECT_EQ(
-      positive_delta_overflow
-          .Map(static_cast<std::uint64_t>(maximum), fallback)
-          .nanoseconds(),
-      fallback.nanoseconds());
-
-  TimestampMapper negative_delta_overflow(maximum, 0);
-  EXPECT_EQ(negative_delta_overflow.Map(1, fallback).nanoseconds(),
-            fallback.nanoseconds());
-
-  TimestampMapper ros_time_overflow(1'000, maximum - 500);
-  EXPECT_EQ(ros_time_overflow.Map(1'001, fallback).nanoseconds(),
-            fallback.nanoseconds());
-
-  TimestampMapper invalid_anchor(-1, 0);
-  EXPECT_EQ(invalid_anchor.Map(1, fallback).nanoseconds(),
-            fallback.nanoseconds());
-}
-
-/** @brief 验证 `FrameUtils::AcceptsEmptyImuBatchWithoutDiagnostic` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::AcceptsEmptyImuBatchWithoutDiagnostic`
+ * 所覆盖的帧转换行为。 */
 TEST(FrameUtils, AcceptsEmptyImuBatchWithoutDiagnostic) {
   stereo_camera_frame_t frame{};
   frame.data_size = 0;
@@ -249,7 +207,8 @@ TEST(FrameUtils, AcceptsEmptyImuBatchWithoutDiagnostic) {
   EXPECT_TRUE(error.empty());
 }
 
-/** @brief 验证 `FrameUtils::RejectsNullOrNegativeImuPayload` 所覆盖的帧转换行为。 */
+/** @brief 验证 `FrameUtils::RejectsNullOrNegativeImuPayload`
+ * 所覆盖的帧转换行为。 */
 TEST(FrameUtils, RejectsNullOrNegativeImuPayload) {
   stereo_camera_frame_t frame{};
   frame.data = nullptr;
@@ -265,7 +224,9 @@ TEST(FrameUtils, RejectsNullOrNegativeImuPayload) {
   EXPECT_FALSE(error.empty());
 }
 
-/** @brief 验证 `FrameUtils::ReportsSequenceMetadataMismatchWithoutDroppingSamples` 所覆盖的帧转换行为。 */
+/** @brief 验证
+ * `FrameUtils::ReportsSequenceMetadataMismatchWithoutDroppingSamples`
+ * 所覆盖的帧转换行为。 */
 TEST(FrameUtils, ReportsSequenceMetadataMismatchWithoutDroppingSamples) {
   stereo_camera_imu_data_t sample{};
   sample.idx = 42;
@@ -303,5 +264,233 @@ TEST(FrameUtils, AcceptsMissingSequenceIndexMetadata) {
   EXPECT_EQ(decoded.front().idx, 42);
   EXPECT_TRUE(error.empty());
 }
-}  // namespace
-}  // namespace tof_stereo_camera
+/** @brief 验证独立 25.5 秒 epoch 在精确三帧启动标定后被消除。 */
+TEST(TimestampMapper, LocksAfterExactBootstrapAndRemovesEpoch) {
+  TimestampMapper mapper(0, 1'000'000'000'000'000'000LL, 3, 10, 200.0);
+  const auto first = mapper.ObserveFrame(25'500'000, 50'000'000);
+  const auto second = mapper.ObserveFrame(25'550'000, 60'000'000);
+  const auto third = mapper.ObserveFrame(25'600'000, 130'000'000);
+  EXPECT_EQ(first.status, FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(second.status, FrameTimestampStatus::kCalibrating);
+  ASSERT_EQ(third.status, FrameTimestampStatus::kReady);
+  EXPECT_TRUE(third.ready);
+  EXPECT_NEAR(third.steady_ns, 110'000'000, 1);
+}
+
+/** @brief 验证有效复合帧重复值不会推进启动状态并复用快照。 */
+TEST(TimestampMapper, DuplicateValidFrameReusesSnapshot) {
+  TimestampMapper mapper(0, 0, 3, 10, 200.0);
+  const auto first = mapper.ObserveFrame(1'000, 2'000'000);
+  const auto duplicate = mapper.ObserveFrame(1'000, 9'000'000);
+  EXPECT_EQ(duplicate.status, FrameTimestampStatus::kDuplicate);
+  EXPECT_FALSE(duplicate.ready);
+  EXPECT_EQ(duplicate.steady_ns, first.steady_ns);
+  EXPECT_EQ(duplicate.offset_ns, first.offset_ns);
+  EXPECT_EQ(mapper.ObserveFrame(2'000, 3'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(mapper.ObserveFrame(3'000, 4'000'000).status,
+            FrameTimestampStatus::kReady);
+  const auto locked_duplicate = mapper.ObserveFrame(3'000, 9'000'000);
+  EXPECT_EQ(locked_duplicate.status, FrameTimestampStatus::kDuplicate);
+  EXPECT_FALSE(locked_duplicate.ready);
+}
+
+/** @brief 验证无效和溢出外层时间戳每次使用当次接收时间。 */
+TEST(TimestampMapper, InvalidTimestampsAlwaysUseCurrentReceiveFallback) {
+  TimestampMapper mapper(0, 100, 3, 10, 200.0);
+  const std::uint64_t overflow =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() /
+                                 1'000) +
+      1U;
+  std::int64_t receive = 10;
+  for (const std::uint64_t timestamp :
+       {std::uint64_t{0}, std::uint64_t{0}, overflow, overflow}) {
+    const auto result = mapper.ObserveFrame(timestamp, receive);
+    EXPECT_EQ(result.status, FrameTimestampStatus::kInvalidHostFallback);
+    EXPECT_EQ(result.steady_ns, receive);
+    ++receive;
+  }
+  EXPECT_FALSE(mapper.ready());
+}
+
+/** @brief 验证无效观测不会覆盖最近有效复合帧的重复缓存。 */
+TEST(TimestampMapper, InvalidFramesDoNotEvictValidDuplicateCache) {
+  TimestampMapper mapper(0, 0, 3, 10, 200.0);
+  const auto first = mapper.ObserveFrame(1'000, 2'000'000);
+  const auto zero = mapper.ObserveFrame(0, 7'000'000);
+  const std::uint64_t overflow =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() /
+                                 1'000) +
+      1U;
+  const auto invalid = mapper.ObserveFrame(overflow, 8'000'000);
+  EXPECT_EQ(zero.steady_ns, 7'000'000);
+  EXPECT_EQ(invalid.steady_ns, 8'000'000);
+  const auto duplicate = mapper.ObserveFrame(1'000, 9'000'000);
+  EXPECT_EQ(duplicate.status, FrameTimestampStatus::kDuplicate);
+  EXPECT_EQ(duplicate.steady_ns, first.steady_ns);
+  EXPECT_EQ(duplicate.offset_ns, first.offset_ns);
+}
+
+/** @brief 验证零时间戳回退也会维护跨 epoch 的发布单调下界。 */
+TEST(TimestampMapper, ZeroFallbackPreventsRecoveredTimestampRegression) {
+  TimestampMapper mapper(0, 0, 2, 10, 200.0);
+  mapper.ObserveFrame(1'000, 2'000'000);
+  ASSERT_TRUE(mapper.ObserveFrame(2'000, 3'000'000).ready);
+  const auto fallback = mapper.ObserveFrame(0, 4'000'000);
+  ASSERT_EQ(fallback.status, FrameTimestampStatus::kInvalidHostFallback);
+  EXPECT_EQ(fallback.steady_ns, 4'000'000);
+  const auto recovered = mapper.ObserveFrame(3'000, 4'000'000);
+  EXPECT_EQ(recovered.status, FrameTimestampStatus::kDropped);
+  EXPECT_FALSE(mapper.ready());
+  EXPECT_EQ(mapper.ObserveFrame(4'000, 5'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  const auto relocked = mapper.ObserveFrame(5'000, 6'000'000);
+  EXPECT_EQ(relocked.status, FrameTimestampStatus::kReady);
+  EXPECT_GT(relocked.steady_ns, fallback.steady_ns);
+}
+
+/** @brief 验证溢出时间戳回退也会维护跨 epoch 的发布单调下界。 */
+TEST(TimestampMapper, OverflowFallbackPreventsRecoveredTimestampRegression) {
+  TimestampMapper mapper(0, 0, 2, 10, 200.0);
+  const std::uint64_t overflow =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() /
+                                 1'000) +
+      1U;
+  mapper.ObserveFrame(1'000, 2'000'000);
+  ASSERT_TRUE(mapper.ObserveFrame(2'000, 3'000'000).ready);
+  const auto fallback = mapper.ObserveFrame(overflow, 4'000'000);
+  ASSERT_EQ(fallback.status, FrameTimestampStatus::kInvalidHostFallback);
+  EXPECT_EQ(fallback.steady_ns, 4'000'000);
+  const auto recovered = mapper.ObserveFrame(3'000, 4'000'000);
+  EXPECT_EQ(recovered.status, FrameTimestampStatus::kDropped);
+  EXPECT_FALSE(mapper.ready());
+  EXPECT_EQ(mapper.ObserveFrame(4'000, 5'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  const auto relocked = mapper.ObserveFrame(5'000, 6'000'000);
+  EXPECT_EQ(relocked.status, FrameTimestampStatus::kReady);
+  EXPECT_GT(relocked.steady_ns, fallback.steady_ns);
+}
+
+/** @brief 验证 IMU 有效、无效和乱序样本均可独立映射或回退。 */
+TEST(TimestampMapper, MapsMixedAndOutOfOrderImuSamplesWithoutDropping) {
+  TimestampMapper mapper(0, 0, 2, 10, 200.0);
+  mapper.ObserveFrame(1'000, 2'000'000);
+  const auto frame = mapper.ObserveFrame(2'000, 3'000'000);
+  const auto later = mapper.MapImuSample(1'900, frame);
+  const auto invalid = mapper.MapImuSample(0, frame);
+  const auto earlier = mapper.MapImuSample(1'100, frame);
+  EXPECT_TRUE(later.valid_sample);
+  EXPECT_FALSE(invalid.valid_sample);
+  EXPECT_TRUE(earlier.valid_sample);
+  EXPECT_EQ(invalid.steady_ns, frame.steady_ns);
+}
+
+/** @brief 验证交错的旧 iTOF 时间戳不会影响 RGB 独立同步器。 */
+TEST(TimestampMapper, IndependentMappersLockDespiteInterleavedOldStreams) {
+  TimestampMapper rgb(0, 0, 3, 10, 200.0);
+  TimestampMapper depth(0, 0, 3, 10, 200.0);
+  EXPECT_EQ(rgb.ObserveFrame(1'000, 2'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(depth.ObserveFrame(100, 2'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(rgb.ObserveFrame(2'000, 3'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(depth.ObserveFrame(100, 3'000'000).status,
+            FrameTimestampStatus::kDuplicate);
+  EXPECT_EQ(rgb.ObserveFrame(3'000, 4'000'000).status,
+            FrameTimestampStatus::kReady);
+  EXPECT_EQ(depth.ObserveFrame(200, 4'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(depth.ObserveFrame(300, 5'000'000).status,
+            FrameTimestampStatus::kReady);
+  EXPECT_TRUE(rgb.ready());
+  EXPECT_TRUE(depth.ready());
+}
+
+/** @brief 验证回退、失配重置以及固定快照 IMU 钳制。 */
+TEST(TimestampMapper, ResetsRelocksAndMapsImuSnapshot) {
+  TimestampMapper mapper(0, 0, 3, 10, 200.0);
+  mapper.ObserveFrame(1'000, 2'000'000);
+  mapper.ObserveFrame(2'000, 3'000'000);
+  const auto before_reset = mapper.ObserveFrame(3'000, 4'000'000);
+  ASSERT_EQ(before_reset.status, FrameTimestampStatus::kReady);
+  EXPECT_EQ(mapper.ObserveFrame(2'000, 5'000'000).status,
+            FrameTimestampStatus::kReset);
+  mapper.ObserveFrame(3'000, 6'000'000);
+  const auto relocked = mapper.ObserveFrame(4'000, 7'000'000);
+  EXPECT_EQ(relocked.status, FrameTimestampStatus::kReady);
+  EXPECT_GT(relocked.steady_ns, before_reset.steady_ns);
+  const auto frame = mapper.ObserveFrame(5'000, 8'000'000);
+  const auto earlier = mapper.MapImuSample(4'000, frame);
+  EXPECT_TRUE(earlier.valid_sample);
+  EXPECT_LT(earlier.steady_ns, frame.steady_ns);
+  EXPECT_FALSE(mapper.MapImuSample(0, frame).valid_sample);
+  const auto future = mapper.MapImuSample(9'000, frame);
+  EXPECT_TRUE(future.future_clamped);
+  EXPECT_EQ(future.steady_ns, frame.steady_ns);
+}
+
+/** @brief 验证参数边界会拒绝无效同步设置。 */
+TEST(TimestampMapper, RejectsInvalidParameters) {
+  EXPECT_THROW(TimestampMapper(0, 0, 1, 1, 200.0), std::invalid_argument);
+  EXPECT_THROW(TimestampMapper(0, 0, 3, 2, 200.0), std::invalid_argument);
+  EXPECT_THROW(TimestampMapper(0, 0, 3, 3, 0.0), std::invalid_argument);
+  EXPECT_THROW(TimestampMapper(0, 0, 3, 3, -1.0), std::invalid_argument);
+  EXPECT_THROW(TimestampMapper(0, 0, 3, 3, 1'000'000.0), std::invalid_argument);
+  EXPECT_THROW(
+      TimestampMapper(0, 0, 3, 3, std::numeric_limits<double>::infinity()),
+      std::invalid_argument);
+}
+
+/** @brief 验证设备与接收间隔失配会重置并在剩余两帧后重新锁定。 */
+TEST(TimestampMapper, DeltaMismatchResetsAndRelocks) {
+  TimestampMapper mapper(0, 0, 3, 10, 200.0);
+  mapper.ObserveFrame(1'000, 2'000'000);
+  mapper.ObserveFrame(2'000, 3'000'000);
+  ASSERT_TRUE(mapper.ObserveFrame(3'000, 4'000'000).ready);
+  const auto reset = mapper.ObserveFrame(1'003'000, 3'004'000'000);
+  EXPECT_EQ(reset.status, FrameTimestampStatus::kReset);
+  EXPECT_FALSE(mapper.ready());
+  EXPECT_EQ(mapper.ObserveFrame(1'004'000, 3'005'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(mapper.ObserveFrame(1'005'000, 3'006'000'000).status,
+            FrameTimestampStatus::kReady);
+}
+
+/** @brief 验证单调下界与接收上界冲突会丢弃并重新开始标定。 */
+TEST(TimestampMapper, MonotonicReceiveConflictDropsAndResets) {
+  TimestampMapper mapper(0, 0, 2, 10, 200.0);
+  mapper.ObserveFrame(1'000, 2'000'000);
+  const auto locked = mapper.ObserveFrame(2'000, 3'000'000);
+  ASSERT_TRUE(locked.ready);
+  const auto dropped = mapper.ObserveFrame(2'001, 3'000'000);
+  EXPECT_EQ(dropped.status, FrameTimestampStatus::kDropped);
+  EXPECT_FALSE(mapper.ready());
+  EXPECT_EQ(mapper.ObserveFrame(3'001, 4'000'000).status,
+            FrameTimestampStatus::kCalibrating);
+  EXPECT_EQ(mapper.ObserveFrame(4'001, 5'000'000).status,
+            FrameTimestampStatus::kReady);
+}
+
+/** @brief 验证 -31 ppm 漂移在十分钟滚动同步中保持五毫秒内误差。 */
+TEST(TimestampMapper, TracksNegativeThirtyOnePpmDriftForTenMinutes) {
+  TimestampMapper mapper(0, 0, 30, 120, 200.0);
+  for (int index = 0; index <= 12'000; ++index) {
+    const std::int64_t event_ns = static_cast<std::int64_t>(index) * 50'000'000;
+    const int jitter_ms = (index % 5) * 25;
+    const std::int64_t receive_ns = event_ns + jitter_ms * 1'000'000LL;
+    const std::int64_t device_us = static_cast<std::int64_t>(std::llround(
+        25'500'000.0 + static_cast<double>(event_ns) * 0.999969 / 1'000.0));
+    const auto result =
+        mapper.ObserveFrame(static_cast<std::uint64_t>(device_us), receive_ns);
+    if (result.ready) {
+      EXPECT_LE(std::llabs(result.steady_ns - event_ns), 5'000'000);
+      EXPECT_LE(result.steady_ns, receive_ns);
+    }
+    EXPECT_NE(result.status, FrameTimestampStatus::kReset);
+    EXPECT_NE(result.status, FrameTimestampStatus::kDropped);
+  }
+}
+
+} // namespace
+} // namespace tof_stereo_camera

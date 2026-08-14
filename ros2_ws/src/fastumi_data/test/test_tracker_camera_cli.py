@@ -46,10 +46,29 @@ def test_parser_defaults_match_target_bag_topics() -> None:
     assert arguments.image_topic == "/tof_stereo_camera/rgb/image_raw"
     assert arguments.tracker_topic == "/vive_tracker/pose"
     assert arguments.status_topic == "/vive_tracker/status"
+    assert arguments.camera_config == "camera.yaml"
     assert arguments.tag_family == "tag36h11"
     assert arguments.frame_stride == 2
     assert arguments.min_tags == 6
     assert arguments.progress_interval_seconds == pytest.approx(30.0)
+
+
+def test_parser_defaults_to_tof_camera_calibration() -> None:
+    """省略相机配置时应读取 ToF 包内默认标定。"""
+    arguments = build_argument_parser().parse_args(
+        [
+            "--bag",
+            "/data/example",
+            "--target-config",
+            "target.yaml",
+            "--output-dir",
+            "/tmp/result",
+        ]
+    )
+    camera_path = Path(arguments.camera_config)
+    assert camera_path.name == "calibration.yaml"
+    assert camera_path.parent.name == "config"
+    assert camera_path.parent.parent.name == "tof_stereo_camera"
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])

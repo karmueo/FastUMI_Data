@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from ament_index_python.packages import get_package_share_directory
 import numpy as np
 import yaml
 
@@ -160,28 +161,51 @@ class CalibrationSettings:
             raise ValueError("质量门限必须为有限正数")
 
 
+def default_camera_config_path() -> str:
+    """返回 ToF 双目相机包内 RGB 标定文件的安装路径。"""
+    # ToF 双目相机包共享目录，用于定位唯一默认内参源。
+    package_share = Path(get_package_share_directory("tof_stereo_camera"))
+    return str(package_share / "config" / "calibration.yaml")
+
+
 def load_kalibr_camera(
     path: str, camera_key: str = "cam0"
 ) -> FisheyeCameraModel:
-    """从 Kalibr camchain YAML 加载 pinhole+equidistant 相机模型。
+    """从 ToF RGB 或 Kalibr YAML 加载统一鱼眼相机模型。
 
     Args:
-        path: Kalibr 相机配置路径。
-        camera_key: 需要读取的相机节点名。
+        path: ToF 或 Kalibr 相机配置路径。
+        camera_key: 显式 Kalibr 配置需要读取的相机节点名。
 
     Returns:
         经过严格校验的鱼眼相机模型。
     """
     document = _load_yaml_mapping(path)
-    if camera_key not in document:
-        raise ValueError(f"相机配置缺少节点 {camera_key}")
-    camera = _checked_mapping(document[camera_key], f"相机节点 {camera_key}")
-    camera_model = str(camera.get("camera_model", ""))
-    if camera_model != "pinhole":
-        raise ValueError("Kalibr camera_model 必须是 pinhole")
-    distortion_model = str(camera.get("distortion_model", ""))
-    if distortion_model != "equidistant":
-        raise ValueError("Kalibr distortion_model 必须是 equidistant")
+    has_rgb = "rgb" in document
+    has_kalibr = camera_key in document
+    if has_rgb and has_kalibr:
+        raise ValueError(
+            "相机配置同时包含 rgb 和 "
+            f"{camera_key}，无法确定标定来源"
+        )
+    if not has_rgb and not has_kalibr:
+        raise ValueError(f"相机配置必须包含 rgb 或 {camera_key}")
+
+    selected_key = "rgb" if has_rgb else camera_key
+    camera = _checked_mapping(
+        document[selected_key], f"相机节点 {selected_key}"
+    )
+    if selected_key == "rgb":
+        source_distortion_model = str(camera.get("distortion_model", ""))
+        if source_distortion_model != "fisheye":
+            raise ValueError("ToF rgb distortion_model 必须是 fisheye")
+    else:
+        camera_model = str(camera.get("camera_model", ""))
+        if camera_model != "pinhole":
+            raise ValueError("Kalibr camera_model 必须是 pinhole")
+        source_distortion_model = str(camera.get("distortion_model", ""))
+        if source_distortion_model != "equidistant":
+            raise ValueError("Kalibr distortion_model 必须是 equidistant")
     try:
         intrinsics = np.asarray(camera["intrinsics"], dtype=np.float64)
         distortion = np.asarray(
@@ -208,8 +232,8 @@ def load_kalibr_camera(
         k=intrinsic,
         d=distortion,
         resolution=resolution,
-        camera_model=camera_model,
-        distortion_model=distortion_model,
+        camera_model="pinhole",
+        distortion_model="equidistant",
     )
 
 

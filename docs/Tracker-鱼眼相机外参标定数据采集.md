@@ -14,7 +14,25 @@ source /opt/ros/jazzy/setup.bash
 source ros2_ws/install/setup.bash
 ```
 
-根据实际连接的相机，在以下两种方式中选择一种。两个相机驱动不要同时启动。
+推荐使用外参采集专用 launch 一键启动相机、VIVE Tracker 和 RViz2。默认选择
+ToF 相机，并默认开启 RViz2：
+
+```bash
+ros2 launch fastumi_data tracker_camera.launch.py
+```
+
+使用 XV 相机时执行：
+
+```bash
+ros2 launch fastumi_data tracker_camera.launch.py camera_type:=xv
+```
+
+需要临时指定 ToF 设备或 Tracker 序列号时，可增加 `device_path:=/dev/videoN` 或
+`tracker_serial:=LHR-XXXXXXXX`。无图形界面环境中可通过 `use_rviz:=false` 关闭 RViz2；
+XV 标定程序使用去畸变图像时增加 `rgb_fisheye_undistort_enable:=true`。
+
+一键启动入口在任意时刻只启动一种相机，并复用 Tracker 的 RViz 配置。以下分步命令用于
+单独调试设备；根据实际连接的相机选择一种，两个相机驱动不要同时启动。
 
 ### 1.1 XV 相机
 
@@ -53,6 +71,14 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 ros2 launch vive_tracker vive_tracker.launch.py \
   use_rviz:=true
 ```
+
+ToF 相机启动后，等待节点输出 `timestamp synchronization locked` 日志，再开始录制；这表示
+图像头时间已经从独立设备时钟对齐到主机 Unix 时间，通常不会晚于 bag 写入时刻。图像
+`header.stamp` 与 bag 记录时间之间仍可能存在处理、DDS 排队和磁盘写入延迟。历史 bag 不会
+被此驱动自动重写。
+
+RGB、iTOF 和 IMU 是独立同步序列；仅录制 RGB 时只需等待 `stream=rgb` 的锁定日志。IMU 的
+时间同步以批内样本时间戳为准。驱动不会以当前 `now()` 覆盖设备采集时间。
 
 ## 2. 录制前检查
 

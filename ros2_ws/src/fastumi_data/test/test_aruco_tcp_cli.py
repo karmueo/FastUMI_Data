@@ -145,6 +145,27 @@ def test_parser_contains_fixed_calibration_pipeline_arguments():
         assert not hasattr(arguments, removed_name)
 
 
+def test_parser_defaults_to_tof_camera_calibration() -> None:
+    """省略相机配置时应读取 ToF 包内默认标定。"""
+    arguments = build_argument_parser().parse_args(
+        [
+            "bag",
+            "--aruco-config",
+            "aruco.yaml",
+            "--tracker-camera-calibration",
+            "tracker-camera.yaml",
+            "--tracker-config",
+            "vive.yaml",
+            "--output-dir",
+            "derived",
+        ]
+    )
+    camera_path = Path(arguments.camera_config)
+    assert camera_path.name == "calibration.yaml"
+    assert camera_path.parent.name == "config"
+    assert camera_path.parent.parent.name == "tof_stereo_camera"
+
+
 @pytest.mark.parametrize(
     "removed_argument",
     [

@@ -16,8 +16,10 @@
 - Tracker 位姿：`geometry_msgs/msg/PoseStamped`。
 - Tracker 状态：`fastumi_interfaces/msg/TrackerStatus`，有效状态要求
   `device_connected=true`、`pose_valid=true`、`tracking_state=3`。
-- 相机模型：`config/calibration/kalibr_data-camchain-imucam.yaml` 中的
-  `pinhole + equidistant` 参数。bag 内 `CameraInfo` 不参与求解。
+- 相机模型：默认读取已安装的 `tof_stereo_camera/config/calibration.yaml`，使用其中
+  `rgb.fisheye` 的 `2048×1536` RGB 内参与畸变参数。程序将其归一化为内部
+  `pinhole + equidistant` 模型；bag 内 `CameraInfo` 不参与求解。显式传入
+  `--camera-config` 时仍支持旧 Kalibr `cam0 + pinhole + equidistant` 配置。
 - 标定板：`docs/april_6x6.yaml`，6×6、`tagSize=0.052 m`、
   `tagSpacing=0.3725`、`tag36h11`、ID 0–35。间距比由 2026-07-31 实际板图像的
   66 个跨时段轮廓观测复核，标签边长由 Tracker 米制闭环尺度扫描得到；打印或更换
@@ -52,7 +54,7 @@
 source /opt/ros/jazzy/setup.bash
 cd ros2_ws
 colcon build \
-  --packages-select fastumi_interfaces fastumi_data \
+  --packages-select tof_stereo_camera fastumi_interfaces fastumi_data \
   --symlink-install
 cd ..
 source ros2_ws/install/setup.bash
@@ -68,7 +70,6 @@ ament Python 把 console script 安装在包的 `lib/fastumi_data/` 目录。推
 ```bash
 ros2 run fastumi_data calibrate_tracker_camera \
   --bag /path/to/tracker_fisheye_bag \
-  --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/example/detection \
   --tag-family tag36h11 \
@@ -83,7 +84,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | 参数名 | 默认值 | 参数说明 |
 | --- | --- | --- |
 | `--bag` | 无（必填） | ROS 2 MCAP/bag 数据路径。预检从其中读取图像。 |
-| `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，用于加载 `pinhole + equidistant` 模型。 |
+| `--camera-config` | `tof_stereo_camera/config/calibration.yaml` | 可选相机配置覆盖；默认加载 ToF `rgb.fisheye`，也支持显式旧 Kalibr `cam0 + pinhole + equidistant`。 |
 | `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径。 |
 | `--output-dir` | 无（必填） | 检测统计和叠加图的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
@@ -121,7 +122,6 @@ ros2 run fastumi_data calibrate_tracker_camera \
 ```bash
 ros2 run fastumi_data calibrate_tracker_camera \
   --bag /path/to/tracker_fisheye_bag \
-  --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/tracker_camera_$(date +%Y%m%d_%H%M%S)/final \
   --tag-family tag36h11 \
@@ -139,7 +139,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | 参数名 | 默认值 | 参数说明 |
 | --- | --- | --- |
 | `--bag` | 无（必填） | ROS 2 MCAP/bag 数据路径；读取图像、Tracker 位姿和状态。 |
-| `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，加载 `pinhole + equidistant` 模型。 |
+| `--camera-config` | `tof_stereo_camera/config/calibration.yaml` | 可选相机配置覆盖；默认加载 ToF `rgb.fisheye`，也支持显式旧 Kalibr `cam0 + pinhole + equidistant`。 |
 | `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径，提供网格尺寸和标签几何。 |
 | `--output-dir` | 无（必填） | 标定 YAML、质量报告、逐帧指标、诊断图和进度日志的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
@@ -289,10 +289,11 @@ dataset/calibration/tracker_fisheye_20260731_143146/detection/
 /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag
 ```
 
-源 Tracker→鱼眼相机标定为：
+源 Tracker→鱼眼相机标定应使用第 5 节针对当前 ToF 相机及实际刚性安装关系生成且
+`accepted=true` 的结果：
 
 ```text
-/home/scl/work/UMI/FastUMI_Data/config/calibration/tracker_camera_calibration.yaml
+[第 5 节输出的 --output-dir/calibration.yaml]
 ```
 
 双 ArUco 配置示例为仓库内的
@@ -316,8 +317,9 @@ raw/bag、原始 `calibration_snapshot/`、历史 `episodes/`、历史 `reports/
 
 ### 11.2 去畸变、ID 确认和单帧几何
 
-每帧先对完整 1280×1280 鱼眼图像执行 Kalibr `pinhole + equidistant` 去畸变，
-`cv2.fisheye.initUndistortRectifyMap` 的投影矩阵显式复用 Kalibr K。去畸变后的整幅图像
+每帧先对完整 `2048×1536` ToF RGB 鱼眼图像执行 OpenCV fisheye 去畸变。默认
+`rgb.fisheye` 参数加载后统一按内部 `pinhole + equidistant` 模型使用，
+`cv2.fisheye.initUndistortRectifyMap` 的投影矩阵显式复用标定 K。去畸变后的整幅图像
 再进入 `DICT_4X4_50` 检测和 `SOLVEPNP_IPPE_SQUARE`；检测阶段不调用自动新相机矩阵。
 
 标定检查图必须确认：ID 0 与 ID 1 同时存在，ID 0 位于 ID 1 的 `-Y` 侧，两个方形
@@ -359,7 +361,6 @@ source ros2_ws/install/setup.bash
 calibration_output_dir="dataset/calibration/dual_aruco_tcp_$(date +%Y%m%d_%H%M%S)"
 ros2 run fastumi_data calibrate_aruco_tcp \
   /home/scl/datasets/ros2bag/pick_place/20260731T052137Z/raw/bag \
-  --camera-config config/calibration/kalibr_data-camchain-imucam.yaml \
   --aruco-config config/calibration/aruco_to_tcp.example.yaml \
   --tracker-camera-calibration \
     [5 完整标定这一节输出的--output-dir/calibration.yaml] \
@@ -379,7 +380,7 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 | 参数名 | 默认值 | 参数说明 |
 | --- | --- | --- |
 | `bag_uri` | 无（必填） | 唯一 ROS 2 MCAP/bag 输入目录；只读取目标 RGB Image。 |
-| `--camera-config` | 无（必填） | Kalibr 鱼眼相机配置 YAML 路径，用于加载 `pinhole + equidistant` 模型并生成整幅去畸变映射。 |
+| `--camera-config` | `tof_stereo_camera/config/calibration.yaml` | 可选相机配置覆盖；默认加载 ToF `rgb.fisheye` 并生成整幅去畸变映射，也支持显式旧 Kalibr 配置。 |
 | `--aruco-config` | 无（必填） | 双 ArUco→TCP 配置 YAML 路径，提供 tag ID、尺寸、坐标约定和全开几何模型。 |
 | `--tracker-camera-calibration` | 无（必填） | 已验收的 Tracker→Camera 标定 YAML 路径；提供 `^tracker T_camera` 和 `time_offset_ms`。 |
 | `--tracker-config` | 无（必填） | Vive Tracker 配置 YAML 路径，用于读取并记录 Tracker serial。 |

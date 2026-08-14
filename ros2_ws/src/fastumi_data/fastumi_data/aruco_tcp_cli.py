@@ -33,7 +33,10 @@ from fastumi_data.pose_math import matrix_to_pose
 from fastumi_data.tracker_camera_bag import (
     iter_image_frames,
 )
-from fastumi_data.tracker_camera_config import load_kalibr_camera
+from fastumi_data.tracker_camera_config import (
+    default_camera_config_path,
+    load_kalibr_camera,
+)
 
 
 DEFAULT_IMAGE_TOPIC = "/tof_stereo_camera/rgb/image_raw"
@@ -414,7 +417,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="从去畸变双 ArUco 和 Tracker→Camera 标定生成 Tracker→TCP"
     )
     parser.add_argument("bag_uri", help="唯一 MCAP 输入目录")
-    parser.add_argument("--camera-config", required=True)
+    parser.add_argument(
+        "--camera-config",
+        default=default_camera_config_path(),
+        help="ToF RGB 或 Kalibr 鱼眼相机标定 YAML 路径",
+    )
     parser.add_argument("--aruco-config", required=True)
     parser.add_argument("--tracker-camera-calibration", required=True)
     parser.add_argument("--tracker-config", required=True)

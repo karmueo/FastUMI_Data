@@ -9,6 +9,7 @@ from fastumi_data.tracker_camera_config import (
     AprilGridSpec,
     CalibrationSettings,
     FisheyeCameraModel,
+    default_camera_config_path,
     load_aprilgrid,
     load_kalibr_camera,
     tag_object_corners,
@@ -54,18 +55,27 @@ def test_aprilgrid_tag_corners_use_kalibr_spacing() -> None:
     assert spec.board_extent_m == pytest.approx((0.4125, 0.4125))
 
 
-def test_load_checked_camera_and_target_files() -> None:
-    """项目内相机和目标配置应解析为已确认参数。"""
-    camera = load_kalibr_camera(
-        str(PROJECT_ROOT / "config/calibration/kalibr_data-camchain-imucam.yaml")
-    )
+def test_load_default_tof_camera_and_target_files() -> None:
+    """默认 ToF 相机和目标配置应解析为已确认参数。"""
+    camera = load_kalibr_camera(default_camera_config_path())
     target = load_aprilgrid(str(PROJECT_ROOT / "docs/april_6x6.yaml"))
-    assert camera.resolution == (1280, 1280)
+    assert camera.resolution == (2048, 1536)
     assert camera.distortion_model == "equidistant"
-    assert camera.k[0, 0] == pytest.approx(397.07575683833136)
+    assert camera.k[0, 0] == pytest.approx(405.67036610341245)
+    assert camera.d[0] == pytest.approx(0.08165390616646588)
     assert target.tag_size_m == pytest.approx(0.052)
     assert target.tag_spacing == pytest.approx(0.3725)
     assert target.tag_family == "tag36h11"
+
+
+def test_load_legacy_kalibr_camera_file() -> None:
+    """显式旧 Kalibr 相机配置应继续作为兼容覆盖加载。"""
+    camera = load_kalibr_camera(
+        str(PROJECT_ROOT / "config/calibration/kalibr_data-camchain-imucam.yaml")
+    )
+    assert camera.resolution == (1280, 1280)
+    assert camera.distortion_model == "equidistant"
+    assert camera.k[0, 0] == pytest.approx(397.07575683833136)
 
 
 def test_rejects_out_of_range_tag_id() -> None:
@@ -126,4 +136,42 @@ def test_loaders_reject_wrong_kalibr_models(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="pinhole"):
+        load_kalibr_camera(str(camera_path))
+
+
+def test_loader_rejects_wrong_tof_distortion_model(tmp_path: Path) -> None:
+    """ToF RGB 配置应拒绝非 fisheye 畸变模型。"""
+    camera_path = tmp_path / "tof_camera.yaml"
+    camera_path.write_text(
+        """rgb:
+  distortion_model: radtan
+  intrinsics: [400.0, 400.0, 640.0, 480.0]
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]
+  resolution: [1280, 960]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="fisheye"):
+        load_kalibr_camera(str(camera_path))
+
+
+def test_loader_rejects_ambiguous_camera_blocks(tmp_path: Path) -> None:
+    """ToF 与 Kalibr 相机块同时存在时应拒绝猜测标定来源。"""
+    camera_path = tmp_path / "ambiguous_camera.yaml"
+    camera_path.write_text(
+        """rgb:
+  distortion_model: fisheye
+  intrinsics: [400.0, 400.0, 640.0, 480.0]
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]
+  resolution: [1280, 960]
+cam0:
+  camera_model: pinhole
+  distortion_model: equidistant
+  intrinsics: [400.0, 400.0, 640.0, 480.0]
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]
+  resolution: [1280, 960]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="同时包含"):
         load_kalibr_camera(str(camera_path))

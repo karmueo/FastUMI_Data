@@ -57,6 +57,9 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `enable_imu_filter` | `true` | 启动姿态滤波节点；同时要求 `enable_imu=true` |
 | `imu_filter_type` | `madgwick` | 姿态滤波器，可选 `madgwick` 或 `complementary` |
 | `enable_rviz` | `true` | 启动带图像和 IMU 显示的 RViz |
+| `timestamp_calibration_frames` | `30` | 每个已启用发布流启动时收集的唯一时间戳数；锁定前仅该流静默 |
+| `timestamp_window_frames` | `120` | 用于选择低延迟候选偏移的滚动窗口长度 |
+| `timestamp_max_slew_ppm` | `200.0` | 偏移更新相对设备时间的最大斜率，单位 ppm |
 
 ## 话题
 
@@ -69,9 +72,26 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `/tof_stereo_camera/imu/data` | `sensor_msgs/msg/Imu` | 滤波后的姿态、加速度和角速度 |
 
 每个 `stereo_camera_imu_data_t` 样本发布一条 IMU 消息。消息优先使用样本自身的
-微秒级 `CLOCK_MONOTONIC` 时间戳；无效时回退到帧时间戳，再回退到节点当前时间。SDK 未提供
+微秒级独立设备时间戳。当批内存在有效同步观测时，无效样本回退到该批映射后的同步观测时间；
+当整批没有有效 `sample.timestamp` 时，所有样本回退到主机稳态接收时刻经固定锚点投影的系统时间。SDK 未提供
 姿态，因此 `orientation_covariance[0]` 为 `-1`。角速度和线加速度协方差保持全零，
 表示未知。
+
+## 时间同步
+
+SDK 时间戳属于独立的微秒设备时钟。节点在每次 `stereo_camera_parse_frame()` 返回后立即
+采样主机稳态时间；每个已启用发布流分别以 30 个唯一帧完成启动锁定，锁定前仅该流静默。
+锁定使用低延迟候选偏移的滚动最小值，并以 `timestamp_max_slew_ppm` 限制后续校正，保持
+设备采集间隔。发布头时间通过固定的稳态/系统时钟配对投影到 Unix 系统时钟，不使用通用
+`now()` 重新盖章。主机接收回退时间同样写入全局严格单调下界；恢复后的有效帧若无法严格
+晚于该回退时间会丢弃并重新标定。剩余偏差主要来自 USB、内核调度和接收路径延迟。
+
+RGB、iTOF 深度、iTOF 灰度和 IMU 各自维护独立的设备时间序列，旧 iTOF 子流不会重置 RGB
+同步。IMU 不使用易损坏的外层帧时间戳，而是选择同一批内最大的有效 `sample.timestamp`；整批
+消息复用该观测锁定得到的不可变偏移快照。
+同一 IMU 批次按 SDK 解码顺序全量发布，不因样本时间乱序丢弃；无效样本按该批是否存在有效
+同步观测分别回退到映射观测时间或主机接收时间。
+同一发布流的重复 SDK 时间戳会静默去重，不发布重复消息，保证图像头时间严格递增。
 
 SDK 的 `gx`、`gy`、`gz` 已是 rad/s。节点直接写入 `sensor_msgs/msg/Imu`，不执行
 单位转换；加速度保持 SDK 提供的 m/s² 值不变。两个滤波器均以 best-effort QoS 订阅
@@ -88,7 +108,7 @@ RViz 的 IMU 显示订阅 `/tof_stereo_camera/imu/data`，显示姿态坐标轴�
 默认复合帧规格为 `2048x2738 YUYV`，其中 RGB 子帧为与标定文件一致的
 `2048x1536 bgr8`。驱动适配新版 SDK ABI：`stereo_camera_frame_t` 为
 56 字节，`frame_timestamp` 和 IMU 样本 `timestamp` 均为微秒级
-`CLOCK_MONOTONIC` 时间，IMU 样本 `idx` 位于偏移 8。旧版 SDK 二进制与该布局
+独立设备时钟的微秒时间，IMU 样本 `idx` 位于偏移 8。旧版 SDK 二进制与该布局
 不兼容，头文件、共享库和调试符号必须成套更新；设备固件也必须输出新版 IMU 布局。
 
 每个有效的 IMU 帧会复制并发布其中全部样本，避免下一次

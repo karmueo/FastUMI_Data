@@ -162,7 +162,7 @@ def test_collection_launch_records_timestamped_zstd_mcap() -> None:
     assert output_path.name.endswith("Z")
 
 
-def test_package_dependencies_select_tof_camera() -> None:
+def test_package_dependencies_include_collection_camera() -> None:
     """验证统一采集与夹爪估计均声明 ToF 运行时依赖。"""
     data_package = ElementTree.parse(PACKAGE_ROOT / "package.xml")
     estimator_package = ElementTree.parse(
@@ -176,5 +176,4 @@ def test_package_dependencies_select_tof_camera() -> None:
     }
 
     assert "tof_stereo_camera" in data_dependencies
-    assert "xv_sdk_ros2" not in data_dependencies
     assert "tof_stereo_camera" in estimator_dependencies

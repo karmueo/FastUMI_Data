@@ -25,6 +25,7 @@ from fastumi_data.tracker_camera_bag import (
 )
 from fastumi_data.tracker_camera_config import (
     CalibrationSettings,
+    default_camera_config_path,
     load_aprilgrid,
     load_kalibr_camera,
 )
@@ -239,7 +240,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         description="从 Vive Tracker 和鱼眼 AprilGrid MCAP 标定刚性外参"
     )
     parser.add_argument("--bag", required=True)
-    parser.add_argument("--camera-config", required=True)
+    parser.add_argument(
+        "--camera-config",
+        default=default_camera_config_path(),
+        help="ToF RGB 或 Kalibr 鱼眼相机标定 YAML 路径",
+    )
     parser.add_argument("--target-config", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--settings-config")
