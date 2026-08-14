@@ -31,6 +31,8 @@ def test_config_file_serial_is_preserved_without_override():
     launch_context = LaunchContext()
     launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
     launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['publish_rate_hz'] = ''
+    launch_context.launch_configurations['path_publish_rate_hz'] = ''
 
     # 节点最终收到的参数来源列表。
     tracker_parameters = launch_module._build_tracker_parameters(
@@ -49,6 +51,8 @@ def test_explicit_serial_overrides_config_file():
     launch_context = LaunchContext()
     launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
     launch_context.launch_configurations['serial'] = 'LHR-CUSTOM'
+    launch_context.launch_configurations['publish_rate_hz'] = ''
+    launch_context.launch_configurations['path_publish_rate_hz'] = ''
 
     # 节点最终收到的参数来源列表。
     tracker_parameters = launch_module._build_tracker_parameters(
@@ -67,6 +71,8 @@ def test_empty_reorder_override_preserves_config_file():
     launch_context = LaunchContext()
     launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
     launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['publish_rate_hz'] = ''
+    launch_context.launch_configurations['path_publish_rate_hz'] = ''
     launch_context.launch_configurations['reorder_pose_axes'] = ''
 
     # 节点最终收到的参数来源列表。
@@ -86,6 +92,8 @@ def test_explicit_true_enables_pose_axis_reordering():
     launch_context = LaunchContext()
     launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
     launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['publish_rate_hz'] = ''
+    launch_context.launch_configurations['path_publish_rate_hz'] = ''
     launch_context.launch_configurations['reorder_pose_axes'] = 'true'
 
     # 节点最终收到的参数来源列表。
@@ -105,6 +113,8 @@ def test_explicit_false_disables_configured_pose_axis_reordering():
     launch_context = LaunchContext()
     launch_context.launch_configurations['config_file'] = '/tmp/custom.yaml'
     launch_context.launch_configurations['serial'] = ''
+    launch_context.launch_configurations['publish_rate_hz'] = ''
+    launch_context.launch_configurations['path_publish_rate_hz'] = ''
     launch_context.launch_configurations['reorder_pose_axes'] = 'false'
 
     # 节点最终收到的参数来源列表。
@@ -166,3 +176,48 @@ def test_noninteractive_interrupt_uses_launch_default_signal():
     )
 
     assert shutdown_actions == []
+
+
+def test_empty_rate_overrides_preserve_config_file():
+    """未传入频率覆盖值时应只保留配置文件参数来源."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟全部覆盖项均为空的 launch 上下文。
+    launch_context = LaunchContext()
+    launch_context.launch_configurations.update({
+        'config_file': '/tmp/custom.yaml',
+        'serial': '',
+        'reorder_pose_axes': '',
+        'publish_rate_hz': '',
+        'path_publish_rate_hz': '',
+    })
+
+    # 节点最终收到的参数来源列表。
+    tracker_parameters = launch_module._build_tracker_parameters(
+        launch_context
+    )
+
+    assert len(tracker_parameters) == 1
+
+
+def test_explicit_rate_overrides_are_numeric():
+    """显式频率覆盖应以数值参数覆盖配置文件并支持 90 Hz/10 Hz."""
+    # 待测试的 launch 模块。
+    launch_module = _load_launch_module()
+    # 模拟调用者显式指定采样和 Path 更新频率。
+    launch_context = LaunchContext()
+    launch_context.launch_configurations.update({
+        'config_file': '/tmp/custom.yaml',
+        'serial': '',
+        'reorder_pose_axes': '',
+        'publish_rate_hz': '90.0',
+        'path_publish_rate_hz': '10.0',
+    })
+
+    # 节点最终收到的参数来源列表。
+    tracker_parameters = launch_module._build_tracker_parameters(
+        launch_context
+    )
+
+    assert tracker_parameters[1] == {'publish_rate_hz': 90.0}
+    assert tracker_parameters[2] == {'path_publish_rate_hz': 10.0}

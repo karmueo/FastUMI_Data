@@ -20,20 +20,25 @@ namespace {
 
 static_assert(sizeof(stereo_camera_imu_data_t) == 72,
               "stereo_camera_imu_data_t must match the public SDK ABI");
-static_assert(offsetof(stereo_camera_imu_data_t, idx) == 32,
+static_assert(offsetof(stereo_camera_imu_data_t, idx) == 8,
               "stereo_camera_imu_data_t::idx ABI mismatch");
-static_assert(sizeof(stereo_camera_frame_t) == 64,
+static_assert(offsetof(stereo_camera_imu_data_t, ax) == 16,
+              "stereo_camera_imu_data_t::ax ABI mismatch");
+static_assert(sizeof(stereo_camera_frame_t) == 56,
               "stereo_camera_frame_t must match the public SDK ABI");
-static_assert(offsetof(stereo_camera_frame_t, stream_id) == 0,
-              "stereo_camera_frame_t::stream_id ABI mismatch");
-static_assert(offsetof(stereo_camera_frame_t, data) == 16,
-              "stereo_camera_frame_t::data ABI mismatch");
-static_assert(offsetof(stereo_camera_frame_t, frame_timestamp) == 32,
+static_assert(offsetof(stereo_camera_frame_t, frame_timestamp) == 0,
               "stereo_camera_frame_t::frame_timestamp ABI mismatch");
-static_assert(offsetof(stereo_camera_frame_t, frame_seqidx) == 48,
+static_assert(offsetof(stereo_camera_frame_t, frame_seqidx) == 8,
               "stereo_camera_frame_t::frame_seqidx ABI mismatch");
-static_assert(offsetof(stereo_camera_frame_t, frame_seq_count) == 56,
+static_assert(offsetof(stereo_camera_frame_t, stream_id) == 16,
+              "stereo_camera_frame_t::stream_id ABI mismatch");
+static_assert(offsetof(stereo_camera_frame_t, data) == 32,
+              "stereo_camera_frame_t::data ABI mismatch");
+static_assert(offsetof(stereo_camera_frame_t, frame_seq_count) == 52,
               "stereo_camera_frame_t::frame_seq_count ABI mismatch");
+
+/// 每微秒包含的纳秒数。
+constexpr std::int64_t kNanosecondsPerMicrosecond = 1'000;
 
 /**
  * @brief 按 V4L2 字节序构造 FOURCC 数值。
@@ -218,36 +223,49 @@ bool DecodeImuFrame(
 }
 
 /** @copydoc TimestampMapper::TimestampMapper */
-TimestampMapper::TimestampMapper(std::int64_t sdk_anchor_ns,
+TimestampMapper::TimestampMapper(std::int64_t sdk_anchor_us,
                                  std::int64_t ros_anchor_ns)
-    : sdk_anchor_ns_(sdk_anchor_ns), ros_anchor_ns_(ros_anchor_ns) {}
+    : sdk_anchor_us_(sdk_anchor_us), ros_anchor_ns_(ros_anchor_ns) {}
 
 /** @copydoc TimestampMapper::Map */
-rclcpp::Time TimestampMapper::Map(std::uint64_t sdk_timestamp_ns,
+rclcpp::Time TimestampMapper::Map(std::uint64_t sdk_timestamp_us,
                                   const rclcpp::Time &fallback) const {
-  if (sdk_timestamp_ns == 0 ||
-      sdk_timestamp_ns >
+  if (sdk_anchor_us_ < 0 || sdk_timestamp_us == 0 ||
+      sdk_timestamp_us >
           static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
     return fallback;
   }
 
   const std::int64_t sdk_timestamp =
-      static_cast<std::int64_t>(sdk_timestamp_ns);
-  const std::int64_t delta = sdk_timestamp - sdk_anchor_ns_;
-  if ((delta > 0 && ros_anchor_ns_ > std::numeric_limits<std::int64_t>::max() - delta) ||
-      (delta < 0 && ros_anchor_ns_ < std::numeric_limits<std::int64_t>::min() - delta)) {
+      static_cast<std::int64_t>(sdk_timestamp_us);
+  const std::int64_t delta_us = sdk_timestamp - sdk_anchor_us_;
+  if (delta_us >
+          std::numeric_limits<std::int64_t>::max() /
+              kNanosecondsPerMicrosecond ||
+      delta_us <
+          std::numeric_limits<std::int64_t>::min() /
+              kNanosecondsPerMicrosecond) {
     return fallback;
   }
-  return rclcpp::Time(ros_anchor_ns_ + delta, fallback.get_clock_type());
+  const std::int64_t delta_ns = delta_us * kNanosecondsPerMicrosecond;
+  if ((delta_ns > 0 &&
+       ros_anchor_ns_ >
+           std::numeric_limits<std::int64_t>::max() - delta_ns) ||
+      (delta_ns < 0 &&
+       ros_anchor_ns_ <
+           std::numeric_limits<std::int64_t>::min() - delta_ns)) {
+    return fallback;
+  }
+  return rclcpp::Time(ros_anchor_ns_ + delta_ns, fallback.get_clock_type());
 }
 
 /** @copydoc TimestampMapper::MapImuSample */
 rclcpp::Time TimestampMapper::MapImuSample(
-    std::int64_t sdk_timestamp_ns, const rclcpp::Time &fallback) const {
-  if (sdk_timestamp_ns <= 0) {
+    std::int64_t sdk_timestamp_us, const rclcpp::Time &fallback) const {
+  if (sdk_timestamp_us <= 0) {
     return fallback;
   }
-  return Map(static_cast<std::uint64_t>(sdk_timestamp_ns), fallback);
+  return Map(static_cast<std::uint64_t>(sdk_timestamp_us), fallback);
 }
 
 }  // namespace tof_stereo_camera

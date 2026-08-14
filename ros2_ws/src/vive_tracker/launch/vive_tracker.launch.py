@@ -29,6 +29,14 @@ def _build_tracker_parameters(context):
     reorder_override = LaunchConfiguration(
         'reorder_pose_axes', default=''
     ).perform(context)
+    # 非空值表示调用者明确要求覆盖参数文件中的采样频率。
+    publish_rate_override = LaunchConfiguration(
+        'publish_rate_hz', default=''
+    ).perform(context)
+    # 非空值表示调用者明确要求覆盖参数文件中的 Path 更新频率。
+    path_publish_rate_override = LaunchConfiguration(
+        'path_publish_rate_hz', default=''
+    ).perform(context)
 
     # 节点参数默认完全沿用参数文件。
     tracker_parameters = [config_file]
@@ -37,6 +45,14 @@ def _build_tracker_parameters(context):
     if reorder_override:
         tracker_parameters.append(
             {'reorder_pose_axes': reorder_override == 'true'}
+        )
+    if publish_rate_override:
+        tracker_parameters.append(
+            {'publish_rate_hz': float(publish_rate_override)}
+        )
+    if path_publish_rate_override:
+        tracker_parameters.append(
+            {'path_publish_rate_hz': float(path_publish_rate_override)}
         )
     return tracker_parameters
 
@@ -54,8 +70,8 @@ def _forward_terminal_interrupt(event, context, tracker_node):
 
 
 def _create_tracker_node(context):
-    """按需应用序列号覆盖并创建 Tracker 节点."""
-    # 根据调用者是否显式传入序列号构造节点参数。
+    """按需应用序列号和频率覆盖并创建 Tracker 节点."""
+    # 根据调用者是否显式传入覆盖值构造节点参数。
     tracker_parameters = _build_tracker_parameters(context)
 
     # 在固定命名空间中运行的 Tracker 位姿发布节点。
@@ -117,6 +133,24 @@ def generate_launch_description():
             'value from config_file.'
         ),
     )
+    # 采样频率覆盖参数声明。
+    publish_rate_argument = DeclareLaunchArgument(
+        'publish_rate_hz',
+        default_value='',
+        description=(
+            'Tracker sample rate in Hz. Leave empty to use the value from '
+            'config_file.'
+        ),
+    )
+    # Path 更新频率覆盖参数声明。
+    path_publish_rate_argument = DeclareLaunchArgument(
+        'path_publish_rate_hz',
+        default_value='',
+        description=(
+            'Path update rate in Hz. Leave empty to use the value from '
+            'config_file.'
+        ),
+    )
     # 节点参数文件路径声明。
     config_file_argument = DeclareLaunchArgument(
         'config_file',
@@ -136,7 +170,7 @@ def generate_launch_description():
         description='Whether to start RViz2.',
     )
 
-    # 参数声明完成后，根据调用者是否传入序列号创建节点。
+    # 参数声明完成后，根据调用者是否传入覆盖值创建节点。
     tracker_node_action = OpaqueFunction(function=_create_tracker_node)
     # 使用预配置显示项启动的 RViz2 进程。
     rviz_node = Node(
@@ -152,6 +186,8 @@ def generate_launch_description():
         [
             serial_argument,
             reorder_pose_axes_argument,
+            publish_rate_argument,
+            path_publish_rate_argument,
             config_file_argument,
             rviz_config_argument,
             use_rviz_argument,

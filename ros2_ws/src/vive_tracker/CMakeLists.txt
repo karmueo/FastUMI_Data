@@ -42,6 +42,7 @@ add_library(
   src/frame_validation.cpp
   src/path_history.cpp
   src/pose_math.cpp
+  src/time_sync.cpp
   src/tracker_pose_reader.cpp
 )
 target_compile_features(vive_tracker_core PUBLIC cxx_std_17)

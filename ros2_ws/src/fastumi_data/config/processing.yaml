@@ -7,7 +7,7 @@ minimum_samples: 10
 require_tracker_status: true
 
 topics:
-  image: /xv_sdk/SN250801DR48FB26001253/rgb/image
+  image: /tof_stereo_camera/rgb/image_raw
   tracker_pose: /vive_tracker/pose
   tracker_status: /vive_tracker/status
   gripper_state: /gripper/state

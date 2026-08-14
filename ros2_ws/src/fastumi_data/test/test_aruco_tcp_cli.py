@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from fastumi_data.aruco_tcp_cli import (
+    DEFAULT_IMAGE_TOPIC,
     build_argument_parser,
     run_calibration,
     write_calibration_outputs,
@@ -440,3 +441,8 @@ def test_run_calibration_injects_fixed_openness_into_each_image_frame(
     assert run_calibration(arguments) is result
     assert observed_openness == [1.0, 1.0]
     assert [row["openness"] for row in captured["frame_metrics"]] == [1.0, 1.0]
+
+
+def test_default_image_topic_uses_tof_rgb() -> None:
+    """双 ArUco 标定默认读取 FastUMI ToF RGB 图像。"""
+    assert DEFAULT_IMAGE_TOPIC == "/tof_stereo_camera/rgb/image_raw"

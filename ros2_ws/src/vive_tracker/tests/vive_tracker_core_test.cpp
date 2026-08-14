@@ -5,6 +5,9 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 
 #include <gtest/gtest.h>
@@ -16,6 +19,7 @@
 #include "vive_tracker/frame_validation.hpp"
 #include "vive_tracker/path_history.hpp"
 #include "vive_tracker/pose_math.hpp"
+#include "vive_tracker/time_sync.hpp"
 #include "vive_tracker/tracker_pose_types.hpp"
 
 namespace {
@@ -457,6 +461,114 @@ TEST(ViveTrackerPathHistory, RejectsZeroPointLimit) {
   geometry_msgs::msg::PoseStamped pose{};
   EXPECT_THROW(vive_tracker::AppendPoseToBoundedPath(pose, 0, &path),
                std::invalid_argument);
+}
+
+
+/**
+ * @brief 验证偶数和奇数调用区间均使用整数中点。
+ */
+TEST(ViveTrackerTimeSync, CalculatesEvenAndOddMidpoints) {
+  EXPECT_EQ(vive_tracker::TryCalculateMidpointNs(10, 14), 12);
+  EXPECT_EQ(vive_tracker::TryCalculateMidpointNs(10, 15), 12);
+}
+
+/**
+ * @brief 验证逆序稳定时钟区间会回退到同次查询的系统时钟中点。
+ */
+TEST(ViveTrackerTimeSync, FallsBackForReverseSteadyInterval) {
+  /** 测试使用的逆序稳定时钟和有效系统时钟区间。 */
+  const vive_tracker::TrackerQueryTiming timing{20, 10, 100, 110};
+  /** 测试使用的节点启动时钟锚点。 */
+  const vive_tracker::ClockAnchor anchor{0, 0};
+
+  EXPECT_EQ(vive_tracker::EstimateQuerySystemTimeNs(timing, anchor), 105);
+}
+
+/**
+ * @brief 验证稳定时钟映射的正常路径和溢出回退路径。
+ */
+TEST(ViveTrackerTimeSync, MapsOrFallsBackWithoutOverflow) {
+  /** 正常映射使用的节点启动时钟锚点。 */
+  const vive_tracker::ClockAnchor valid_anchor{100, 1000};
+  EXPECT_EQ(vive_tracker::TryMapSteadyToSystemNs(110, valid_anchor), 1010);
+  /** 极端前向跨度不得在差值计算前产生有符号溢出。 */
+  const vive_tracker::ClockAnchor forward_span_anchor{
+      std::numeric_limits<std::int64_t>::min(), 0};
+  EXPECT_FALSE(vive_tracker::TryMapSteadyToSystemNs(
+      std::numeric_limits<std::int64_t>::max(), forward_span_anchor));
+  /** 极端后向跨度不得在差值计算前产生有符号溢出。 */
+  const vive_tracker::ClockAnchor backward_span_anchor{
+      std::numeric_limits<std::int64_t>::max(), 0};
+  EXPECT_FALSE(vive_tracker::TryMapSteadyToSystemNs(
+      std::numeric_limits<std::int64_t>::min(), backward_span_anchor));
+  /** 极端 Path 时间跨度应安全地判定为已经到期。 */
+  const std::optional<std::int64_t> minimum_path_stamp{
+      std::numeric_limits<std::int64_t>::min()};
+  EXPECT_TRUE(vive_tracker::IsPathUpdateDue(
+      std::numeric_limits<std::int64_t>::max(), minimum_path_stamp, 10.0));
+
+  /** 会使正向系统时间加法溢出的时钟锚点。 */
+  const vive_tracker::ClockAnchor overflow_anchor{
+      0, std::numeric_limits<std::int64_t>::max()};
+  EXPECT_FALSE(vive_tracker::TryMapSteadyToSystemNs(1, overflow_anchor));
+  /** 稳定时钟映射失败时仍可使用的系统时钟回退区间。 */
+  const vive_tracker::TrackerQueryTiming fallback_timing{1, 3, 200, 210};
+  EXPECT_EQ(vive_tracker::EstimateQuerySystemTimeNs(fallback_timing,
+                                                     overflow_anchor),
+            205);
+}
+
+/**
+ * @brief 验证相同或倒退的候选时间戳均被钳制为前值加一纳秒。
+ */
+TEST(ViveTrackerTimeSync, ClampsEqualAndBackwardStamps) {
+  /** 已发布的前一批时间戳。 */
+  const std::optional<std::int64_t> previous_stamp{100};
+  EXPECT_EQ(vive_tracker::MakeStrictlyMonotonicStampNs(100, previous_stamp),
+            101);
+  EXPECT_EQ(vive_tracker::MakeStrictlyMonotonicStampNs(99, previous_stamp),
+            101);
+}
+
+/**
+ * @brief 验证前一批时间戳达到最大值时拒绝继续发布。
+ */
+TEST(ViveTrackerTimeSync, RefusesStampAfterInt64Maximum) {
+  /** 已达到可表示最大值的前一批时间戳。 */
+  const std::optional<std::int64_t> previous_stamp{
+      std::numeric_limits<std::int64_t>::max()};
+  EXPECT_FALSE(vive_tracker::MakeStrictlyMonotonicStampNs(
+      std::numeric_limits<std::int64_t>::max(), previous_stamp));
+}
+
+/**
+ * @brief 验证没有目标设备时批次仍保存独立于样本的查询时间上下文。
+ */
+TEST(ViveTrackerTimeSync, RepresentsTimestampForMissingTargetBatch) {
+  /** 不含 Tracker 样本的 OpenVR 查询批次。 */
+  vive_tracker::TrackerPoseBatch batch{};
+  batch.timing = vive_tracker::TrackerQueryTiming{10, 14, 100, 104};
+  /** 将查询中点映射到 ROS 系统时钟域的锚点。 */
+  const vive_tracker::ClockAnchor anchor{0, 1000};
+
+  EXPECT_TRUE(batch.samples.empty());
+  EXPECT_EQ(vive_tracker::EstimateQuerySystemTimeNs(batch.timing, anchor),
+            1012);
+}
+
+/**
+ * @brief 验证 Path 只在首帧或达到限频间隔时追加和发布。
+ */
+TEST(ViveTrackerTimeSync, LimitsPathUpdatesToConfiguredRate) {
+  /** 首次有效位姿之前不存在 Path 时间戳。 */
+  std::optional<std::int64_t> previous_path_stamp{};
+  EXPECT_TRUE(vive_tracker::IsPathUpdateDue(1000, previous_path_stamp, 10.0));
+  previous_path_stamp = 1000;
+  EXPECT_FALSE(vive_tracker::IsPathUpdateDue(999, previous_path_stamp, 10.0));
+  EXPECT_FALSE(vive_tracker::IsPathUpdateDue(99999999, previous_path_stamp,
+                                             10.0));
+  EXPECT_TRUE(vive_tracker::IsPathUpdateDue(100001000, previous_path_stamp,
+                                            10.0));
 }
 
 } // namespace

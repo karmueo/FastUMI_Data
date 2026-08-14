@@ -30,6 +30,7 @@
 #include "vive_tracker/path_history.hpp"
 #include "vive_tracker/pose_math.hpp"
 #include "vive_tracker/tracker_pose_reader.hpp"
+#include "vive_tracker/time_sync.hpp"
 #include "vive_tracker/tracker_pose_types.hpp"
 
 namespace vive_tracker {
@@ -40,6 +41,36 @@ constexpr std::int64_t kWarningThrottleMs = 1000;
 /** 节点允许的最大采样频率，单位为 Hz。 */
 constexpr double kMaximumPublishRateHz = 1000.0;
 
+/**
+ * @brief 捕获节点启动时使用的稳定/系统时钟锚点。
+ * @return 固定的稳定/系统时钟锚点。
+ */
+
+ClockAnchor CaptureClockAnchor() {
+  /** 系统时钟读数两侧的前一次稳定时钟读数。 */
+  const auto steady_before = std::chrono::steady_clock::now();
+  /** 固定映射所用的系统时钟读数。 */
+  const auto system_time = std::chrono::system_clock::now();
+  /** 系统时钟读数两侧的后一次稳定时钟读数。 */
+  const auto steady_after = std::chrono::steady_clock::now();
+  /** 转换为纳秒后的稳定时钟起点。 */
+  const std::int64_t steady_before_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          steady_before.time_since_epoch()).count();
+  /** 转换为纳秒后的稳定时钟终点。 */
+  const std::int64_t steady_after_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          steady_after.time_since_epoch()).count();
+  /** 转换为 Unix 纳秒后的系统时钟读数。 */
+  const std::int64_t system_time_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          system_time.time_since_epoch()).count();
+  /** 与系统时钟读数最接近的稳定时钟锚点。 */
+  const std::optional<std::int64_t> steady_midpoint_ns =
+      TryCalculateMidpointNs(steady_before_ns, steady_after_ns);
+  return ClockAnchor{steady_midpoint_ns.value_or(steady_after_ns),
+                     system_time_ns};
+}
 /**
  * @brief 将参数字符串解析为 SteamVR 跟踪原点。
  * @param value 待解析的参数值。
@@ -113,7 +144,10 @@ public:
    */
   ViveTrackerNode() : Node("pose_publisher") {
     serial_ = declare_parameter<std::string>("serial", "LHR-B77A06A7");
-    publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 30.0);
+    publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 90.0);
+    path_publish_rate_hz_ =
+        declare_parameter<double>("path_publish_rate_hz", 10.0);
+    clock_anchor_ = CaptureClockAnchor();
     /** 尚未解析的 OpenVR 跟踪原点参数。 */
     const std::string tracking_origin_text =
         declare_parameter<std::string>("tracking_origin", "standing");
@@ -169,10 +203,10 @@ public:
 
     RCLCPP_INFO(get_logger(),
                 "Publishing Tracker %s at %.3f Hz with %s pose axes in frame "
-                "%s; path limit is %zu points",
+                "%s; Path updates at %.3f Hz with a limit of %zu points",
                 serial_.c_str(), publish_rate_hz_,
                 reorder_pose_axes_ ? "reordered" : "original",
-                absolute_frame_.c_str(), max_path_points_);
+                absolute_frame_.c_str(), path_publish_rate_hz_, max_path_points_);
   }
 
 private:
@@ -188,6 +222,11 @@ private:
     if (!std::isfinite(publish_rate_hz_) || publish_rate_hz_ <= 0.0 ||
         publish_rate_hz_ > kMaximumPublishRateHz) {
       throw std::invalid_argument("publish_rate_hz must be in (0, 1000]");
+    }
+    if (!std::isfinite(path_publish_rate_hz_) || path_publish_rate_hz_ <= 0.0 ||
+        path_publish_rate_hz_ > publish_rate_hz_) {
+      throw std::invalid_argument(
+          "path_publish_rate_hz must be finite and in (0, publish_rate_hz]");
     }
     ValidateFrameConfiguration(openvr_frame_, parent_frame_, odom_frame_,
                                child_frame_, reorder_pose_axes_);
@@ -252,23 +291,44 @@ private:
   }
 
   /**
-   * @brief 读取目标 Tracker，并在位姿有效时发布 Pose、Odom、Path 和 TF。
+   * @brief 读取目标 Tracker，并按批次时间戳发布消息。
    */
   void SampleAndPublish() {
-    /** 当前 OpenVR 会话中全部 Generic Tracker 的采样。 */
-    const std::vector<TrackerPoseSample> samples =
-        pose_reader_.ReadPoses(tracking_origin_);
+    /** 当前 OpenVR 查询得到的统一时间上下文和 Tracker 样本。 */
+    const TrackerPoseBatch batch = pose_reader_.ReadPoses(tracking_origin_);
+    /** 优先由稳定时钟查询中点映射得到的批次候选时间戳。 */
+    const std::optional<std::int64_t> candidate_stamp_ns =
+        EstimateQuerySystemTimeNs(batch.timing, clock_anchor_);
+    if (!candidate_stamp_ns.has_value()) {
+      RCLCPP_ERROR_THROTTLE(
+          get_logger(), steady_clock_, kWarningThrottleMs,
+          "Unable to estimate OpenVR query timestamp; skipping this batch");
+      return;
+    }
+    /** 入口处强制严格递增后的本批次时间戳。 */
+    const std::optional<std::int64_t> batch_stamp_ns =
+        MakeStrictlyMonotonicStampNs(*candidate_stamp_ns,
+                                     previous_batch_stamp_ns_);
+    if (!batch_stamp_ns.has_value()) {
+      RCLCPP_ERROR_THROTTLE(
+          get_logger(), steady_clock_, kWarningThrottleMs,
+          "Tracker timestamp reached INT64_MAX; skipping this batch");
+      return;
+    }
+    previous_batch_stamp_ns_ = *batch_stamp_ns;
+    /** 本批次所有派生消息共享的 ROS 系统时间戳。 */
+    const rclcpp::Time sample_stamp(*batch_stamp_ns, RCL_SYSTEM_TIME);
     /** 与配置序列号匹配的采样迭代器。 */
     const auto target_sample =
-        std::find_if(samples.cbegin(), samples.cend(),
+        std::find_if(batch.samples.cbegin(), batch.samples.cend(),
                      [this](const TrackerPoseSample &sample) {
                        return sample.serial_number == serial_;
                      });
 
-    if (target_sample == samples.cend()) {
-      /** 设备缺失状态使用当前系统时钟，确保录制端仍能观察到采样。 */
+    if (target_sample == batch.samples.cend()) {
+      /** 缺失设备状态也必须使用本次查询的批次时间戳。 */
       fastumi_interfaces::msg::TrackerStatus status_message{};
-      status_message.header.stamp = now();
+      status_message.header.stamp = sample_stamp;
       status_message.header.frame_id = absolute_frame_;
       status_message.serial_number = serial_;
       status_message.device_connected = false;
@@ -281,9 +341,7 @@ private:
                            serial_.c_str());
       return;
     }
-    /** 位姿与状态消息共享一次 OpenVR 采样的 Unix 时间戳。 */
-    const rclcpp::Time sample_stamp(target_sample->sample_time_unix_ns,
-                                    RCL_SYSTEM_TIME);
+
     fastumi_interfaces::msg::TrackerStatus status_message{};
     status_message.header.stamp = sample_stamp;
     status_message.header.frame_id = absolute_frame_;
@@ -319,17 +377,13 @@ private:
       InitializeOdomFrame(published_pose, pose_message.header.stamp);
     }
     /** 当前 Tracker 相对于首帧里程计坐标系的位姿。 */
-    const Pose odom_pose =
-        CalculateRelativePose(*initial_pose_, published_pose);
+    const Pose odom_pose = CalculateRelativePose(*initial_pose_, published_pose);
     /** 本次发布的首帧归零里程计消息。 */
     nav_msgs::msg::Odometry odom_message{};
     odom_message.header.stamp = pose_message.header.stamp;
     odom_message.header.frame_id = odom_frame_;
     odom_message.child_frame_id = child_frame_;
     FillRosPose(odom_pose, &odom_message.pose.pose);
-
-    path_message_.header.stamp = pose_message.header.stamp;
-    AppendPoseToBoundedPath(pose_message, max_path_points_, &path_message_);
 
     /** 与里程计位姿具有相同时间戳和坐标数据的动态 TF。 */
     geometry_msgs::msg::TransformStamped transform_message{};
@@ -342,14 +396,23 @@ private:
 
     pose_publisher_->publish(pose_message);
     odom_publisher_->publish(odom_message);
-    path_publisher_->publish(path_message_);
     tf_broadcaster_->sendTransform(transform_message);
+
+    if (IsPathUpdateDue(*batch_stamp_ns, previous_path_stamp_ns_,
+                        path_publish_rate_hz_)) {
+      path_message_.header.stamp = pose_message.header.stamp;
+      AppendPoseToBoundedPath(pose_message, max_path_points_, &path_message_);
+      previous_path_stamp_ns_ = *batch_stamp_ns;
+      path_publisher_->publish(path_message_);
+    }
   }
 
   /** 待读取的 Tracker 序列号。 */
   std::string serial_{};
   /** OpenVR 位姿采样和 ROS 发布频率，单位为 Hz。 */
-  double publish_rate_hz_{30.0};
+  double publish_rate_hz_{90.0};
+  /** Path 追加和发布的最大更新频率，单位为 Hz。 */
+  double path_publish_rate_hz_{10.0};
   /** SteamVR 查询使用的跟踪原点。 */
   TrackingOrigin tracking_origin_{TrackingOrigin::kStanding};
   /** 是否将 OpenVR 全局坐标轴重排为 ROS 跟踪坐标轴。 */
@@ -366,6 +429,12 @@ private:
   std::string child_frame_{};
   /** 轨迹允许保留的最大点数。 */
   std::size_t max_path_points_{3000};
+  /** 节点启动时固定的稳定/系统时钟映射锚点。 */
+  ClockAnchor clock_anchor_{};
+  /** 已接受的前一查询批次时间戳。 */
+  std::optional<std::int64_t> previous_batch_stamp_ns_{};
+  /** 前一次追加和发布 Path 的批次时间戳。 */
+  std::optional<std::int64_t> previous_path_stamp_ns_{};
   /** 管理 OpenVR 会话并读取 Tracker 位姿的对象。 */
   TrackerPoseReader pose_reader_{};
   /** 本次节点生命周期内用于定义里程计原点的首帧有效位姿。 */

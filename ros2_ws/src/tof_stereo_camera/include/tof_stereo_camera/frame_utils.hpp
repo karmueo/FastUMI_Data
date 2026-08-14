@@ -68,38 +68,38 @@ bool DecodeImuFrame(
 
 /**
  * @class TimestampMapper
- * @brief 将 SDK `CLOCK_MONOTONIC` 时间戳映射到 ROS 时钟。
+ * @brief 将 SDK 微秒级 `CLOCK_MONOTONIC` 时间戳映射到 ROS 时钟。
  * @details 映射锚点在创建时固定；无效或溢出的 SDK 时间戳使用调用方回退时间。
  */
 class TimestampMapper {
  public:
   /**
    * @brief 创建固定锚点的时间映射器。
-   * @param[in] sdk_anchor_ns SDK 单调时钟锚点，单位为纳秒。
+   * @param[in] sdk_anchor_us SDK 单调时钟锚点，单位为微秒。
    * @param[in] ros_anchor_ns 与 SDK 锚点对应的 ROS 时钟时间，单位为纳秒。
    */
-  TimestampMapper(std::int64_t sdk_anchor_ns, std::int64_t ros_anchor_ns);
+  TimestampMapper(std::int64_t sdk_anchor_us, std::int64_t ros_anchor_ns);
 
   /**
-   * @brief 映射无符号 SDK 纳秒时间戳。
-   * @param[in] sdk_timestamp_ns SDK `CLOCK_MONOTONIC` 时间戳，0 表示无效。
+   * @brief 映射无符号 SDK 微秒时间戳。
+   * @param[in] sdk_timestamp_us SDK `CLOCK_MONOTONIC` 时间戳，0 表示无效。
    * @param[in] fallback 无效或溢出时返回的 ROS 时间。
    * @return 映射后的 ROS 时间或 `fallback`。
    */
-  rclcpp::Time Map(std::uint64_t sdk_timestamp_ns,
+  rclcpp::Time Map(std::uint64_t sdk_timestamp_us,
                    const rclcpp::Time &fallback) const;
 
   /**
-   * @brief 映射 IMU 样本使用的有符号 SDK 纳秒时间戳。
-   * @param[in] sdk_timestamp_ns IMU 样本时间戳；非正值表示无效。
+   * @brief 映射 IMU 样本使用的有符号 SDK 微秒时间戳。
+   * @param[in] sdk_timestamp_us IMU 样本时间戳；非正值表示无效。
    * @param[in] fallback 无效或溢出时返回的 ROS 时间。
    * @return 映射后的 ROS 时间或 `fallback`。
    */
-  rclcpp::Time MapImuSample(std::int64_t sdk_timestamp_ns,
+  rclcpp::Time MapImuSample(std::int64_t sdk_timestamp_us,
                             const rclcpp::Time &fallback) const;
 
  private:
-  std::int64_t sdk_anchor_ns_;  ///< SDK 单调时钟锚点，单位为纳秒。
+  std::int64_t sdk_anchor_us_;  ///< SDK 单调时钟锚点，单位为微秒。
   std::int64_t ros_anchor_ns_;  ///< 对应的 ROS 时钟锚点，单位为纳秒。
 };
 

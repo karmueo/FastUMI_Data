@@ -357,29 +357,36 @@ bool TrackerPoseReader::IsInitialized() const noexcept {
 /**
  * @brief 读取当前所有 Generic Tracker 的状态和位姿。
  * @param origin 本次查询使用的 SteamVR 跟踪原点。
- * @return 当前会话中所有 Generic Tracker 的采样结果；未初始化时返回空数组。
+ * @return 当前查询的统一时间上下文和所有 Generic Tracker 采样；未初始化时样本为空。
  */
-std::vector<TrackerPoseSample>
-TrackerPoseReader::ReadPoses(TrackingOrigin origin) const {
-  /** 本次返回的 Tracker 采样结果。 */
-  std::vector<TrackerPoseSample> samples{};
+TrackerPoseBatch TrackerPoseReader::ReadPoses(TrackingOrigin origin) const {
+  /** 本次返回的统一查询批次。 */
+  TrackerPoseBatch batch{};
   if (impl_->vr_system == nullptr) {
-    return samples;
+    return batch;
   }
 
   /** OpenVR 当前会话中全部设备的位姿数组。 */
   std::array<vr::TrackedDevicePose_t, vr::k_unMaxTrackedDeviceCount> poses{};
+  /** 查询前读取的系统时钟，用于异常时的同调用区间回退。 */
+  const auto system_before = std::chrono::system_clock::now();
+  /** 查询前读取的稳定时钟，用于估计 OpenVR 调用中点。 */
+  const auto steady_before = std::chrono::steady_clock::now();
   impl_->vr_system->GetDeviceToAbsoluteTrackingPose(
       ToOpenVrOrigin(origin), 0.0F, poses.data(),
       static_cast<std::uint32_t>(poses.size()));
-
-  /** 本批位姿读取完成后的主机系统时间。 */
-  const auto sample_time = std::chrono::system_clock::now();
-  /** 本批位姿共用的 Unix 纳秒时间戳。 */
-  const std::int64_t sample_time_unix_ns =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          sample_time.time_since_epoch())
-          .count();
+  /** 查询后读取的稳定时钟，用于估计 OpenVR 调用中点。 */
+  const auto steady_after = std::chrono::steady_clock::now();
+  /** 查询后读取的系统时钟，用于异常时的同调用区间回退。 */
+  const auto system_after = std::chrono::system_clock::now();
+  batch.timing.steady_before_ns = std::chrono::duration_cast<
+      std::chrono::nanoseconds>(steady_before.time_since_epoch()).count();
+  batch.timing.steady_after_ns = std::chrono::duration_cast<
+      std::chrono::nanoseconds>(steady_after.time_since_epoch()).count();
+  batch.timing.system_before_ns = std::chrono::duration_cast<
+      std::chrono::nanoseconds>(system_before.time_since_epoch()).count();
+  batch.timing.system_after_ns = std::chrono::duration_cast<
+      std::chrono::nanoseconds>(system_after.time_since_epoch()).count();
 
   for (vr::TrackedDeviceIndex_t device_index = 0;
        device_index < vr::k_unMaxTrackedDeviceCount; ++device_index) {
@@ -392,7 +399,6 @@ TrackerPoseReader::ReadPoses(TrackingOrigin origin) const {
     const vr::TrackedDevicePose_t &openvr_pose = poses[device_index];
     /** 当前 Tracker 的公共采样记录。 */
     TrackerPoseSample sample{};
-    sample.sample_time_unix_ns = sample_time_unix_ns;
     sample.device_index = device_index;
     sample.serial_number = ReadSerialNumber(impl_->vr_system, device_index);
     sample.device_connected = openvr_pose.bDeviceIsConnected;
@@ -403,9 +409,9 @@ TrackerPoseReader::ReadPoses(TrackingOrigin origin) const {
       sample.pose =
           ConvertOpenVrMatrixToPose(openvr_pose.mDeviceToAbsoluteTracking);
     }
-    samples.push_back(std::move(sample));
+    batch.samples.push_back(std::move(sample));
   }
-  return samples;
+  return batch;
 }
 
 /**

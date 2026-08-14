@@ -43,7 +43,7 @@ def minimum_arguments(extra: list[str] | None = None) -> list[str]:
 def test_parser_defaults_match_target_bag_topics() -> None:
     """默认话题应匹配已确认的 Tracker–鱼眼 bag。"""
     arguments = build_argument_parser().parse_args(minimum_arguments())
-    assert arguments.image_topic.endswith("/rgb/image")
+    assert arguments.image_topic == "/tof_stereo_camera/rgb/image_raw"
     assert arguments.tracker_topic == "/vive_tracker/pose"
     assert arguments.status_topic == "/vive_tracker/status"
     assert arguments.tag_family == "tag36h11"

@@ -81,11 +81,11 @@ ros2 topic list | rg \
 检查图像与 Tracker 的发布频率和时间戳：
 
 ```bash
-# XV 相机
-IMAGE_TOPIC=/xv_sdk/${DEVICE_SERIAL}/rgb/image
+# ToF 双目相机
+IMAGE_TOPIC=/tof_stereo_camera/rgb/image_raw
 
-# ToF 双目相机改用下面这一行
-# IMAGE_TOPIC=/tof_stereo_camera/rgb/image_raw
+# XV 相机改用下面这一行
+# IMAGE_TOPIC=/xv_sdk/${DEVICE_SERIAL}/rgb/image
 
 ros2 topic hz "${IMAGE_TOPIC}"
 ros2 topic hz /vive_tracker/pose

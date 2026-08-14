@@ -3,7 +3,7 @@
  * @brief 打包 stereo_camera SDK 的 ROS 2 图像与 IMU 发布节点。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-13
+ * @date 修改：2026-08-14
  */
 #include <atomic>
 #include <chrono>
@@ -26,11 +26,11 @@ namespace tof_stereo_camera {
 namespace {
 
 /**
- * @brief 获取当前稳态时钟时间。
- * @return `std::chrono::steady_clock` 的纳秒计数，用作 SDK 时间映射锚点。
+ * @brief 获取当前稳态时钟的微秒计数。
+ * @return `std::chrono::steady_clock` 的微秒计数，用作 SDK 时间映射锚点。
  */
-std::int64_t SteadyNowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+std::int64_t SteadyNowUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
@@ -50,7 +50,7 @@ class StereoCameraNode final : public rclcpp::Node {
    */
   StereoCameraNode()
       : Node("tof_stereo_camera_node"),
-        timestamp_mapper_(SteadyNowNs(), this->now().nanoseconds()) {
+        timestamp_mapper_(SteadyNowUs(), this->now().nanoseconds()) {
     const bool enable_rgb = this->declare_parameter<bool>("enable_rgb", true);
     const bool enable_itof_depth =
         this->declare_parameter<bool>("enable_itof_depth", true);
@@ -304,7 +304,7 @@ class StereoCameraNode final : public rclcpp::Node {
   std::atomic<bool> running_{false};
   /// 执行阻塞 SDK 读取的采集线程。
   std::thread capture_thread_;
-  /// SDK 单调时钟到 ROS 时间的固定锚点映射器。
+  /// SDK 微秒单调时钟到 ROS 纳秒时间的固定锚点映射器。
   TimestampMapper timestamp_mapper_;
   /// 上一次发出节流告警的稳态时间点。
   std::chrono::steady_clock::time_point last_warning_{};

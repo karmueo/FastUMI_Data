@@ -69,7 +69,7 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `/tof_stereo_camera/imu/data` | `sensor_msgs/msg/Imu` | 滤波后的姿态、加速度和角速度 |
 
 每个 `stereo_camera_imu_data_t` 样本发布一条 IMU 消息。消息优先使用样本自身的
-`CLOCK_MONOTONIC` 时间戳；无效时回退到帧时间戳，再回退到节点当前时间。SDK 未提供
+微秒级 `CLOCK_MONOTONIC` 时间戳；无效时回退到帧时间戳，再回退到节点当前时间。SDK 未提供
 姿态，因此 `orientation_covariance[0]` 为 `-1`。角速度和线加速度协方差保持全零，
 表示未知。
 
@@ -83,11 +83,16 @@ RViz 的 IMU 显示订阅 `/tof_stereo_camera/imu/data`，显示姿态坐标轴�
 查看 IMU。接入机器人 TF 树后，应将 Fixed Frame 改为真实的世界或机体坐标系，并提供
 对应的有效 TF。
 
-## 0.3.0 行为
+## 0.4.0 行为
 
 默认复合帧规格为 `2048x2738 YUYV`，其中 RGB 子帧为与标定文件一致的
-`2048x1536 bgr8`。驱动适配 SDK 38bc222 的批量 IMU ABI：每个结构有效的
-IMU 帧会复制并发布其中全部样本，避免下一次 `stereo_camera_parse_frame()` 覆盖 SDK 内部缓冲区。
+`2048x1536 bgr8`。驱动适配新版 SDK ABI：`stereo_camera_frame_t` 为
+56 字节，`frame_timestamp` 和 IMU 样本 `timestamp` 均为微秒级
+`CLOCK_MONOTONIC` 时间，IMU 样本 `idx` 位于偏移 8。旧版 SDK 二进制与该布局
+不兼容，头文件、共享库和调试符号必须成套更新；设备固件也必须输出新版 IMU 布局。
+
+每个有效的 IMU 帧会复制并发布其中全部样本，避免下一次
+`stereo_camera_parse_frame()` 覆盖 SDK 内部缓冲区。
 `data_size=0` 的空批次是成功的无操作，不发布消息也不记录警告。
 
 驱动会比较 `frame_seq_count` 与解码样本数；当 `frame_seqidx` 和首样本 `idx` 都有效时也会

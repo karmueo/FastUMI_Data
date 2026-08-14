@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from fastumi_data.session_recorder import (
+    DEFAULT_TOPICS,
     _TerminalKeyReader,
     _build_bag_command,
     _build_parser,
@@ -304,3 +305,8 @@ def test_main_writes_v2_manifest_without_calibration_verified(
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 2
     assert "calibration_verified" not in manifest
+
+
+def test_default_topics_start_with_tof_rgb() -> None:
+    """默认 MCAP 录制话题以 FastUMI ToF RGB 图像开始。"""
+    assert DEFAULT_TOPICS[0] == "/tof_stereo_camera/rgb/image_raw"

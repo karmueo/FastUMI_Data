@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace vive_tracker {
 
@@ -83,8 +84,6 @@ struct Pose {
  * @brief 单个 Tracker 在一次采样中的状态和位姿。
  */
 struct TrackerPoseSample {
-  /** 主机采样时刻的 Unix 时间戳，单位为纳秒。 */
-  std::int64_t sample_time_unix_ns{0};
   /** OpenVR 在当前会话中分配的设备索引。 */
   std::uint32_t device_index{0};
   /** Tracker 的 LHR 序列号。 */
@@ -97,6 +96,26 @@ struct TrackerPoseSample {
   TrackingState tracking_state{TrackingState::kUninitialized};
   /** 当前位姿；仅在 pose_valid 为 true 时使用。 */
   Pose pose{};
+};
+
+/** @brief 包围单次 OpenVR 查询的主机时钟读数，单位均为纳秒。 */
+struct TrackerQueryTiming {
+  /** OpenVR 调用前读取的稳定时钟时间。 */
+  std::int64_t steady_before_ns{0};
+  /** OpenVR 调用后读取的稳定时钟时间。 */
+  std::int64_t steady_after_ns{0};
+  /** OpenVR 调用前读取的系统时钟 Unix 时间。 */
+  std::int64_t system_before_ns{0};
+  /** OpenVR 调用后读取的系统时钟 Unix 时间。 */
+  std::int64_t system_after_ns{0};
+};
+
+/** @brief 一次 OpenVR 查询得到的统一时间上下文和全部 Tracker 样本。 */
+struct TrackerPoseBatch {
+  /** 当前查询的主机时钟区间，用于为所有样本生成同一批次时间戳。 */
+  TrackerQueryTiming timing{};
+  /** 当前 OpenVR 会话中所有 Generic Tracker 的采样结果。 */
+  std::vector<TrackerPoseSample> samples{};
 };
 
 /**

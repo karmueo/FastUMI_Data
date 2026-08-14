@@ -47,9 +47,9 @@ public:
   /**
    * @brief 读取当前所有 Generic Tracker 的状态和位姿。
    * @param origin 本次查询使用的 SteamVR 跟踪原点。
-   * @return 当前会话中所有 Generic Tracker 的采样结果；未初始化时返回空数组。
+   * @return 当前查询的统一时间上下文和所有 Generic Tracker 采样；未初始化时样本为空。
    */
-  std::vector<TrackerPoseSample> ReadPoses(TrackingOrigin origin) const;
+  TrackerPoseBatch ReadPoses(TrackingOrigin origin) const;
 
 private:
   /** @brief 隐藏 OpenVR 类型和运行时状态的内部实现。 */

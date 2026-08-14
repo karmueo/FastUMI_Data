@@ -87,7 +87,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径。 |
 | `--output-dir` | 无（必填） | 检测统计和叠加图的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
-| `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 图像话题名称。预检从该话题读取图像。 |
+| `--image-topic` | `/tof_stereo_camera/rgb/image_raw` | 图像话题名称。预检从该话题读取图像。 |
 | `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题。预检不使用。 |
 | `--status-topic` | `/vive_tracker/status` | Tracker 状态话题。预检不使用。 |
 | `--tag-family` | `tag36h11` | AprilTag 标签族，必须与目标板配置和实际打印板一致。 |
@@ -143,7 +143,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径，提供网格尺寸和标签几何。 |
 | `--output-dir` | 无（必填） | 标定 YAML、质量报告、逐帧指标、诊断图和进度日志的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
-| `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 图像话题名称。 |
+| `--image-topic` | `/tof_stereo_camera/rgb/image_raw` | 图像话题名称。 |
 | `--tracker-topic` | `/vive_tracker/pose` | Tracker 位姿话题名称。 |
 | `--status-topic` | `/vive_tracker/status` | Tracker 状态话题名称；仅使用有效状态的位姿。 |
 | `--tag-family` | `tag36h11` | AprilTag 标签族，必须与目标板配置和实际打印板一致。 |
@@ -346,7 +346,7 @@ ID 0/1 分别生成 TCP 位置候选，候选平移按单 tag 重投影 RMSE 的
 
 以下命令默认已进入 FastUMI_Data 项目根目录，配置和输出路径均按项目根目录
 解析。标定命令通过 ROS 2 console script 运行。标定 bag 只需包含目标 RGB Image
-话题，默认话题为 `/xv_sdk/SN250801DR48FB26001253/rgb/image`；无需包含 Tracker
+话题，默认话题为 `/tof_stereo_camera/rgb/image_raw`；无需包含 Tracker
 pose/status 或 `GripperState`。程序单遍读取该图像话题，不执行 Tracker 或夹爪状态的
 时间同步。
 
@@ -384,7 +384,7 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 | `--tracker-camera-calibration` | 无（必填） | 已验收的 Tracker→Camera 标定 YAML 路径；提供 `^tracker T_camera` 和 `time_offset_ms`。 |
 | `--tracker-config` | 无（必填） | Vive Tracker 配置 YAML 路径，用于读取并记录 Tracker serial。 |
 | `--output-dir` | 无（必填） | 标定快照、Tracker→TCP 外参、JSON/CSV 报告和 overlay 图的原子输出目录。 |
-| `--image-topic` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | 鱼眼图像话题名称。 |
+| `--image-topic` | `/tof_stereo_camera/rgb/image_raw` | 鱼眼图像话题名称。 |
 | `--frame-stride` | `1` | 图像抽帧步长；每隔指定帧数执行检测与标定。 |
 | `--minimum-frames` | `30` | 稳健 SE(3) 聚合所需的最少有效双 tag 帧数。 |
 | `--max-reprojection-rmse-px` | `1.5` | 单 tag 重投影 RMSE 上限，单位为像素。 |

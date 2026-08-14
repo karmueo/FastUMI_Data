@@ -276,6 +276,7 @@ ros2 launch fastumi_data fastumi_collection.launch.py
 统一 launch 默认使用 `/tof_stereo_camera/rgb/image_raw` 作为夹爪估计图像、
 Tracker 配置文件中的序列号，启动 Tracker RViz2，并关闭 ToF 子 launch 的 RViz2，
 从而避免重复 RViz2。ToF RGB 标定分辨率严格为 `2048x1536`，夹爪节点不会缩放内参。
+Tracker 位姿时间戳由主机对 OpenVR 查询调用区间中点估计，属于主机查询时间；SteamVR 内部固定延迟继续通过已标定的 `time_offset_ms` 表示。
 常用覆盖参数如下：
 
 | launch 参数 | 必填 | 默认值 | 说明 |
@@ -445,7 +446,7 @@ ros2 run fastumi_data record_session \
 未使用 `--topic` 时录制以下内置话题：
 
 ```text
-/xv_sdk/SN250801DR48FB26001253/rgb/image
+/tof_stereo_camera/rgb/image_raw
 /gripper/state
 /vive_tracker/pose
 /vive_tracker/status
@@ -669,7 +670,7 @@ source ros2_ws/install/setup.bash
 
 | 配置键 | 默认值 | 参数说明 |
 | --- | --- | --- |
-| `topics.image` | `/xv_sdk/SN250801DR48FB26001253/rgb/image` | XV 鱼眼 RGB 图像话题。 |
+| `topics.image` | `/tof_stereo_camera/rgb/image_raw` | FastUMI ToF RGB 图像话题。 |
 | `topics.tracker_pose` | `/vive_tracker/pose` | Vive Tracker 位姿话题。 |
 | `topics.tracker_status` | `/vive_tracker/status` | Vive Tracker 连接、位姿有效性和跟踪状态话题。 |
 | `topics.gripper_state` | `/gripper/state` | 夹爪开度与检测有效性话题。 |

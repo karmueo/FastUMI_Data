@@ -117,7 +117,7 @@ class AprilGridSpec:
 class CalibrationSettings:
     """保存标定话题、筛选、时间搜索和默认质量门。"""
 
-    image_topic: str = "/xv_sdk/SN250801DR48FB26001253/rgb/image"
+    image_topic: str = "/tof_stereo_camera/rgb/image_raw"
     tracker_topic: str = "/vive_tracker/pose"
     status_topic: str = "/vive_tracker/status"
     tag_family: str = "tag36h11"

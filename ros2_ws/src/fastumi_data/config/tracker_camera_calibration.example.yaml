@@ -1,6 +1,6 @@
 # Tracker–鱼眼相机离线外参标定的默认运行参数。
 topics:
-  image: /xv_sdk/SN250801DR48FB26001253/rgb/image
+  image: /tof_stereo_camera/rgb/image_raw
   tracker_pose: /vive_tracker/pose
   tracker_status: /vive_tracker/status
 

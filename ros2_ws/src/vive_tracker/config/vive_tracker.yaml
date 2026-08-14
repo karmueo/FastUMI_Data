@@ -3,7 +3,8 @@
 /vive_tracker/pose_publisher:
   ros__parameters:
     serial: LHR-B77A06A7
-    publish_rate_hz: 30.0
+    publish_rate_hz: 90.0
+    path_publish_rate_hz: 10.0
     tracking_origin: standing
     reorder_pose_axes: false
     openvr_frame: steamvr_tracking

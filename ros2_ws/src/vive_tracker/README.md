@@ -134,7 +134,8 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `serial` | `LHR-B77A06A7` | 目标 Tracker 序列号 |
-| `publish_rate_hz` | `30.0` | 采样与发布频率，范围为 `(0, 1000]` Hz |
+| `publish_rate_hz` | `90.0` | OpenVR 查询以及 Pose、Status、Odometry 和动态 TF 的频率，范围为 `(0, 1000]` Hz |
+| `path_publish_rate_hz` | `10.0` | Path 追加和发布的最大频率，必须位于 `(0, publish_rate_hz]` |
 | `tracking_origin` | `standing` | OpenVR 原点，可选 `standing`、`seated`、`raw` |
 | `reorder_pose_axes` | `false` | 是否将 OpenVR 全局坐标轴重排为 ROS 跟踪坐标轴 |
 | `openvr_frame` | `steamvr_tracking` | OpenVR 原始全局坐标系；关闭重排时供 Pose、Path 和里程计静态原点使用 |
@@ -142,6 +143,8 @@ ros2 launch vive_tracker vive_tracker.launch.py \
 | `odom_frame` | `vive_tracker_odom` | 第一条有效位姿定义的固定里程计坐标系 |
 | `child_frame` | `vive_tracker` | Odometry 和动态 TF 使用的 Tracker 子坐标系 |
 | `max_path_points` | `3000` | 轨迹保留的最大点数，必须为正整数 |
+
+Tracker 的 `header.stamp` 是主机在每次 `GetDeviceToAbsoluteTrackingPose(origin, 0.0F, ...)` 调用前后读取稳定时钟后取得的调用中点，并通过节点启动时固定的稳定/系统时钟锚点映射到 Unix 时间。它是主机查询时间估计，不是 Tracker 的设备采集时间。SteamVR 内部固定延迟仍由标定得到的 `time_offset_ms` 表示；其约定保持为 `tracker_query_ns = image_timestamp_ns + time_offset_ns`，正值查询更晚的 Tracker 位姿。
 
 节点只发布序列号匹配且连接、位姿均有效的采样。第一条有效采样同时确定 `vive_tracker_odom` 的原点和轴向，因此首条 Odometry 的位置为零、姿态为单位四元数。设备缺失或跟踪无效时，节点每秒最多输出一次告警，并保留既有里程计零点和轨迹，不会重复发布最后一帧；跟踪恢复后继续相对于原零点发布。需要重新归零时应重启节点。
 
@@ -277,7 +280,7 @@ ROS 2 节点在当前所选全局坐标系中表达 Pose 和 Path，在 `vive_tr
 
 旧 bag（例如 `/tmp/vive_tracker_session`）没有新增的 `/vive_tracker/odom` 和 `vive_tracker_odom` 帧，无法直接还原首帧归零里程计。需要新里程计接口时应重新录制，或者对旧 bag 进行离线转换。
 
-消息时间戳取自 OpenVR 批次读取完成后的主机 Unix 时间。
+消息时间戳是主机对 OpenVR 查询调用区间中点的估计：稳定时钟中点通过节点启动时固定的稳定/系统时钟锚点映射到 Unix 时间；异常时使用同次调用的系统时钟中点。它不是 Tracker 设备采集时间，SteamVR 内部固定延迟仍由标定的 `time_offset_ms` 表示。
 
 ## 常用检查
 

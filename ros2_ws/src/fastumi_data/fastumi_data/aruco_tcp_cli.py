@@ -36,7 +36,7 @@ from fastumi_data.tracker_camera_bag import (
 from fastumi_data.tracker_camera_config import load_kalibr_camera
 
 
-DEFAULT_IMAGE_TOPIC = "/xv_sdk/SN250801DR48FB26001253/rgb/image"
+DEFAULT_IMAGE_TOPIC = "/tof_stereo_camera/rgb/image_raw"
 
 # 双 ArUco 标定仅使用图像帧，统一按夹爪完全张开估计 TCP。
 FIXED_OPENNESS = 1.0

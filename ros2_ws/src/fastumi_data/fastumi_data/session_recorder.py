@@ -25,7 +25,7 @@ from fastumi_data.extrinsic import load_tracker_tcp_extrinsic
 
 # 默认录制的数据和 episode 边界话题。
 DEFAULT_TOPICS = [
-    "/xv_sdk/SN250801DR48FB26001253/rgb/image",
+    "/tof_stereo_camera/rgb/image_raw",
     "/gripper/state",
     "/vive_tracker/pose",
     "/vive_tracker/status",

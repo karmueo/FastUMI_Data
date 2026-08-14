@@ -3,10 +3,11 @@
  * @brief ROS 2 帧转换工具的回归测试。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-13
+ * @date 修改：2026-08-14
  */
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -102,12 +103,12 @@ TEST(FrameUtils, AcceptsOnlyDocumentedTofMatchStates) {
   EXPECT_FALSE(IsPublishableTofMatchState(STEREO_MATCH_LOST));
 }
 
-/** @brief 验证 `FrameUtils::MapsSdkMonotonicTimeAndUsesFallbackForZero` 所覆盖的帧转换行为。 */
-TEST(FrameUtils, MapsSdkMonotonicTimeAndUsesFallbackForZero) {
+/** @brief 验证 SDK 微秒时间戳会正确映射为 ROS 纳秒时间。 */
+TEST(FrameUtils, MapsSdkMonotonicMicrosecondsAndUsesFallbackForZero) {
   TimestampMapper mapper(1'000, 10'000);
   const rclcpp::Time fallback(static_cast<std::int64_t>(50'000),
                               RCL_SYSTEM_TIME);
-  EXPECT_EQ(mapper.Map(1'500, fallback).nanoseconds(), 10'500);
+  EXPECT_EQ(mapper.Map(1'500, fallback).nanoseconds(), 510'000);
   EXPECT_EQ(mapper.Map(0, fallback).nanoseconds(), fallback.nanoseconds());
 }
 
@@ -197,16 +198,42 @@ TEST(FrameUtils, RejectsMalformedImuPayload) {
   EXPECT_FALSE(error.empty());
 }
 
-/** @brief 验证 `FrameUtils::MapsImuSampleTimeAndFallsBackForInvalidValues` 所覆盖的帧转换行为。 */
+/** @brief 验证 IMU 微秒时间戳映射以及无效值回退。 */
 TEST(FrameUtils, MapsImuSampleTimeAndFallsBackForInvalidValues) {
   TimestampMapper mapper(1'000, 10'000);
   const rclcpp::Time frame_time(static_cast<std::int64_t>(50'000),
                                 RCL_SYSTEM_TIME);
-  EXPECT_EQ(mapper.MapImuSample(1'500, frame_time).nanoseconds(), 10'500);
+  EXPECT_EQ(mapper.MapImuSample(1'500, frame_time).nanoseconds(), 510'000);
   EXPECT_EQ(mapper.MapImuSample(0, frame_time).nanoseconds(),
             frame_time.nanoseconds());
   EXPECT_EQ(mapper.MapImuSample(-1, frame_time).nanoseconds(),
             frame_time.nanoseconds());
+}
+
+/** @brief 验证微秒换算、锚点和 ROS 时间加法溢出时均安全回退。 */
+TEST(FrameUtils, FallsBackWhenMicrosecondTimeMappingOverflows) {
+  const rclcpp::Time fallback(static_cast<std::int64_t>(50'000),
+                              RCL_SYSTEM_TIME);
+  const std::int64_t maximum = std::numeric_limits<std::int64_t>::max();
+
+  TimestampMapper positive_delta_overflow(1, 0);
+  EXPECT_EQ(
+      positive_delta_overflow
+          .Map(static_cast<std::uint64_t>(maximum), fallback)
+          .nanoseconds(),
+      fallback.nanoseconds());
+
+  TimestampMapper negative_delta_overflow(maximum, 0);
+  EXPECT_EQ(negative_delta_overflow.Map(1, fallback).nanoseconds(),
+            fallback.nanoseconds());
+
+  TimestampMapper ros_time_overflow(1'000, maximum - 500);
+  EXPECT_EQ(ros_time_overflow.Map(1'001, fallback).nanoseconds(),
+            fallback.nanoseconds());
+
+  TimestampMapper invalid_anchor(-1, 0);
+  EXPECT_EQ(invalid_anchor.Map(1, fallback).nanoseconds(),
+            fallback.nanoseconds());
 }
 
 /** @brief 验证 `FrameUtils::AcceptsEmptyImuBatchWithoutDiagnostic` 所覆盖的帧转换行为。 */

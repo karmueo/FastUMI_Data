@@ -68,19 +68,20 @@ typedef struct stereo_camera_t stereo_camera_t;
 
 // 帧率描述（实际帧率 = denominator / numerator）
 typedef struct {
-  uint32_t numerator;   // 帧率分子
-  uint32_t denominator; // 帧率分母
+    uint32_t numerator;    // 帧率分子
+    uint32_t denominator;  // 帧率分母
 } stereo_camera_frame_rate_t;
 
 // 格式描述（像素格式 + 分辨率 + 该分辨率下的帧率列表）
 #define STEREO_CAMERA_MAX_FRAME_RATES 32
 typedef struct {
-  uint32_t pixel_format;    // V4L2 FOURCC 像素格式
-  char pixel_format_str[5]; // FOURCC 可读字符串，如 "YUYV"
-  int width;                // 图像宽度
-  int height;               // 图像高度
-  int frame_rate_count;     // frame_rates 数组中的有效帧率数量
-  stereo_camera_frame_rate_t frame_rates[STEREO_CAMERA_MAX_FRAME_RATES]; // 帧率列表
+    uint32_t pixel_format;         // V4L2 FOURCC 像素格式
+    char     pixel_format_str[5];  // FOURCC 可读字符串，如 "YUYV"
+    int      width;                // 图像宽度
+    int      height;               // 图像高度
+    int      frame_rate_count;     // frame_rates 数组中的有效帧率数量
+    stereo_camera_frame_rate_t
+        frame_rates[STEREO_CAMERA_MAX_FRAME_RATES];  // 帧率列表
 } stereo_camera_format_info_t;
 
 // 设备支持的最大格式数量
@@ -88,43 +89,42 @@ typedef struct {
 
 // 设备信息（用于枚举）
 typedef struct {
-  char path[512];     // 设备路径，如 "/dev/video3"
-  char driver[128];   // 驱动名称，如 "uvcvideo"
-  char card[256];     // 设备名称，如 "rk3xxx: UVC Camera"
-  char bus_info[256]; // 总线信息，如 "usb-0000:00:14.0-1"
-  int format_count;   // formats 数组中的有效格式数量
-  stereo_camera_format_info_t formats[STEREO_CAMERA_MAX_FORMATS]; // 支持的格式列表
+    char                        path[512];                           // 设备路径，如 "/dev/video3"
+    char                        driver[128];                         // 驱动名称，如 "uvcvideo"
+    char                        card[256];                           // 设备名称，如 "rk3xxx: UVC Camera"
+    char                        bus_info[256];                       // 总线信息，如 "usb-0000:00:14.0-1"
+    int                         format_count;                        // formats 数组中的有效格式数量
+    stereo_camera_format_info_t formats[STEREO_CAMERA_MAX_FORMATS];  // 支持的格式列表
 } stereo_camera_device_info_t;
 
 // Depth↔RGB 时间匹配状态（来自 Gadget 端 DescInfo.matchState）
 // 仅在 stream_id 为 Depth/ITOF 的帧上有意义
-#define STEREO_MATCH_NONE 0   // 未匹配/启动中
-#define STEREO_MATCH_EXACT 1  // 精确匹配（偏差 ≤ 8ms）
-#define STEREO_MATCH_APPROX 2 // 近似匹配（8ms < 偏差 ≤ Depth半帧间隔）
-#define STEREO_MATCH_STALE 3  // 重复旧数据（本次无新Depth帧）
-#define STEREO_MATCH_LOST 4   // 失锁（偏差超限，Depth数据无效）
+#define STEREO_MATCH_NONE 0    // 未匹配/启动中
+#define STEREO_MATCH_EXACT 1   // 精确匹配（偏差 ≤ 8ms）
+#define STEREO_MATCH_APPROX 2  // 近似匹配（8ms < 偏差 ≤ Depth半帧间隔）
+#define STEREO_MATCH_STALE 3   // 重复旧数据（本次无新Depth帧）
+#define STEREO_MATCH_LOST 4    // 失锁（偏差超限，Depth数据无效）
 
 // 传感器类型枚举（与设备端 SensorMode 一致）
-#define STEREO_SENSOR_UNKNOWN 0 // 未知
-#define STEREO_SENSOR_RGB 1     // RGB
-#define STEREO_SENSOR_ITOF 2    // ITOF
-#define STEREO_SENSOR_DTOF 3    // DTOF
-#define STEREO_SENSOR_IMU 4     // IMU 6 轴传感器
+#define STEREO_SENSOR_UNKNOWN 0  // 未知
+#define STEREO_SENSOR_RGB 1      // RGB
+#define STEREO_SENSOR_ITOF 2     // ITOF
+#define STEREO_SENSOR_DTOF 3     // DTOF
+#define STEREO_SENSOR_IMU 4      // IMU 6 轴传感器
 
 // 解析后的单路流图像数据
 typedef struct {
-  int stream_id;         // 流 ID
-  int width;             // 图像宽度
-  int height;            // 图像高度
-  uint32_t pixel_format; // V4L2 FOURCC 像素格式
-  unsigned char *data; // 图像数据（指向内部缓冲区，在下次 parse_frame 前有效）
-  int data_size;       // 数据长度
-  uint64_t frame_timestamp; // 采集时间戳（纳秒，CLOCK_MONOTONIC，0=无效）
-  int match_state;          // 时间匹配状态（STEREO_MATCH_* 宏值）
-  int sourcetype;           // 传感器类型（STEREO_SENSOR_* 宏值）
-  uint64_t frame_seqidx; // 该流采集帧序号（StreamInfo.frame_seqidx；0=无效）视频流 =
-                         // 设备端采集帧序号 IMU 流 = 块内首样本 ImuData[0].idx（IMU 采集样本计数）
-  uint32_t frame_seq_count; // 本帧携带样本/帧数（视频流=1；IMU=ImuBlockHeader.count）
+    uint64_t       frame_timestamp;  // 采集时间戳（微秒，CLOCK_MONOTONIC，0=无效）
+    uint64_t       frame_seqidx;     // 该流采集帧序号（StreamInfo.frame_seqidx；0=无效）视频流 = 设备端采集帧序号 IMU 流 = 块内首样本 ImuData[0].idx（IMU 采集样本计数）
+    int            stream_id;        // 流 ID
+    int            width;            // 图像宽度
+    int            height;           // 图像高度
+    uint32_t       pixel_format;     // V4L2 FOURCC 像素格式
+    unsigned char *data;             // 图像数据（指向内部缓冲区，在下次 parse_frame 前有效）
+    int            data_size;        // 数据长度
+    int            match_state;      // 时间匹配状态（STEREO_MATCH_* 宏值）
+    int            sourcetype;       // 传感器类型（STEREO_SENSOR_* 宏值）
+    uint32_t       frame_seq_count;  // 本帧携带样本/帧数（视频流=1；IMU=ImuBlockHeader.count）
 } stereo_camera_frame_t;
 
 // ═══ IMU 数据解析说明（Device 端 v2 布局） ═══════════════════
@@ -156,7 +156,7 @@ typedef struct {
 //   - frame->data_size == count * sizeof(stereo_camera_imu_data_t)
 //     （count == 0 时 data 可为空 / data_size 为 0）
 //   - frame->frame_timestamp == 所在 UVC 帧的帧时间戳
-//     （DescInfo.timestamp，纳秒）
+//     （DescInfo.timestamp，微秒）
 //
 // 完整解析示例（遍历本帧全部 IMU 样本）:
 //   stereo_camera_frame_t *frame;
@@ -169,7 +169,7 @@ typedef struct {
 //     for (int i = 0; i < count; i++) {
 //       // 加速度: imu[i].ax/ay/az (m/s²)
 //       // 陀螺仪: imu[i].gx/gy/gz (rad/s)
-//       // 时间戳: imu[i].timestamp (ns, CLOCK_MONOTONIC)
+//       // 时间戳: imu[i].timestamp (us, CLOCK_MONOTONIC)
 //       // 序号:   imu[i].idx
 //     }
 //   }
@@ -178,15 +178,15 @@ typedef struct {
 // sourcetype == STEREO_SENSOR_IMU 识别，解析方式与上方一致。
 STEREO_CAMERA_PACKED_BEGIN
 typedef struct {
-  int64_t timestamp; // 采集时间戳（纳秒，CLOCK_MONOTONIC）
-  float ax;          // 加速度 X (m/s²)
-  float ay;          // 加速度 Y (m/s²)
-  float az;          // 加速度 Z (m/s²)
-  float gx;          // 陀螺仪 X (rad/s)
-  float gy;          // 陀螺仪 Y (rad/s)
-  float gz;          // 陀螺仪 Z (rad/s)
-  int64_t idx;       // 帧序号（设备端 int64 帧计数）
-  int32_t reverve[8];
+    int64_t timestamp;  // 采集时间戳（微秒，CLOCK_MONOTONIC）
+    int64_t idx;        // 帧序号（设备端 int64 帧计数）
+    float   ax;         // 加速度 X (m/s²)
+    float   ay;         // 加速度 Y (m/s²)
+    float   az;         // 加速度 Z (m/s²)
+    float   gx;         // 陀螺仪 X (rad/s)
+    float   gy;         // 陀螺仪 Y (rad/s)
+    float   gz;         // 陀螺仪 Z (rad/s)
+    int32_t reverve[8];
 } STEREO_CAMERA_PACKED_END stereo_camera_imu_data_t;
 
 // ── 设备枚举 ──────────────────────────────────────────
@@ -196,8 +196,9 @@ typedef struct {
 // devices:    输出缓冲区数组，可为 NULL（此时仅返回设备数量）
 // max_count:  devices 数组最大容量
 // 返回值:     系统上发现的设备总数（可能大于 max_count）
-STEREO_CAMERA_API int stereo_camera_enumerate_devices(stereo_camera_device_info_t *devices,
-                                                      int max_count);
+STEREO_CAMERA_API int
+stereo_camera_enumerate_devices(stereo_camera_device_info_t *devices,
+                                int                          max_count);
 
 // ── 相机生命周期 ──────────────────────────────────────
 
@@ -222,16 +223,16 @@ STEREO_CAMERA_API void stereo_camera_close(stereo_camera_t *cam);
 // width, height: 期望的分辨率
 // format: 像素格式字符串，支持 "YUYV", "NV12"
 // 返回 0 表示成功，-1 表示失败
-STEREO_CAMERA_API int stereo_camera_set_format(stereo_camera_t *cam, int width, int height,
-                                               const char *format);
+STEREO_CAMERA_API int stereo_camera_set_format(stereo_camera_t *cam, int width,
+                                               int height, const char *format);
 
 // 获取实际协商后的格式
 // cam: 相机句柄
 // width, height, format: 输出参数，可为 NULL
 // format 缓冲区至少 5 字节
 // 返回 0 表示成功，-1 表示失败
-STEREO_CAMERA_API int stereo_camera_get_format(stereo_camera_t *cam, int *width, int *height,
-                                               char *format_4cc);
+STEREO_CAMERA_API int stereo_camera_get_format(stereo_camera_t *cam, int *width,
+                                               int *height, char *format_4cc);
 
 // ── 流控制 ────────────────────────────────────────────
 
@@ -269,7 +270,8 @@ STEREO_CAMERA_API void stereo_camera_cancel_read(stereo_camera_t *cam);
 //     // frame->frame_timestamp 为该路流的采集时间戳
 //     // frame->match_state 为该帧的时间匹配状态
 //   }
-STEREO_CAMERA_API stereo_camera_frame_t *stereo_camera_parse_frame(stereo_camera_t *cam);
+STEREO_CAMERA_API stereo_camera_frame_t *
+stereo_camera_parse_frame(stereo_camera_t *cam);
 
 // ============================================================================
 // 模块内部日志控制
@@ -289,7 +291,7 @@ STEREO_CAMERA_API stereo_camera_frame_t *stereo_camera_parse_frame(stereo_camera
 STEREO_CAMERA_API void stereo_camera_set_log(int enable, const char *log_path);
 
 #ifdef __cplusplus
-} // extern "C"
+}  // extern "C"
 #endif
 
-#endif // STEREO_CAMERA_H_
+#endif  // STEREO_CAMERA_H_
