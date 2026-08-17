@@ -21,13 +21,6 @@ setup(
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),
         (f"share/{PACKAGE_NAME}/config", glob("config/*.yaml")),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
-        (
-            f"share/{PACKAGE_NAME}/kalibr",
-            [
-                "../../kalibr_ros2.repos",
-                "../../patches/kalibr_ros2-jazzy.patch",
-            ],
-        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

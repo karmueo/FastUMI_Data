@@ -85,7 +85,7 @@ ros2 run fastumi_data annotate_replay \
 默认优先选择唯一的 `/xv_sdk/.../rgb/image`；当包内存在多个 Image（例如调试图像）时，
 使用 `--image-topic /xv_sdk/<serial>/rgb/image` 明确指定。
 
-自动内参：`--camera-config` 省略时会按默认 4 Hz 从 MCAP 抽取 `sensor_msgs/msg/Image`，在独立 Kalibr overlay 中执行 pinhole-equi AprilGrid 标定并发布 `camera_intrinsics.yaml`、TXT、PDF 和日志。`--detect-only` 不需要 Kalibr。Kalibr 缺失、失败或产物非法属于致命失败，`--allow-high-residual` 不会放宽它。
+Tracker–相机完整外参标定必须显式提供 `--camera-config`。`--detect-only` 不需要相机内参。内参生成已经迁移到 `fastumi_camera_calibration` 包，其输出 `camera_intrinsics.yaml` 可直接传给本包。
 
 独立 Kalibr overlay 的可复现命令如下。`FASTUMI_ROOT` 必须替换为 FastUMI checkout 的绝对路径；Kalibr checkout 中的每个 `git apply` 都显式传入补丁路径：
 
@@ -95,11 +95,11 @@ KALIBR_OVERLAY=/absolute/path/to/kalibr_ros2_overlay
 conda deactivate || true
 unset CONDA_PREFIX CONDA_DEFAULT_ENV
 mkdir -p "${KALIBR_OVERLAY}/src"
-vcs import "${KALIBR_OVERLAY}/src" < "${FASTUMI_ROOT}/ros2_ws/kalibr_ros2.repos"
+vcs import "${KALIBR_OVERLAY}/src" < "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/kalibr_ros2.repos"
 cd "${KALIBR_OVERLAY}/src/kalibr_ros2"
 git rev-parse HEAD  # 应为 c79d1b0cf012fed63dcff5ab8c76778e8343190f
-git apply --check "${FASTUMI_ROOT}/ros2_ws/patches/kalibr_ros2-jazzy.patch"
-git apply "${FASTUMI_ROOT}/ros2_ws/patches/kalibr_ros2-jazzy.patch"
+git apply --check "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
+git apply "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
 source /opt/ros/jazzy/setup.bash
 ./build_workspace.sh
 source /opt/ros/jazzy/setup.bash
@@ -109,7 +109,7 @@ python3 -c "import sm, aslam_cv, aslam_backend"
 ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help
 ```
 
-每次使用均按 Jazzy -> Kalibr overlay -> FastUMI 的顺序 source。可通过 `--intrinsics-frequency-hz` 或 `intrinsics.frequency_hz` settings 覆盖 4 Hz。
+每次使用均按 Jazzy -> Kalibr overlay -> FastUMI 的顺序 source。独立内参命令通过 `--frequency-hz` 覆盖默认 4 Hz；本包 settings 不再接受 `intrinsics` 分组。
 Jazzy 兼容补丁同时处理 SuiteSparse 7 的长索引枚举：`IntType<long>` 使用 `CHOLMOD_LONG`，替代已移除的 `CHOLMOD_INTLONG`。
 补丁还为 SPQR 的 `SuiteSparseQR` 显式绑定 `SuiteSparse_long` 索引模板参数并转换列数，解决 SuiteSparse 7 的 `size_t` 模板推导冲突。
 增量标定头文件改为包含 `SuiteSparseQR.hpp`，删除与 SuiteSparse 7 双模板参数定义冲突的旧 SPQR 前置声明。

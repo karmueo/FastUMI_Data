@@ -16,11 +16,8 @@
 - Tracker 里程计：`nav_msgs/msg/Odometry`，标定位姿读取 `Odometry.pose.pose`。
 - Tracker 状态：`fastumi_interfaces/msg/TrackerStatus`，有效状态要求
   `device_connected=true`、`pose_valid=true`、`tracking_state=3`。
-- 相机模型：省略 `--camera-config` 时，工具从 MCAP 的配置图像话题按默认 4 Hz
-  抽取帧，调用独立 Kalibr overlay 生成 `pinhole + equidistant` 内参，并发布
-  `camera_intrinsics.yaml`、结果文本、PDF 报告和日志。显式传入 `--camera-config`
-  时直接加载该 Kalibr `cam0 + pinhole + equidistant` 配置。`--detect-only` 不加载
-  内参或调用 Kalibr。
+- 相机模型：完整标定必须通过 `--camera-config` 显式传入 Kalibr
+  `cam0 + pinhole + equidistant` 或兼容 ToF 配置；`--detect-only` 不加载内参。
 - 标定板：`docs/april_6x6.yaml`，6×6、`tagSize=0.052 m`、
   `tagSpacing=0.3725`、`tag36h11`、ID 0–35。间距比由 2026-07-31 实际板图像的
   66 个跨时段轮廓观测复核，标签边长由 Tracker 米制闭环尺度扫描得到；打印或更换
@@ -85,7 +82,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | 参数名 | 默认值 | 参数说明 |
 | --- | --- | --- |
 | `--bag` | 无（必填） | ROS 2 MCAP/bag 数据路径。预检从其中读取图像。 |
-| `--camera-config` | 空 | 显式路径时直接加载 Kalibr 相机 YAML；省略时按默认 4 Hz 自动运行 Kalibr pinhole-equi。`--detect-only` 不加载或调用 Kalibr。 |
+| `--camera-config` | 空（预检不使用） | 完整标定必须显式指定；`--detect-only` 不加载该文件。 |
 | `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径。 |
 | `--output-dir` | 无（必填） | 检测统计和叠加图的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
@@ -123,6 +120,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 ```bash
 ros2 run fastumi_data calibrate_tracker_camera \
   --bag /path/to/tracker_fisheye_bag \
+  --camera-config /path/to/camera_intrinsics.yaml \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/tracker_camera_$(date +%Y%m%d_%H%M%S)/final \
   --tag-family tag36h11 \
@@ -140,7 +138,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | 参数名 | 默认值 | 参数说明 |
 | --- | --- | --- |
 | `--bag` | 无（必填） | ROS 2 MCAP/bag 数据路径；读取图像、Tracker 位姿和状态。 |
-| `--camera-config` | 空 | 显式路径时直接加载 Kalibr 相机 YAML；省略时按默认 4 Hz 自动运行 Kalibr pinhole-equi。`--detect-only` 不加载或调用 Kalibr。 |
+| `--camera-config` | 无（必填） | 显式加载 Kalibr 或兼容 ToF 鱼眼相机 YAML。 |
 | `--target-config` | 无（必填） | AprilGrid 目标板配置 YAML 路径，提供网格尺寸和标签几何。 |
 | `--output-dir` | 无（必填） | 标定 YAML、质量报告、逐帧指标、诊断图和进度日志的输出目录。 |
 | `--settings-config` | 无 | 可选的标定设置 YAML；用于覆盖分组配置，显式命令行参数优先。 |
@@ -458,8 +456,15 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 该参数可用于 `calibrate_tracker_tcp` paired/pivot 的高残差诊断；Tracker→相机标定也有
 其独立的同名参数。
 
-## 自动 Kalibr 内参
+## 独立 Kalibr 内参
 
-完整外参标定省略 `--camera-config` 时，会从配置的 `sensor_msgs/msg/Image` 话题抽取 header 时间严格递增的图像，默认每秒最多 4 帧，并写入临时 SQLite3 bag。Kalibr 生成的 `camera_intrinsics.yaml`、`camera_intrinsics_results.txt`、`camera_intrinsics_report.pdf` 和 `camera_intrinsics.log` 位于输出目录；YAML 最后发布，作为成功提交标记。`--detect-only` 是例外：它不加载相机内参，也不检查 Kalibr。Kalibr 不可用、返回错误、产物缺失或校验失败会令命令失败，`--allow-high-residual` 仅放宽外参质量门。
+```bash
+ros2 run fastumi_camera_calibration calibrate_camera_intrinsics \
+  --bag /path/to/tracker_fisheye_bag \
+  --target-config docs/april_6x6.yaml \
+  --output-dir dataset/calibration/camera_intrinsics
+```
 
-Kalibr 必须在独立 Jazzy overlay 中构建。先退出 Conda 并清除 Conda 的 `CMAKE_PREFIX_PATH`，从固定提交导入 `ros2_ws/kalibr_ros2.repos` 后，在 Kalibr checkout 执行 `git apply --check /path/to/FastUMI_Data/ros2_ws/patches/kalibr_ros2-jazzy.patch` 和 `git apply`。构建完成依次 source Jazzy、Kalibr overlay、FastUMI，再运行 `python3 -c "import sm, aslam_cv, aslam_backend"` 与 `ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help`。
+相机内参由 `fastumi_camera_calibration` 独立生成。命令从 `sensor_msgs/msg/Image` 话题抽取 header 时间严格递增的图像，默认每秒最多 4 帧，并写入临时 SQLite3 bag。Kalibr 生成的 `camera_intrinsics.yaml`、`camera_intrinsics_results.txt`、`camera_intrinsics_report.pdf` 和 `camera_intrinsics.log` 位于内参输出目录；YAML 最后发布，作为成功提交标记。完整外参标定随后通过 `--camera-config` 使用该 YAML。
+
+Kalibr 必须在独立 Jazzy overlay 中构建。先退出 Conda 并清除 Conda 的 `CMAKE_PREFIX_PATH`，从固定提交导入 `ros2_ws/src/fastumi_camera_calibration/vendor/kalibr_ros2.repos` 后，在 Kalibr checkout 应用 `ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch`。构建完成依次 source Jazzy、Kalibr overlay、FastUMI，再运行 `python3 -c "import sm, aslam_cv, aslam_backend"` 与 `ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help`。

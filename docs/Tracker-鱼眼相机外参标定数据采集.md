@@ -238,4 +238,4 @@ ros2 bag play "${BAG_OUTPUT}" --clock 100
 SLERP 插值。旧版驱动录制的 bag 可能仍包含 `steady_clock` 时间戳，本次修改不会
 自动重写历史数据。
 
-自动内参采集要求：完整标定省略 `--camera-config` 时，MCAP 中的图像话题必须为 `sensor_msgs/msg/Image`，其 header 时间严格递增、分辨率固定且图像中 AprilGrid 清晰可见。工具默认按 4 Hz 抽帧给 Kalibr；`--detect-only` 不执行此步骤。
+独立内参采集要求：先运行 `ros2 run fastumi_camera_calibration calibrate_camera_intrinsics` 生成相机 YAML，再通过 `calibrate_tracker_camera --camera-config` 执行完整外参标定。内参输入话题必须为 `sensor_msgs/msg/Image`，其 header 时间严格递增、分辨率固定且图像中 AprilGrid 清晰可见；默认按 4 Hz 抽帧。`--detect-only` 仍不需要相机内参。

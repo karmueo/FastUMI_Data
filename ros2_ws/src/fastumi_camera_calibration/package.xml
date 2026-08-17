@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- 该文件声明 FastUMI 单鱼眼相机 Kalibr 内参标定包。 -->
+<package format="3">
+  <name>fastumi_camera_calibration</name>
+  <version>0.1.0</version>
+  <description>从 FastUMI MCAP 数据生成单鱼眼相机 Kalibr 内参。</description>
+  <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>kalibr_imu_camera</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <exec_depend>rosbag2_storage_sqlite3</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

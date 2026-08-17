@@ -123,6 +123,14 @@ RGB、iTOF 深度/灰度和原始 IMU 话题，并可选启动 Madgwick 或互�
 详细算法与重新标定方法见
 [`src/fastumi_gripper_estimator/README.md`](src/fastumi_gripper_estimator/README.md)。
 
+### `fastumi_camera_calibration`
+
+该包从 FastUMI MCAP 抽取单个 `sensor_msgs/msg/Image` 话题，在独立 Kalibr
+overlay 中执行固定的 `pinhole-equi` AprilGrid 内参标定，并发布 YAML、TXT、
+PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–相机外参求解
+保持独立。Kalibr 固定版本清单、Jazzy 兼容补丁和详细构建说明由该包维护，见
+[`src/fastumi_camera_calibration/README.md`](src/fastumi_camera_calibration/README.md)。
+
 ### `fastumi_data`
 
 该包是 FastUMI 数据链路的编排与离线处理中心，主要命令包括：
@@ -203,9 +211,19 @@ colcon test-result --all --verbose
 构建、测试和运行节点前都应先加载 ROS 2 环境；构建完成后还需加载
 `install/setup.bash`。
 
-## 可选 Kalibr 自动内参 overlay
+## 独立 Kalibr 相机内参标定
 
-省略 `calibrate_tracker_camera --camera-config` 时，工具会将配置的 `sensor_msgs/msg/Image` 话题以默认 4 Hz 抽取为临时 SQLite3 bag，并调用独立 Kalibr overlay 生成 `camera_intrinsics.yaml`、TXT、PDF 和日志。`--detect-only` 不加载相机内参，也不会检查或调用 Kalibr。Kalibr 缺失、运行失败或产物校验失败属于致命失败，`--allow-high-residual` 不会将其改为成功。
+`calibrate_tracker_camera` 的完整外参标定必须显式传入 `--camera-config`；`--detect-only` 仍不加载相机内参。需要生成内参时，先运行独立包 `fastumi_camera_calibration`，再把生成的 `camera_intrinsics.yaml` 传给外参命令。独立命令从 MCAP 默认按 4 Hz 抽取 `sensor_msgs/msg/Image`，调用 Kalibr overlay 并发布 YAML、TXT、PDF 和日志。
+
+
+先执行内参标定：
+
+```bash
+ros2 run fastumi_camera_calibration calibrate_camera_intrinsics \
+  --bag /path/to/session \
+  --target-config /path/to/aprilgrid.yaml \
+  --output-dir /path/to/intrinsics
+```
 
 构建 Kalibr 前请退出 Conda，并清除 `CMAKE_PREFIX_PATH`、`PYTHONPATH` 中的 Conda 条目。以下命令从任意目录均可顺序执行。Kalibr overlay 共有 34 个包，必须独立于 FastUMI 的 `ros2_ws/src`：
 
@@ -216,11 +234,11 @@ conda deactivate || true
 unset CONDA_PREFIX CONDA_DEFAULT_ENV
 export CMAKE_PREFIX_PATH="$(printf "%s" "${CMAKE_PREFIX_PATH:-}" | tr : "\n" | grep -v -i conda | paste -sd: -)"
 mkdir -p "${KALIBR_OVERLAY}/src"
-vcs import "${KALIBR_OVERLAY}/src" < "${FASTUMI_ROOT}/ros2_ws/kalibr_ros2.repos"
+vcs import "${KALIBR_OVERLAY}/src" < "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/kalibr_ros2.repos"
 cd "${KALIBR_OVERLAY}/src/kalibr_ros2"
 git rev-parse HEAD  # 应为 c79d1b0cf012fed63dcff5ab8c76778e8343190f
-git apply --check "${FASTUMI_ROOT}/ros2_ws/patches/kalibr_ros2-jazzy.patch"
-git apply "${FASTUMI_ROOT}/ros2_ws/patches/kalibr_ros2-jazzy.patch"
+git apply --check "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
+git apply "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
 # 需要重建时，仅清理 checkout 自身的构建产物。
 rm -rf "${KALIBR_OVERLAY}/src/kalibr_ros2/build" "${KALIBR_OVERLAY}/src/kalibr_ros2/install" "${KALIBR_OVERLAY}/src/kalibr_ros2/log"
 source /opt/ros/jazzy/setup.bash
@@ -233,7 +251,7 @@ python3 -c "import sm, aslam_cv, aslam_backend"
 ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help
 ```
 
-运行时可用 `--intrinsics-frequency-hz 4.0` 覆盖默认值，或在 settings YAML 中使用 `intrinsics: {frequency_hz: 4.0}`。
+独立内参命令使用 `--frequency-hz 4.0` 覆盖默认抽帧频率；Tracker–相机 settings 不再接受 `intrinsics` 分组。
 
 Jazzy 兼容补丁还将 SuiteSparse 7 中移除的 `CHOLMOD_INTLONG` 替换为 `CHOLMOD_LONG`；该枚举与 `IntType<long>` 的 `long` 型 `p/i` 稀疏索引数组匹配。
 补丁也为 SuiteSparse 7 的 SPQR `SuiteSparseQR` 显式指定 `SuiteSparse_long` 索引模板参数，并将 `qrJ->ncol` 转为该类型，避免 `size_t` 与 long 输出指针的模板推导冲突。

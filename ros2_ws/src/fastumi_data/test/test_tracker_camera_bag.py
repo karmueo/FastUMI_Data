@@ -9,11 +9,10 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 import numpy as np
 import pytest
-from rclpy.serialization import deserialize_message, serialize_message
+from rclpy.serialization import serialize_message
 import rosbag2_py
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
 
 from fastumi_data.models import PoseSample, TrackerStatusSample
 from fastumi_data.tracker_camera_bag import (
@@ -24,8 +23,6 @@ from fastumi_data.tracker_camera_bag import (
     read_tracker_timeline,
     tracker_status_valid_at,
 )
-
-from fastumi_data.tracker_camera_intrinsics import extract_image_topic_to_sqlite3
 
 class FakeBridge:
     """在单元测试中返回固定数组，避免依赖真实图像编码转换。"""
@@ -233,91 +230,3 @@ def test_reader_rejects_non_odometry_tracker_topic(tmp_path: Path) -> None:
     write_test_bag(bag_path, "geometry_msgs/msg/PoseStamped")
     with pytest.raises(ValueError, match="必须使用 nav_msgs/msg/Odometry"):
         read_tracker_timeline(str(bag_path))
-
-
-def write_intrinsics_source_bag(
-    path: Path, timestamps: tuple[int, ...], message_type: str = "sensor_msgs/msg/Image",
-) -> list[tuple[bytes, int]]:
-    """写入自动内参抽取所需的图像和无关话题 MCAP。"""
-    writer = rosbag2_py.SequentialWriter()
-    writer.open(
-        rosbag2_py.StorageOptions(uri=str(path), storage_id="mcap"),
-        rosbag2_py.ConverterOptions("", ""),
-    )
-    write_topic(writer, 0, "/camera/image", message_type)
-    write_topic(writer, 1, "/unrelated", "std_msgs/msg/String")
-    records = []
-    for index, timestamp_ns in enumerate(timestamps):
-        image = Image()
-        image.header.stamp = make_stamp(timestamp_ns)
-        image.width = 4
-        image.height = 3
-        image.encoding = "bgr8"
-        image.step = 12
-        image.data = bytes([index]) * 36
-        serialized = serialize_message(image)
-        bag_timestamp_ns = 9_000_000_000 + index
-        writer.write("/camera/image", serialized, bag_timestamp_ns)
-        writer.write("/unrelated", serialize_message(String(data=str(index))), bag_timestamp_ns + 100)
-        records.append((serialized, bag_timestamp_ns))
-    del writer
-    return records
-
-
-def read_sqlite_image_records(path: Path) -> list[tuple[bytes, int]]:
-    """读取抽取的 SQLite3 bag，以验证未重序列化的 CDR 和写入时间。"""
-    reader = rosbag2_py.SequentialReader()
-    reader.open(
-        rosbag2_py.StorageOptions(uri=str(path), storage_id="sqlite3"),
-        rosbag2_py.ConverterOptions("", ""),
-    )
-    assert [item.name for item in reader.get_all_topics_and_types()] == ["/camera/image"]
-    records = []
-    while reader.has_next():
-        topic, serialized, timestamp_ns = reader.read_next()
-        assert topic == "/camera/image"
-        records.append((serialized, timestamp_ns))
-    return records
-
-
-def test_intrinsics_extraction_preserves_raw_cdr_timestamps_and_header_sampling(
-    tmp_path: Path,
-) -> None:
-    """4 Hz 抽取应按 header 阈值选帧，保留原始 CDR 与 bag 时间。"""
-    source = tmp_path / "source"
-    headers = (0, 249_000_000, 250_000_000, 500_000_000)
-    records = write_intrinsics_source_bag(source, headers)
-    extracted = extract_image_topic_to_sqlite3(source, "/camera/image", tmp_path / "sqlite", 4.0)
-    selected = read_sqlite_image_records(extracted.bag_uri)
-    assert extracted.frame_count == 3
-    assert extracted.resolution == (4, 3)
-    assert selected == [records[index] for index in (0, 2, 3)]
-    message_type = __import__("rosidl_runtime_py.utilities", fromlist=["get_message"]).get_message("sensor_msgs/msg/Image")
-    assert [deserialize_message(raw, message_type).header.stamp.nanosec for raw, _ in selected] == [0, 250_000_000, 500_000_000]
-
-
-def test_intrinsics_extraction_honors_header_end_boundary(tmp_path: Path) -> None:
-    """sample_end_offset_s 应包含边界且排除其后帧。"""
-    source = tmp_path / "source"
-    records = write_intrinsics_source_bag(source, (0, 250_000_000, 500_000_000))
-    extracted = extract_image_topic_to_sqlite3(source, "/camera/image", tmp_path / "sqlite", 4.0, 0.25)
-    assert read_sqlite_image_records(extracted.bag_uri) == records[:2]
-
-
-def test_intrinsics_extraction_rejects_wrong_type_nonmonotonic_and_empty(tmp_path: Path) -> None:
-    """类型错误、header 乱序和空图像话题必须清晰失败。"""
-    wrong = tmp_path / "wrong"
-    write_intrinsics_source_bag(wrong, (0,), "geometry_msgs/msg/PoseStamped")
-    with pytest.raises(ValueError, match="必须使用"):
-        extract_image_topic_to_sqlite3(wrong, "/camera/image", tmp_path / "wrong_sql", 4.0)
-    unordered = tmp_path / "unordered"
-    write_intrinsics_source_bag(unordered, (100, 99))
-    with pytest.raises(ValueError, match="严格递增"):
-        extract_image_topic_to_sqlite3(unordered, "/camera/image", tmp_path / "unordered_sql", 4.0)
-    empty = tmp_path / "empty"
-    writer = rosbag2_py.SequentialWriter()
-    writer.open(rosbag2_py.StorageOptions(uri=str(empty), storage_id="mcap"), rosbag2_py.ConverterOptions("", ""))
-    write_topic(writer, 0, "/camera/image", "sensor_msgs/msg/Image")
-    del writer
-    with pytest.raises(ValueError, match="没有可用于"):
-        extract_image_topic_to_sqlite3(empty, "/camera/image", tmp_path / "empty_sql", 4.0)

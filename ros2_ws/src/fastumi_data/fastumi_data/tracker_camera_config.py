@@ -133,7 +133,6 @@ class CalibrationSettings:
     validation_p95_max_px: float = 2.0
     closure_translation_max_mm: float = 5.0
     closure_rotation_max_deg: float = 1.0
-    intrinsics_frequency_hz: float = 4.0
 
     def __post_init__(self) -> None:
         """拒绝会导致空采样或无效搜索区间的运行参数。"""
@@ -160,8 +159,6 @@ class CalibrationSettings:
         )
         if any(not np.isfinite(value) or value <= 0.0 for value in quality_limits):
             raise ValueError("质量门限必须为有限正数")
-        if not np.isfinite(self.intrinsics_frequency_hz) or self.intrinsics_frequency_hz <= 0.0:
-            raise ValueError("intrinsics_frequency_hz 必须为有限正数")
 
 
 def default_camera_config_path() -> str:
