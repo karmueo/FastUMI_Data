@@ -145,6 +145,7 @@ ros2 bag record \
   /xv_sdk/${DEVICE_SERIAL}/rgb/image \
   /xv_sdk/${DEVICE_SERIAL}/rgb/camera_info \
   /vive_tracker/odom \
+  /vive_tracker/pose \
   /vive_tracker/status \
   /tf_static
 ```
@@ -162,6 +163,7 @@ ros2 bag record \
   --topics \
   /tof_stereo_camera/rgb/image_raw \
   /vive_tracker/odom \
+  /vive_tracker/pose \
   /vive_tracker/status \
   /tf_static
 ```
