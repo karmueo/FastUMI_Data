@@ -69,6 +69,7 @@ class ReportContext:
     status_topic: str
     tag_family: str
     settings_snapshot: Mapping[str, Any]
+    camera_provenance: Mapping[str, Any] | None = None
     thresholds: QualityThresholds = QualityThresholds()
     frame_metrics: tuple[Mapping[str, Any], ...] = ()
     overlay_samples: tuple[OverlaySample, ...] = ()
@@ -382,6 +383,7 @@ def write_calibration_report(
                 "path": str(context.camera_config_path),
                 "sha256": _sha256_path(context.camera_config_path),
             },
+            "camera_provenance": dict(context.camera_provenance or {}),
             "target_config": {
                 "path": str(context.target_config_path),
                 "sha256": _sha256_path(context.target_config_path),

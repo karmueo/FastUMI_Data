@@ -1,0 +1,5 @@
+repositories:
+  kalibr_ros2:
+    type: git
+    url: https://github.com/yuhang0131/kalibr_ros2.git
+    version: c79d1b0cf012fed63dcff5ab8c76778e8343190f

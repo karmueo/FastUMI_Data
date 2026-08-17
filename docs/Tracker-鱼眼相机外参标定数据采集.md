@@ -237,3 +237,5 @@ ros2 bag play "${BAG_OUTPUT}" --clock 100
 同步基准，在相邻 `/vive_tracker/odom` 的 `pose.pose` 之间对平移做线性插值、对四元数做
 SLERP 插值。旧版驱动录制的 bag 可能仍包含 `steady_clock` 时间戳，本次修改不会
 自动重写历史数据。
+
+自动内参采集要求：完整标定省略 `--camera-config` 时，MCAP 中的图像话题必须为 `sensor_msgs/msg/Image`，其 header 时间严格递增、分辨率固定且图像中 AprilGrid 清晰可见。工具默认按 4 Hz 抽帧给 Kalibr；`--detect-only` 不执行此步骤。

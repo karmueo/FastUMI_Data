@@ -236,3 +236,27 @@ def test_report_without_matplotlib_keeps_text_outputs(
     assert paths["summary"].exists()
     assert "time_offset_plot" not in paths
     assert "缺少 Matplotlib" in paths["summary"].read_text(encoding="utf-8")
+
+
+def test_report_records_provided_and_kalibr_camera_provenance(tmp_path: Path) -> None:
+    """报告应原样保留显式和自动内参的路径、哈希与命令溯源。"""
+    base = make_report_context(tmp_path)
+    provided = ReportContext(
+        **{**base.__dict__, "camera_provenance": {
+            "source": "provided", "path": str(base.camera_config_path), "sha256": "provided-hash",
+        }}
+    )
+    paths = write_calibration_report(tmp_path / "provided", make_passing_optimization_result(), provided)
+    document = yaml.safe_load(paths["calibration"].read_text(encoding="utf-8"))
+    assert document["inputs"]["camera_provenance"] == provided.camera_provenance
+    auto_provenance = {
+        "source": "kalibr_ros2", "frequency_hz": 4.0, "selected_frame_count": 12,
+        "command_argv": ["ros2", "run", "kalibr_imu_camera"],
+        "artifacts": {"yaml": {"path": str(base.camera_config_path), "sha256": "yaml-hash"}},
+        "final_yaml_sha256": "yaml-hash",
+    }
+    automatic = ReportContext(**{**base.__dict__, "camera_provenance": auto_provenance})
+    paths = write_calibration_report(tmp_path / "automatic", make_passing_optimization_result(), automatic)
+    document = yaml.safe_load(paths["calibration"].read_text(encoding="utf-8"))
+    assert document["inputs"]["camera_provenance"]["artifacts"]["yaml"]["sha256"] == "yaml-hash"
+    assert document["inputs"]["camera_provenance"]["command_argv"][2] == "kalibr_imu_camera"

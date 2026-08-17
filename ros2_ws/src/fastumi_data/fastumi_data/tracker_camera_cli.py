@@ -6,6 +6,7 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass
 import json
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import warnings
@@ -25,9 +26,21 @@ from fastumi_data.tracker_camera_bag import (
 )
 from fastumi_data.tracker_camera_config import (
     CalibrationSettings,
-    default_camera_config_path,
     load_aprilgrid,
     load_kalibr_camera,
+)
+from fastumi_data.tracker_camera_intrinsics import (
+    IntrinsicCalibrationError,
+    build_kalibr_command,
+    extract_image_topic_to_sqlite3,
+    kalibr_provenance,
+    kalibr_compatibility_patch_path,
+    publish_kalibr_artifacts,
+    publish_kalibr_log,
+    resolve_kalibr_package_prefix,
+    run_kalibr,
+    sha256_path,
+    validate_kalibr_artifacts,
 )
 from fastumi_data.tracker_camera_detection import (
     DetectionRejected,
@@ -68,6 +81,7 @@ class PipelineOutcome:
 
     accepted: bool
     output_paths: dict[str, Path]
+    fatal: bool = False
 
 
 class _OptimizationProgressAdapter:
@@ -151,12 +165,14 @@ def _write_failure_summary(
     stage: str,
     failure: str,
     counters: Mapping[str, int] | None = None,
+    fatal: bool = False,
 ) -> PipelineOutcome:
     """保存流水线中止阶段、原因和计数，供补采与自动化诊断。"""
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     summary = {
         "accepted": False,
+        "fatal": fatal,
         "stage": stage,
         "failure": failure,
         "counters": dict(counters or {}),
@@ -167,7 +183,7 @@ def _write_failure_summary(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    return PipelineOutcome(False, {"summary": summary_path})
+    return PipelineOutcome(False, {"summary": summary_path}, fatal=fatal)
 
 
 def _attach_progress_log(
@@ -177,6 +193,7 @@ def _attach_progress_log(
     return PipelineOutcome(
         outcome.accepted,
         {**outcome.output_paths, "calibration_log": progress.log_path},
+        fatal=outcome.fatal,
     )
 
 
@@ -186,12 +203,14 @@ def _logged_failure(
     stage: str,
     failure: str,
     counters: Mapping[str, int] | None = None,
+    fatal: bool = False,
 ) -> PipelineOutcome:
     """记录失败阶段并生成带日志路径的结构化失败结果。"""
     progress.start_stage(stage, f"开始检查阶段 {stage}")
     progress.fail(failure)
     return _attach_progress_log(
-        _write_failure_summary(output_dir, stage, failure, counters), progress
+        _write_failure_summary(output_dir, stage, failure, counters, fatal),
+        progress,
     )
 
 
@@ -213,6 +232,7 @@ SETTING_GROUPS = {
         "time_offset_max_ms": "time_offset_max_ms",
         "time_offset_step_ms": "time_offset_step_ms",
     },
+    "intrinsics": {"frequency_hz": "intrinsics_frequency_hz"},
     "quality": {
         "minimum_valid_frames": "minimum_valid_frames",
         "validation_median_max_px": "validation_median_max_px",
@@ -254,13 +274,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bag", required=True)
     parser.add_argument(
         "--camera-config",
-        default=default_camera_config_path(),
-        help="ToF RGB 或 Kalibr 鱼眼相机标定 YAML 路径",
+        default=None,
+        help="显式 Kalibr 鱼眼相机标定 YAML；省略时自动运行 Kalibr",
     )
     parser.add_argument("--target-config", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--settings-config")
     parser.add_argument("--image-topic", default=defaults.image_topic)
+    parser.add_argument(
+        "--intrinsics-frequency-hz", type=_finite_positive_float,
+        default=defaults.intrinsics_frequency_hz,
+    )
     parser.add_argument("--tracker-topic", default=defaults.tracker_topic)
     parser.add_argument("--status-topic", default=defaults.status_topic)
     parser.add_argument("--tag-family", default=defaults.tag_family)
@@ -356,6 +380,11 @@ def apply_settings_file(
                         raise ValueError(
                             f"设置 filtering.{key} {error}"
                         ) from error
+                if attribute == "intrinsics_frequency_hz":
+                    try:
+                        value = _finite_positive_float(value)
+                    except argparse.ArgumentTypeError as error:
+                        raise ValueError(f"设置 intrinsics.{key} {error}") from error
                 setattr(arguments, attribute, value)
     return arguments
 
@@ -686,6 +715,51 @@ def _diagnostics(result: Any, samples: Sequence[Any], estimates: Sequence[Any],
     return tuple(rows), tuple(overlays)
 
 
+def _calibrate_automatic_camera(arguments: argparse.Namespace) -> tuple[Any, dict[str, Any]]:
+    """在临时 SQLite3 bag 中运行 Kalibr，并在成功后返回已发布内参。"""
+    output_dir = Path(arguments.output_dir)
+    commit_marker = output_dir / "camera_intrinsics.yaml"
+    log_marker = output_dir / "camera_intrinsics.log"
+    commit_marker.unlink(missing_ok=True)
+    log_marker.unlink(missing_ok=True)
+    package_prefix = resolve_kalibr_package_prefix()
+    patch_path = kalibr_compatibility_patch_path()
+    expected_patch_sha256 = sha256_path(patch_path)
+    with tempfile.TemporaryDirectory(prefix="fastumi-kalibr-") as temporary:
+        temporary_root = Path(temporary)
+        staging = temporary_root / "staging"
+        staging.mkdir()
+        log_path = staging / "kalibr.log"
+        try:
+            # Kalibr 以 staging 为工作目录，目标板配置必须在切换目录前绝对化。
+            target_config = Path(arguments.target_config).resolve(strict=True)
+            extracted = extract_image_topic_to_sqlite3(
+                arguments.bag, arguments.image_topic,
+                staging / "images.sqlite3",
+                arguments.intrinsics_frequency_hz, arguments.sample_end_offset_s,
+            )
+            command = build_kalibr_command(
+                extracted.bag_uri, arguments.image_topic, target_config
+            )
+            run_kalibr(command, staging, log_path)
+            artifacts = validate_kalibr_artifacts(
+                staging, log_path, arguments.image_topic, extracted.resolution
+            )
+            published = publish_kalibr_artifacts(artifacts, arguments.output_dir)
+            camera = load_kalibr_camera(str(published.yaml_path))
+            return camera, kalibr_provenance(
+                published, arguments.intrinsics_frequency_hz, extracted.frame_count,
+                command, package_prefix, expected_patch_sha256,
+            )
+        except IntrinsicCalibrationError as error:
+            source_log = error.log_path if error.log_path and error.log_path.is_file() else log_path
+            retained_log = publish_kalibr_log(source_log, arguments.output_dir)
+            raise IntrinsicCalibrationError(str(error), retained_log) from error
+        except (OSError, RuntimeError, ValueError) as error:
+            retained_log = publish_kalibr_log(log_path, arguments.output_dir)
+            raise IntrinsicCalibrationError(str(error), retained_log) from error
+
+
 def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
     """执行检测预检或完整 Tracker–鱼眼相机标定流水线。"""
     with CalibrationProgressLogger(
@@ -699,7 +773,6 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            camera = load_kalibr_camera(arguments.camera_config)
             target = load_aprilgrid(
                 arguments.target_config, arguments.tag_family
             )
@@ -710,6 +783,17 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                     _run_detection_only(arguments, detector, target, progress),
                     progress,
                 )
+            if arguments.camera_config:
+                camera = load_kalibr_camera(arguments.camera_config)
+                camera_provenance = {
+                    "source": "provided",
+                    "path": str(arguments.camera_config),
+                    "sha256": sha256_path(arguments.camera_config),
+                }
+            else:
+                progress.start_stage("intrinsic_calibration", "开始 Kalibr 自动鱼眼内参标定")
+                camera, camera_provenance = _calibrate_automatic_camera(arguments)
+                progress.finish_stage("Kalibr 自动内参标定完成")
             timeline = read_tracker_timeline(
                 arguments.bag, arguments.tracker_topic,
                 arguments.status_topic,
@@ -723,6 +807,15 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                     arguments, detector, target, camera, timeline, progress
                 )
             )
+        except IntrinsicCalibrationError as error:
+            paths = {}
+            if error.log_path is not None and error.log_path.exists():
+                paths["camera_intrinsics_log"] = error.log_path
+            outcome = _logged_failure(
+                progress, arguments.output_dir, "intrinsic_calibration", str(error),
+                fatal=True,
+            )
+            return PipelineOutcome(False, {**outcome.output_paths, **paths}, fatal=True)
         except DetectionRejected as error:
             return _logged_failure(
                 progress,
@@ -796,8 +889,13 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
             arguments.max_pose_gap_ms,
         )
         thresholds = _thresholds(arguments)
+        camera_config_path = (
+            Path(camera_provenance["artifacts"]["yaml"]["path"])
+            if camera_provenance["source"] == "kalibr_ros2"
+            else Path(arguments.camera_config)
+        )
         context = ReportContext(
-            Path(arguments.bag), Path(arguments.camera_config),
+            Path(arguments.bag), camera_config_path,
             Path(arguments.target_config), arguments.image_topic,
             arguments.tracker_topic, arguments.status_topic,
             arguments.tag_family,
@@ -812,7 +910,9 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                 "progress_interval_seconds": (
                     arguments.progress_interval_seconds
                 ),
+                "intrinsics_frequency_hz": arguments.intrinsics_frequency_hz,
             },
+            camera_provenance,
             thresholds, frame_metrics, overlays,
             (f"阶段计数: {json.dumps(counters, ensure_ascii=False)}",),
         )
@@ -837,7 +937,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_argument_parser()
     arguments = apply_settings_file(parser.parse_args(argv), parser)
     outcome = run_calibration(arguments)
-    if not outcome.accepted and not arguments.allow_high_residual:
+    if outcome.fatal or (not outcome.accepted and not arguments.allow_high_residual):
         raise SystemExit(2)
 
 

@@ -1,6 +1,8 @@
 """验证 Tracker–鱼眼标定 CLI 参数、设置覆盖和退出码。"""
 
 import argparse
+import shutil
+import tempfile
 from io import StringIO
 import json
 from pathlib import Path
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import fastumi_data.tracker_camera_cli as cli_module
 from fastumi_data.tracker_camera_bag import ImageFrame
 from fastumi_data.tracker_camera_config import AprilGridSpec
 from fastumi_data.tracker_camera_cli import (
@@ -55,8 +58,8 @@ def test_parser_defaults_match_target_bag_topics() -> None:
     assert arguments.progress_interval_seconds == pytest.approx(30.0)
 
 
-def test_parser_defaults_to_tof_camera_calibration() -> None:
-    """省略相机配置时应读取 ToF 包内默认标定。"""
+def test_parser_omitted_camera_config_enables_automatic_intrinsics() -> None:
+    """省略相机配置时应请求自动 Kalibr 内参标定。"""
     arguments = build_argument_parser().parse_args(
         [
             "--bag",
@@ -67,10 +70,8 @@ def test_parser_defaults_to_tof_camera_calibration() -> None:
             "/tmp/result",
         ]
     )
-    camera_path = Path(arguments.camera_config)
-    assert camera_path.name == "calibration.yaml"
-    assert camera_path.parent.name == "config"
-    assert camera_path.parent.parent.name == "tof_stereo_camera"
+    assert arguments.camera_config is None
+    assert arguments.intrinsics_frequency_hz == pytest.approx(4.0)
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
@@ -119,6 +120,8 @@ def test_settings_file_overrides_defaults_but_cli_wins(tmp_path: Path) -> None:
     settings_path.write_text(
         """topics:
   image: /configured/rgb/image
+intrinsics:
+  frequency_hz: 3.0
 filtering:
   frame_stride: 4
   min_tags: 8
@@ -145,6 +148,7 @@ optimization:
     assert merged.min_tags == 10
     assert merged.sample_end_offset_s == pytest.approx(90.0)
     assert merged.time_offset_min_ms == pytest.approx(-40.0)
+    assert merged.intrinsics_frequency_hz == pytest.approx(3.0)
 
 
 def test_settings_file_converts_sample_end_offset_string(
@@ -290,6 +294,7 @@ def test_full_mode_insufficient_frames_writes_failure_summary(
         "fastumi_data.tracker_camera_cli.load_kalibr_camera",
         lambda path: SimpleNamespace(),
     )
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.sha256_path", lambda path: "test-hash")
     monkeypatch.setattr(
         "fastumi_data.tracker_camera_cli.load_aprilgrid",
         lambda path, family: AprilGridSpec(6, 6, 0.055, 0.3, family),
@@ -484,3 +489,204 @@ def test_optimization_progress_adapter_reports_exact_and_upper_bound_eta(
     assert "保守上限 ETA" in output
     assert "nfev=20" in output
     assert "status=COMPLETED" in output
+
+
+def test_main_fatal_outcome_ignores_allow_high_residual(monkeypatch) -> None:
+    """自动内参致命失败必须始终让主程序返回 2。"""
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.run_calibration",
+        lambda arguments: PipelineOutcome(False, {}, fatal=True),
+    )
+    with pytest.raises(SystemExit) as error:
+        main(minimum_arguments(["--allow-high-residual"]))
+    assert error.value.code == 2
+
+
+def test_explicit_camera_config_bypasses_automatic_calibration(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """显式内参配置不能触发自动 Kalibr。"""
+    config = tmp_path / "camera.yaml"
+    config.write_text("camera: test\n", encoding="utf-8")
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.load_kalibr_camera", lambda path: SimpleNamespace())
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.load_aprilgrid", lambda *args: SimpleNamespace())
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.OpenCvAprilTagDetector", lambda *args: SimpleNamespace())
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli._calibrate_automatic_camera", lambda *args: (_ for _ in ()).throw(AssertionError("automatic")))
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.read_tracker_timeline", lambda *args: SimpleNamespace(poses=(), statuses=()))
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli._collect_samples", lambda *args: ([], [], [], {}, {}))
+    arguments = build_argument_parser().parse_args(
+        ["--bag", "bag", "--camera-config", str(config), "--target-config", "target", "--output-dir", str(tmp_path / "out")]
+    )
+    assert run_calibration(arguments).accepted is False
+
+
+def test_detect_only_bypasses_camera_loading_and_automatic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """detect-only 在显式或自动内参分支前返回。"""
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.load_kalibr_camera", lambda *args: (_ for _ in ()).throw(AssertionError("camera")))
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli._calibrate_automatic_camera", lambda *args: (_ for _ in ()).throw(AssertionError("automatic")))
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.load_aprilgrid", lambda *args: SimpleNamespace())
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.OpenCvAprilTagDetector", lambda *args: SimpleNamespace())
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli._run_detection_only", lambda *args: PipelineOutcome(True, {}))
+    arguments = build_argument_parser().parse_args(
+        ["--bag", "bag", "--target-config", "target", "--output-dir", str(tmp_path / "out"), "--detect-only"]
+    )
+    assert run_calibration(arguments).accepted is True
+
+
+@pytest.mark.parametrize("storage_error", [ValueError, RuntimeError])
+def test_automatic_failure_invalidates_marker_and_is_structured(
+    tmp_path: Path, monkeypatch, storage_error
+) -> None:
+    """自动抽取存储失败应删除旧标记并返回结构化致命摘要。"""
+    marker = tmp_path / "out" / "camera_intrinsics.yaml"
+    marker.parent.mkdir()
+    marker.write_text("stale\n", encoding="utf-8")
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.resolve_kalibr_package_prefix", lambda: "/overlay")
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.extract_image_topic_to_sqlite3",
+        lambda *args: (_ for _ in ()).throw(storage_error("extract failed")),
+    )
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.load_aprilgrid", lambda *args: SimpleNamespace())
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.OpenCvAprilTagDetector", lambda *args: SimpleNamespace())
+    arguments = build_argument_parser().parse_args(
+        ["--bag", "bag", "--target-config", "target", "--output-dir", str(marker.parent)]
+    )
+    outcome = run_calibration(arguments)
+    assert outcome.fatal is True
+    assert not marker.exists()
+    assert json.loads((marker.parent / "summary.json").read_text(encoding="utf-8"))["stage"] == "intrinsic_calibration"
+
+
+def test_automatic_helper_cleans_tempdir_after_extraction_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """自动内参失败后应删除临时 SQLite3/staging 根目录并失效旧 YAML。"""
+    target = tmp_path / "target.yaml"
+    target.write_text("target_type: aprilgrid\n", encoding="utf-8")
+    roots = []
+    class TrackingTemporaryDirectory:
+        def __init__(self, **kwargs):
+            self.path = Path(tempfile.mkdtemp(dir=tmp_path))
+            roots.append(self.path)
+        def __enter__(self):
+            return str(self.path)
+        def __exit__(self, *args):
+            shutil.rmtree(self.path)
+    marker = tmp_path / "out" / "camera_intrinsics.yaml"
+    marker.parent.mkdir()
+    marker.write_text("old\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module.tempfile, "TemporaryDirectory", TrackingTemporaryDirectory)
+    monkeypatch.setattr(cli_module, "resolve_kalibr_package_prefix", lambda: "/overlay")
+    monkeypatch.setattr(cli_module, "extract_image_topic_to_sqlite3", lambda *args: (_ for _ in ()).throw(ValueError("bad bag")))
+    arguments = SimpleNamespace(
+        output_dir=str(marker.parent), bag="bag", image_topic="/camera/image",
+        intrinsics_frequency_hz=4.0, sample_end_offset_s=None, target_config=str(target),
+    )
+    with pytest.raises(Exception, match="bad bag"):
+        cli_module._calibrate_automatic_camera(arguments)
+    assert not marker.exists()
+    assert roots and not roots[0].exists()
+
+
+def test_automatic_helper_persists_kalibr_failure_log_after_cleanup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Kalibr 非零失败日志必须在临时目录销毁后留在输出目录。"""
+    output = tmp_path / "out"
+    target = tmp_path / "target.yaml"
+    target.write_text("target_type: aprilgrid\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "resolve_kalibr_package_prefix", lambda: "/overlay")
+    monkeypatch.setattr(
+        cli_module, "extract_image_topic_to_sqlite3",
+        lambda *args: SimpleNamespace(bag_uri=tmp_path / "images", resolution=(4, 3), frame_count=2),
+    )
+    def fail_kalibr(command, staging, log_path):
+        Path(log_path).write_text("argv: ros2 run kalibr\nexit_status: 9\n", encoding="utf-8")
+        raise cli_module.IntrinsicCalibrationError("Kalibr 返回非零退出码 9", Path(log_path))
+    monkeypatch.setattr(cli_module, "run_kalibr", fail_kalibr)
+    arguments = SimpleNamespace(
+        output_dir=str(output), bag="bag", image_topic="/camera/image",
+        intrinsics_frequency_hz=4.0, sample_end_offset_s=None, target_config=str(target),
+    )
+    with pytest.raises(cli_module.IntrinsicCalibrationError) as error:
+        cli_module._calibrate_automatic_camera(arguments)
+    assert error.value.log_path == output / "camera_intrinsics.log"
+    assert error.value.log_path.exists()
+    assert "argv: ros2 run kalibr" in error.value.log_path.read_text(encoding="utf-8")
+    assert "exit_status: 9" in error.value.log_path.read_text(encoding="utf-8")
+
+
+def test_automatic_helper_publishes_runner_named_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """自动流程应从与临时 bag 同目录的 Kalibr 固定命名产物发布最终内参。"""
+    output = tmp_path / "out"
+    target = tmp_path / "target.yaml"
+    target.write_text("target_type: aprilgrid\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "resolve_kalibr_package_prefix", lambda: "/overlay")
+    def fake_extract(*args):
+        bag_path = Path(args[2])
+        bag_path.mkdir()
+        return SimpleNamespace(bag_uri=bag_path, resolution=(640, 480), frame_count=3)
+    monkeypatch.setattr(cli_module, "extract_image_topic_to_sqlite3", fake_extract)
+    def fake_runner(command, staging, log_path):
+        staging_path = Path(staging)
+        target_argument = Path(command[command.index("--target") + 1])
+        assert target_argument == target.resolve()
+        assert target_argument.is_absolute()
+        assert target_argument.is_file()
+        stem = Path(command[command.index("--bag") + 1]).name
+        (staging_path / f"camchain-{stem}.yaml").write_text(
+            "cam0:\n  camera_model: pinhole\n  distortion_model: equidistant\n"
+            "  intrinsics: [400.0, 401.0, 320.0, 240.0]\n"
+            "  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]\n"
+            "  resolution: [640, 480]\n  rostopic: /camera/image\n", encoding="utf-8"
+        )
+        (staging_path / f"results-cam-{stem}.txt").write_text("results\n", encoding="utf-8")
+        (staging_path / f"report-cam-{stem}.pdf").write_bytes(b"%PDF")
+        Path(log_path).write_text("argv: fake\nexit_status: 0\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "run_kalibr", fake_runner)
+    arguments = SimpleNamespace(
+        output_dir=str(output), bag="bag", image_topic="/camera/image",
+        intrinsics_frequency_hz=4.0, sample_end_offset_s=None, target_config="target.yaml",
+    )
+    camera, provenance = cli_module._calibrate_automatic_camera(arguments)
+    assert camera.resolution == (640, 480)
+    assert provenance["source"] == "kalibr_ros2"
+    assert provenance["expected_kalibr_commit"]
+    assert provenance["expected_compatibility_patch_sha256"]
+    assert "kalibr_commit" not in provenance
+    assert "compatibility_patch_sha256" not in provenance
+    assert (output / "camera_intrinsics.yaml").exists()
+    assert (output / "camera_intrinsics_results.txt").exists()
+    assert (output / "camera_intrinsics_report.pdf").exists()
+    assert (output / "camera_intrinsics.log").exists()
+
+
+def test_automatic_extraction_failure_does_not_reuse_old_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """本次提取失败时不得把输出目录中旧 Kalibr 日志附到新异常。"""
+    output = tmp_path / "out"
+    output.mkdir()
+    target = tmp_path / "target.yaml"
+    target.write_text("target_type: aprilgrid\n", encoding="utf-8")
+    old_log = output / "camera_intrinsics.log"
+    old_log.write_text("old run\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "resolve_kalibr_package_prefix", lambda: "/overlay")
+    monkeypatch.setattr(
+        cli_module, "extract_image_topic_to_sqlite3",
+        lambda *args: (_ for _ in ()).throw(ValueError("new extraction failure")),
+    )
+    arguments = SimpleNamespace(
+        output_dir=str(output), bag="bag", image_topic="/camera/image",
+        intrinsics_frequency_hz=4.0, sample_end_offset_s=None, target_config=str(target),
+    )
+    with pytest.raises(cli_module.IntrinsicCalibrationError) as error:
+        cli_module._calibrate_automatic_camera(arguments)
+    assert error.value.log_path is None
+    assert not old_log.exists()

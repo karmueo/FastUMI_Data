@@ -25,3 +25,6 @@ quality:
   validation_p95_max_px: 2.0
   closure_translation_max_mm: 5.0
   closure_rotation_max_deg: 1.0
+intrinsics:
+  # 省略 --camera-config 时，按该频率从 MCAP 抽取 Image 并运行 Kalibr。
+  frequency_hz: 4.0

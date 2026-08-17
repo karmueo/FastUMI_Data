@@ -114,6 +114,7 @@ def test_camera_model_rejects_invalid_parameters(
 def test_calibration_settings_validate_search_and_quality_limits() -> None:
     """运行设置应拒绝无效步长、筛选门限和反向时间范围。"""
     assert CalibrationSettings().min_tags == 6
+    assert CalibrationSettings().intrinsics_frequency_hz == pytest.approx(4.0)
     with pytest.raises(ValueError, match="时间偏移"):
         CalibrationSettings(
             time_offset_min_ms=10.0, time_offset_max_ms=-10.0

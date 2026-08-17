@@ -202,3 +202,45 @@ colcon test-result --all --verbose
 
 构建、测试和运行节点前都应先加载 ROS 2 环境；构建完成后还需加载
 `install/setup.bash`。
+
+## 可选 Kalibr 自动内参 overlay
+
+省略 `calibrate_tracker_camera --camera-config` 时，工具会将配置的 `sensor_msgs/msg/Image` 话题以默认 4 Hz 抽取为临时 SQLite3 bag，并调用独立 Kalibr overlay 生成 `camera_intrinsics.yaml`、TXT、PDF 和日志。`--detect-only` 不加载相机内参，也不会检查或调用 Kalibr。Kalibr 缺失、运行失败或产物校验失败属于致命失败，`--allow-high-residual` 不会将其改为成功。
+
+构建 Kalibr 前请退出 Conda，并清除 `CMAKE_PREFIX_PATH`、`PYTHONPATH` 中的 Conda 条目。以下命令从任意目录均可顺序执行。Kalibr overlay 共有 34 个包，必须独立于 FastUMI 的 `ros2_ws/src`：
+
+```bash
+FASTUMI_ROOT=/absolute/path/to/FastUMI_Data
+KALIBR_OVERLAY=/absolute/path/to/kalibr_ros2_overlay
+conda deactivate || true
+unset CONDA_PREFIX CONDA_DEFAULT_ENV
+export CMAKE_PREFIX_PATH="$(printf "%s" "${CMAKE_PREFIX_PATH:-}" | tr : "\n" | grep -v -i conda | paste -sd: -)"
+mkdir -p "${KALIBR_OVERLAY}/src"
+vcs import "${KALIBR_OVERLAY}/src" < "${FASTUMI_ROOT}/ros2_ws/kalibr_ros2.repos"
+cd "${KALIBR_OVERLAY}/src/kalibr_ros2"
+git rev-parse HEAD  # 应为 c79d1b0cf012fed63dcff5ab8c76778e8343190f
+git apply --check "${FASTUMI_ROOT}/ros2_ws/patches/kalibr_ros2-jazzy.patch"
+git apply "${FASTUMI_ROOT}/ros2_ws/patches/kalibr_ros2-jazzy.patch"
+# 需要重建时，仅清理 checkout 自身的构建产物。
+rm -rf "${KALIBR_OVERLAY}/src/kalibr_ros2/build" "${KALIBR_OVERLAY}/src/kalibr_ros2/install" "${KALIBR_OVERLAY}/src/kalibr_ros2/log"
+source /opt/ros/jazzy/setup.bash
+# 脚本会自行 cd 到 Kalibr checkout，并使用其中的 build/install/log。
+./build_workspace.sh
+source /opt/ros/jazzy/setup.bash
+source "${KALIBR_OVERLAY}/src/kalibr_ros2/install/setup.bash"
+source "${FASTUMI_ROOT}/ros2_ws/install/setup.bash"
+python3 -c "import sm, aslam_cv, aslam_backend"
+ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help
+```
+
+运行时可用 `--intrinsics-frequency-hz 4.0` 覆盖默认值，或在 settings YAML 中使用 `intrinsics: {frequency_hz: 4.0}`。
+
+Jazzy 兼容补丁还将 SuiteSparse 7 中移除的 `CHOLMOD_INTLONG` 替换为 `CHOLMOD_LONG`；该枚举与 `IntType<long>` 的 `long` 型 `p/i` 稀疏索引数组匹配。
+补丁也为 SuiteSparse 7 的 SPQR `SuiteSparseQR` 显式指定 `SuiteSparse_long` 索引模板参数，并将 `qrJ->ncol` 转为该类型，避免 `size_t` 与 long 输出指针的模板推导冲突。
+对于增量标定头文件，补丁直接包含 `SuiteSparseQR.hpp` 并删除旧的一参数 `SuiteSparseQR_factorization` 前置声明，以使用 SuiteSparse 7 的带默认索引类型定义。
+最后，增量标定的 `qrTol` 不再依赖未安装的私有 `<spqr.hpp>`：补丁用公开 `cholmod_sparse` 的 `p`/`nz`/`x` 字段对 CHOLMOD_INT 与 CHOLMOD_LONG、packed 与 unpacked 的 REAL/DOUBLE 矩阵稳定计算每列 Euclidean norm，并保留原始最大列二范数容差语义。
+Boost 1.83+ 兼容项显式包含 `<boost/bind/bind.hpp>`，并将 bsplines Python 绑定的旧全局 `_1` 改为 `boost::placeholders::_1`。
+symlink-install 兼容项同样删除 `aslam_splines_python` 对不存在 `include/` 的安装和导出声明。
+Python 扩展安装目标使用 `ament_cmake_python` 提供的 `${PYTHON_INSTALL_DIR}`（ament site-packages），不再写入 `local/lib/python*/dist-packages`；因此 overlay setup 导出的 PYTHONPATH 能直接发现各 `.so`。
+在构建前安装 smoke 所需 GUI Python 依赖：`sudo apt update && sudo apt install python3-wxgtk4.0 python3-igraph python3-pil`。兼容构建脚本会锁定 Boost 到 `/usr/include` 与 `/usr/lib/x86_64-linux-gnu`，并启用 `Boost_NO_SYSTEM_PATHS` / `Boost_NO_BOOST_CMAKE`，避免 `/usr/local` 的头文件与系统 Boost.Python 库混用；若曾配置过该 overlay，请先删除其 `build/`、`install/`、`log/` 后重新构建。
+构建脚本在 overlay 的 `build/system_include` 中安全创建 `boost -> /usr/include/boost` shim，并仅将该目录设为 `CPLUS_INCLUDE_PATH`；它不会覆盖标准库 include 路径，也不会设置 `C_INCLUDE_PATH`。

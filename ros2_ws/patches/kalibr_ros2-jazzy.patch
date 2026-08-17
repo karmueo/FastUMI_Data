@@ -1,0 +1,481 @@
+diff --git a/build_workspace.sh b/build_workspace.sh
+index 3dc90f7..44fe73e 100755
+--- a/build_workspace.sh
++++ b/build_workspace.sh
+@@ -5,13 +5,29 @@ set -e  # Exit on error
+ 
+ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ cd "$SCRIPT_DIR"
+-
++# Provide only system Boost headers before /usr/local, without changing libc include_next order.
++# 仅为 Boost 创建系统头 shim，避免全局 /usr/include 破坏标准库 include_next。
++BOOST_SHIM_DIR="${SCRIPT_DIR}/build/system_include"
++BOOST_SHIM_LINK="${BOOST_SHIM_DIR}/boost"
++mkdir -p "${BOOST_SHIM_DIR}"
++if [ -e "${BOOST_SHIM_LINK}" ] && [ ! -L "${BOOST_SHIM_LINK}" ]; then
++    echo "Refusing to replace non-symlink Boost shim: ${BOOST_SHIM_LINK}" >&2
++    exit 1
++fi
++if [ -L "${BOOST_SHIM_LINK}" ] && [ "$(readlink "${BOOST_SHIM_LINK}")" != "/usr/include/boost" ]; then
++    rm -f "${BOOST_SHIM_LINK}"
++fi
++if [ ! -L "${BOOST_SHIM_LINK}" ]; then
++    ln -s /usr/include/boost "${BOOST_SHIM_LINK}"
++fi
++export CPLUS_INCLUDE_PATH="${BOOST_SHIM_DIR}"
+ # Colors for output
+ RED='\033[0;31m'
+ GREEN='\033[0;32m'
+ YELLOW='\033[1;33m'
+ NC='\033[0m' # No Color
+ 
++
+ echo -e "${GREEN}========================================${NC}"
+ echo -e "${GREEN}Kalibr ROS2 Workspace Build Script${NC}"
+ echo -e "${GREEN}========================================${NC}"
+@@ -22,8 +38,9 @@ build_package() {
+     local pkg_name=$1
+     echo -e "${YELLOW}Building package: ${pkg_name}${NC}"
+     
+-    if colcon build --packages-select "${pkg_name}" --cmake-args -DCMAKE_BUILD_TYPE=Release; then
++    if colcon build --packages-select "${pkg_name}" --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_IGNORE_PREFIX_PATH=/usr/local -DBOOST_ROOT=/usr -DBOOST_INCLUDEDIR=/usr/include -DBOOST_LIBRARYDIR=/usr/lib/x86_64-linux-gnu -DBoost_NO_SYSTEM_PATHS=ON -DBoost_NO_BOOST_CMAKE=ON; then
+         echo -e "${GREEN}✓ Successfully built ${pkg_name}${NC}"
++        source install/setup.bash
+         return 0
+     else
+         echo -e "${RED}✗ Failed to build ${pkg_name}${NC}"
+diff --git a/src/aslam_backend/include/aslam/backend/implementation/Cholmod.hpp b/src/aslam_backend/include/aslam/backend/implementation/Cholmod.hpp
+index 6c7186a..4fcff8d 100644
+--- a/src/aslam_backend/include/aslam/backend/implementation/Cholmod.hpp
++++ b/src/aslam_backend/include/aslam/backend/implementation/Cholmod.hpp
+@@ -445,7 +445,7 @@ namespace aslam {
+     template<typename I>
+     void Cholmod<I>::getR(cholmod_sparse* A, cholmod_sparse** R) {
+       cholmod_sparse* qrJ = cholmod_l_transpose(A, 1, &_cholmod);
+-      SuiteSparseQR<double>(SPQR_ORDERING_FIXED, SPQR_NO_TOL, qrJ->ncol, 0,
++      SuiteSparseQR<double, SuiteSparse_long>(SPQR_ORDERING_FIXED, SPQR_NO_TOL, static_cast<SuiteSparse_long>(qrJ->ncol), 0,
+         qrJ, NULL, NULL, NULL, NULL, R, NULL, NULL, NULL, NULL, &_cholmod);
+       SM_ASSERT_EQ(Exception, _cholmod.status, CHOLMOD_OK,
+         "QR factorization failed");
+diff --git a/src/aslam_backend_python/CMakeLists.txt b/src/aslam_backend_python/CMakeLists.txt
+index 078b031..07aaf98 100644
+--- a/src/aslam_backend_python/CMakeLists.txt
++++ b/src/aslam_backend_python/CMakeLists.txt
+@@ -20,8 +20,8 @@ find_package(sm_kinematics REQUIRED)
+ find_package(sm_timing REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+ add_compile_options(-fpermissive)
+@@ -86,7 +86,7 @@ ament_python_install_package(aslam_backend
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/aslam_backend
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/aslam_backend
+ )
+ 
+ install(DIRECTORY include/
+diff --git a/src/aslam_cameras_april/CMakeLists.txt b/src/aslam_cameras_april/CMakeLists.txt
+index b3a09b4..68803ed 100644
+--- a/src/aslam_cameras_april/CMakeLists.txt
++++ b/src/aslam_cameras_april/CMakeLists.txt
+@@ -20,10 +20,10 @@ find_package(sm_eigen REQUIRED)
+ find_package(sm_python REQUIRED)
+ find_package(numpy_eigen REQUIRED)
+ find_package(python_module REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
++find_package(Python3 REQUIRED COMPONENTS Interpreter Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ find_package(Eigen3 REQUIRED)
+ find_package(OpenCV REQUIRED)
+-find_package(Python3 REQUIRED COMPONENTS Interpreter Development NumPy)
+ 
+ include_directories(include ${EIGEN3_INCLUDE_DIRS})
+ 
+@@ -125,7 +125,7 @@ ament_python_install_package(aslam_cameras_april
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}_python
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/aslam_cameras_april
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/aslam_cameras_april
+ )
+ 
+ ament_package()
+diff --git a/src/aslam_cv_backend_python/CMakeLists.txt b/src/aslam_cv_backend_python/CMakeLists.txt
+index 20be7f4..b14e668 100644
+--- a/src/aslam_cv_backend_python/CMakeLists.txt
++++ b/src/aslam_cv_backend_python/CMakeLists.txt
+@@ -26,8 +26,8 @@ find_package(sparse_block_matrix REQUIRED)
+ find_package(aslam_time REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ find_package(OpenCV REQUIRED)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+@@ -84,7 +84,7 @@ ament_python_install_package(aslam_cv_backend
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/aslam_cv_backend
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/aslam_cv_backend
+ )
+ 
+ install(DIRECTORY include/
+diff --git a/src/aslam_cv_python/CMakeLists.txt b/src/aslam_cv_python/CMakeLists.txt
+index 349b268..f7546dd 100644
+--- a/src/aslam_cv_python/CMakeLists.txt
++++ b/src/aslam_cv_python/CMakeLists.txt
+@@ -25,8 +25,8 @@ find_package(bsplines REQUIRED)
+ find_package(sparse_block_matrix REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ find_package(OpenCV REQUIRED)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+@@ -90,7 +90,7 @@ ament_python_install_package(aslam_cv
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/aslam_cv
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/aslam_cv
+ )
+ 
+ install(DIRECTORY include/
+diff --git a/src/aslam_splines_python/CMakeLists.txt b/src/aslam_splines_python/CMakeLists.txt
+index 6b058d6..ab1d1c2 100644
+--- a/src/aslam_splines_python/CMakeLists.txt
++++ b/src/aslam_splines_python/CMakeLists.txt
+@@ -26,8 +26,8 @@ find_package(aslam_cameras REQUIRED)
+ find_package(aslam_time REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+ add_compile_options(-fpermissive)
+@@ -81,14 +81,9 @@ ament_python_install_package(aslam_splines
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/aslam_splines
+-)
+-
+-install(DIRECTORY include/
+-  DESTINATION include
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/aslam_splines
+ )
+ 
+ ament_export_dependencies(numpy_eigen aslam_splines bsplines_python bsplines sparse_block_matrix sm_common sm_kinematics aslam_backend aslam_backend_expressions aslam_backend_python sm_timing aslam_cameras aslam_time python_module Boost Python3 Eigen3)
+-ament_export_include_directories(include)
+ 
+ ament_package()
+diff --git a/src/bsplines_python/CMakeLists.txt b/src/bsplines_python/CMakeLists.txt
+index 8ac68dd..c03cc4d 100644
+--- a/src/bsplines_python/CMakeLists.txt
++++ b/src/bsplines_python/CMakeLists.txt
+@@ -18,8 +18,8 @@ find_package(sm_common REQUIRED)
+ find_package(sm_kinematics REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+ add_compile_options(-fpermissive)
+@@ -71,14 +71,10 @@ ament_python_install_package(bsplines
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/bsplines
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/bsplines
+ )
+ 
+-install(DIRECTORY include/
+-  DESTINATION include
+-)
+ 
+ ament_export_dependencies(numpy_eigen bsplines sparse_block_matrix sm_common sm_kinematics python_module Boost Python3 Eigen3)
+-ament_export_include_directories(include)
+ 
+ ament_package()
+diff --git a/src/bsplines_python/src/BSplinePython.cpp b/src/bsplines_python/src/BSplinePython.cpp
+index 32d9a92..de6dea6 100644
+--- a/src/bsplines_python/src/BSplinePython.cpp
++++ b/src/bsplines_python/src/BSplinePython.cpp
+@@ -1,4 +1,5 @@
+ #include <numpy_eigen/boost_python_headers.hpp>
++#include <boost/bind/bind.hpp>
+ 
+ #include <bsplines/BSpline.hpp>
+ 
+@@ -37,14 +38,14 @@ public:
+ boost::python::object getBiFunction(const bsplines::BSpline * bs, double t)
+ {
+ 	typedef Eigen::CwiseNullaryOp <BiVector, Eigen::VectorXd> T;
+-	return boost::python::make_function(boost::bind(&BiFunction<T>::getBi, BiFunction<T>(bs->getBiVector(t)), _1)
++	return boost::python::make_function(boost::bind(&BiFunction<T>::getBi, BiFunction<T>(bs->getBiVector(t)), boost::placeholders::_1)
+ 	 	 , boost::python::default_call_policies(), boost::mpl::vector2<double,int>()
+ 	);
+ }
+ boost::python::object getCumulativeBiFunction(const bsplines::BSpline * bs, double t)
+ {
+ 	typedef Eigen::CwiseNullaryOp <BiVector, Eigen::VectorXd> T;
+-	return boost::python::make_function(boost::bind(&BiFunction<T>::getBi, BiFunction<T>(bs->getCumulativeBiVector(t)), _1)
++	return boost::python::make_function(boost::bind(&BiFunction<T>::getBi, BiFunction<T>(bs->getCumulativeBiVector(t)), boost::placeholders::_1)
+ 	 	 , boost::python::default_call_policies(), boost::mpl::vector2<double,int>()
+ 	);
+ }
+diff --git a/src/incremental_calibration/include/aslam/calibration/algorithms/linalg.h b/src/incremental_calibration/include/aslam/calibration/algorithms/linalg.h
+index db6d3b7..6e3a524 100644
+--- a/src/incremental_calibration/include/aslam/calibration/algorithms/linalg.h
++++ b/src/incremental_calibration/include/aslam/calibration/algorithms/linalg.h
+@@ -29,13 +29,14 @@
+ 
+ #include <Eigen/Core>
+ 
++#include <SuiteSparseQR.hpp>
++
+ struct cholmod_sparse_struct;
+ typedef cholmod_sparse_struct cholmod_sparse;
+ struct cholmod_dense_struct;
+ typedef cholmod_dense_struct cholmod_dense;
+ struct cholmod_common_struct;
+ typedef cholmod_common_struct cholmod_common;
+-template <typename Entry> struct SuiteSparseQR_factorization;
+ 
+ namespace aslam {
+   namespace calibration {
+diff --git a/src/incremental_calibration/include/aslam/calibration/core/LinearSolver.h b/src/incremental_calibration/include/aslam/calibration/core/LinearSolver.h
+index dbda4c8..a74873c 100644
+--- a/src/incremental_calibration/include/aslam/calibration/core/LinearSolver.h
++++ b/src/incremental_calibration/include/aslam/calibration/core/LinearSolver.h
+@@ -33,12 +33,13 @@
+ 
+ #include <Eigen/Core>
+ 
++#include <SuiteSparseQR.hpp>
++
+ #include <aslam/backend/CompressedColumnJacobianTransposeBuilder.hpp>
+ #include <aslam/backend/LinearSystemSolver.hpp>
+ 
+ #include "aslam/calibration/core/LinearSolverOptions.h"
+ 
+-template <typename Entry> struct SuiteSparseQR_factorization;
+ 
+ namespace sm {
+ 
+diff --git a/src/incremental_calibration/src/algorithms/linalg.cpp b/src/incremental_calibration/src/algorithms/linalg.cpp
+index 71a4158..581baf0 100644
+--- a/src/incremental_calibration/src/algorithms/linalg.cpp
++++ b/src/incremental_calibration/src/algorithms/linalg.cpp
+@@ -26,7 +26,6 @@
+ 
+ #include <cholmod.h>
+ #include <SuiteSparseQR.hpp>
+-#include <spqr.hpp>
+ 
+ #include "aslam/calibration/exceptions/OutOfBoundException.h"
+ #include "aslam/calibration/exceptions/InvalidOperationException.h"
+@@ -34,6 +33,46 @@
+ 
+ namespace aslam {
+   namespace calibration {
++    namespace {
++
++      template<typename Index>
++      double maxColumnEuclideanNorm(const cholmod_sparse* matrix) {
++        const Index* column_offsets =
++          reinterpret_cast<const Index*>(matrix->p);
++        const Index* column_counts =
++          reinterpret_cast<const Index*>(matrix->nz);
++        const double* values = reinterpret_cast<const double*>(matrix->x);
++        double maximum = 0.0;
++        for (size_t column = 0; column < matrix->ncol; ++column) {
++          const Index begin = column_offsets[column];
++          const Index end = matrix->packed ? column_offsets[column + 1] :
++            begin + column_counts[column];
++          double norm = 0.0;
++          for (Index entry = begin; entry < end; ++entry)
++            norm = std::hypot(norm, values[entry]);
++          maximum = std::max(maximum, norm);
++        }
++        return maximum;
++      }
++
++      double publicSpqrMaxColumnNorm(const cholmod_sparse* matrix) {
++        if (matrix->x == NULL || matrix->p == NULL ||
++            (!matrix->packed && matrix->nz == NULL))
++          throw InvalidOperationException("invalid CHOLMOD sparse matrix",
++            __FILE__, __LINE__, __PRETTY_FUNCTION__);
++        if (matrix->xtype != CHOLMOD_REAL || matrix->dtype != CHOLMOD_DOUBLE)
++          throw InvalidOperationException("expected CHOLMOD_REAL or CHOLMOD_DOUBLE",
++            __FILE__, __LINE__, __PRETTY_FUNCTION__);
++        if (matrix->itype == CHOLMOD_INT)
++          return maxColumnEuclideanNorm<int>(matrix);
++        if (matrix->itype == CHOLMOD_LONG)
++          return maxColumnEuclideanNorm<SuiteSparse_long>(matrix);
++        throw InvalidOperationException("unsupported CHOLMOD index type",
++          __FILE__, __LINE__, __PRETTY_FUNCTION__);
++      }
++
++    }
++
+ 
+ /******************************************************************************/
+ /* Methods                                                                    */
+@@ -269,7 +308,7 @@ namespace aslam {
+         throw NullPointerException("cholmod", __FILE__, __LINE__,
+           __PRETTY_FUNCTION__);
+       return 20.0 * static_cast<double>(A->nrow + A->ncol) * eps *
+-        spqr_maxcolnorm<double>(A, cholmod);
++        publicSpqrMaxColumnNorm(A);
+     }
+ 
+     double svGap(const Eigen::VectorXd& sv, std::ptrdiff_t rank) {
+diff --git a/src/incremental_calibration_python/CMakeLists.txt b/src/incremental_calibration_python/CMakeLists.txt
+index 431542d..723164d 100644
+--- a/src/incremental_calibration_python/CMakeLists.txt
++++ b/src/incremental_calibration_python/CMakeLists.txt
+@@ -17,8 +17,8 @@ find_package(incremental_calibration REQUIRED)
+ find_package(sm_property_tree REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+ add_compile_options(-fpermissive)
+@@ -72,7 +72,7 @@ ament_python_install_package(incremental_calibration
+ )
+ 
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/incremental_calibration
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/incremental_calibration
+ )
+ 
+ install(DIRECTORY include/
+diff --git a/src/kalibr_imu_camera/CMakeLists.txt b/src/kalibr_imu_camera/CMakeLists.txt
+index 525072b..ad3da53 100644
+--- a/src/kalibr_imu_camera/CMakeLists.txt
++++ b/src/kalibr_imu_camera/CMakeLists.txt
+@@ -33,8 +33,8 @@ find_package(numpy_eigen REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(sparse_block_matrix REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ 
+ # Build errorterms C++ library
+ include_directories(include ${EIGEN3_INCLUDE_DIRS})
+@@ -101,7 +101,7 @@ set_target_properties(libkalibr_errorterms_python PROPERTIES
+ )
+ 
+ install(TARGETS libkalibr_errorterms_python
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}
+ )
+ 
+ # Install Python modules
+diff --git a/src/kalibr_imu_camera/package.xml b/src/kalibr_imu_camera/package.xml
+index 51921d3..0215683 100644
+--- a/src/kalibr_imu_camera/package.xml
++++ b/src/kalibr_imu_camera/package.xml
+@@ -20,6 +20,8 @@
+   <exec_depend>python3-scipy</exec_depend>
+   <exec_depend>python3-opencv</exec_depend>
+   <exec_depend>python3-yaml</exec_depend>
++  <exec_depend>python3-igraph</exec_depend>
++  <exec_depend>python3-pil</exec_depend>
+ 
+   <!-- Internal dependencies - C++ libraries -->
+   <depend>sm_common</depend>
+diff --git a/src/numpy_eigen/CMakeLists.txt b/src/numpy_eigen/CMakeLists.txt
+index 7c841f5..8ca433d 100644
+--- a/src/numpy_eigen/CMakeLists.txt
++++ b/src/numpy_eigen/CMakeLists.txt
+@@ -13,9 +13,9 @@ endif()
+ # Find dependencies
+ find_package(ament_cmake REQUIRED)
+ find_package(ament_cmake_python REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system python)
+-find_package(Eigen3 REQUIRED)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR})
++find_package(Eigen3 REQUIRED)
+ 
+ include_directories(
+   include
+@@ -63,7 +63,7 @@ ament_python_install_package(${PROJECT_NAME}
+ 
+ # Install the Python module .so to the same location as the __init__.py
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/dist-packages/numpy_eigen
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/numpy_eigen
+ )
+ 
+ # Install headers
+diff --git a/src/sm_python/CMakeLists.txt b/src/sm_python/CMakeLists.txt
+index 0e9ee73..3bc2c95 100644
+--- a/src/sm_python/CMakeLists.txt
++++ b/src/sm_python/CMakeLists.txt
+@@ -22,8 +22,8 @@ find_package(sm_matrix_archive REQUIRED)
+ find_package(sm_property_tree REQUIRED)
+ find_package(python_module REQUIRED)
+ find_package(Eigen3 REQUIRED)
+-find_package(Boost REQUIRED COMPONENTS system serialization python thread filesystem regex)
+ find_package(Python3 REQUIRED COMPONENTS Development NumPy)
++find_package(Boost REQUIRED COMPONENTS system serialization python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR} thread filesystem regex)
+ 
+ add_definitions(-D__STRICT_ANSI__)
+ add_compile_options(-fpermissive)
+@@ -93,7 +93,7 @@ ament_python_install_package(sm
+ 
+ # Install the Python module (.so) to the same location as Python files
+ install(TARGETS ${PROJECT_NAME}
+-  LIBRARY DESTINATION local/lib/python3.10/dist-packages/sm
++  LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/sm
+ )
+ 
+ # Install headers
+diff --git a/src/sm_python/package.xml b/src/sm_python/package.xml
+index 11ebc21..60b45c7 100644
+--- a/src/sm_python/package.xml
++++ b/src/sm_python/package.xml
+@@ -10,6 +10,8 @@
+   <buildtool_depend>ament_cmake</buildtool_depend>
+   <buildtool_depend>ament_cmake_python</buildtool_depend>
+ 
++  <exec_depend>python3-wxgtk4.0</exec_depend>
++
+   <export>
+     <build_type>ament_cmake</build_type>
+   </export>
+diff --git a/src/sparse_block_matrix/include/sparse_block_matrix/sparse_helper.h b/src/sparse_block_matrix/include/sparse_block_matrix/sparse_helper.h
+index 0a6a87c..8163515 100755
+--- a/src/sparse_block_matrix/include/sparse_block_matrix/sparse_helper.h
++++ b/src/sparse_block_matrix/include/sparse_block_matrix/sparse_helper.h
+@@ -75,7 +75,7 @@ namespace {
+   template<>
+   struct IntType< long >
+   {
+-      static const int intType = CHOLMOD_INTLONG;
++      static const int intType = CHOLMOD_LONG;
+   };
+   template<>
+   struct IntType< int >
