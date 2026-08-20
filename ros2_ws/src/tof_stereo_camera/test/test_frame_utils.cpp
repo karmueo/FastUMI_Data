@@ -3,9 +3,10 @@
  * @brief ROS 2 帧转换工具的回归测试。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-14
+ * @date 修改：2026-08-20
  */
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -43,6 +44,47 @@ EncodeImuSamples(const std::vector<stereo_camera_imu_data_t> &samples) {
   std::vector<unsigned char> payload(samples.size() *
                                      sizeof(stereo_camera_imu_data_t));
   std::memcpy(payload.data(), samples.data(), payload.size());
+  return payload;
+}
+
+/**
+ * @brief 将一个字段写入固定偏移的原始 IMU payload。
+ * @tparam Value 字段的数据类型。
+ * @param[in,out] payload 接收字段字节的 payload，不可为 `nullptr`。
+ * @param[in] offset 字段在 payload 内的固定字节偏移。
+ * @param[in] value 待写入的字段值。
+ */
+template <typename Value>
+void WriteRawImuField(std::vector<unsigned char> *payload, std::size_t offset,
+                      const Value &value) {
+  std::memcpy(payload->data() + offset, &value, sizeof(value));
+}
+
+/**
+ * @brief 按设备协议固定偏移编码一条 IMU 样本。
+ * @param[in] timestamp 设备微秒时间戳。
+ * @param[in] ax X 轴线加速度。
+ * @param[in] ay Y 轴线加速度。
+ * @param[in] az Z 轴线加速度。
+ * @param[in] gx X 轴角速度。
+ * @param[in] gy Y 轴角速度。
+ * @param[in] gz Z 轴角速度。
+ * @param[in] idx 设备端样本序号。
+ * @return 长度为 72 字节的原始样本 payload。
+ */
+std::vector<unsigned char> EncodeRawImuSample(std::int64_t timestamp, float ax,
+                                              float ay, float az, float gx,
+                                              float gy, float gz,
+                                              std::int64_t idx) {
+  std::vector<unsigned char> payload(72U, 0U);
+  WriteRawImuField(&payload, 0U, timestamp);
+  WriteRawImuField(&payload, 8U, ax);
+  WriteRawImuField(&payload, 12U, ay);
+  WriteRawImuField(&payload, 16U, az);
+  WriteRawImuField(&payload, 20U, gx);
+  WriteRawImuField(&payload, 24U, gy);
+  WriteRawImuField(&payload, 28U, gz);
+  WriteRawImuField(&payload, 32U, idx);
   return payload;
 }
 
@@ -107,20 +149,19 @@ TEST(FrameUtils, AcceptsOnlyDocumentedTofMatchStates) {
   EXPECT_FALSE(IsPublishableTofMatchState(STEREO_MATCH_LOST));
 }
 
+/** @brief 验证 SDK 度/秒角速度转换为 ROS 标准弧度/秒。 */
+TEST(FrameUtils, ConvertsGyroscopeDegreesPerSecondToRadiansPerSecond) {
+  constexpr double kPi = 3.14159265358979323846; ///< 测试使用的圆周率。
+  EXPECT_NEAR(DegreesPerSecondToRadiansPerSecond(180.0F), kPi, 1e-12);
+  EXPECT_NEAR(DegreesPerSecondToRadiansPerSecond(-90.0F), -kPi / 2.0, 1e-12);
+  EXPECT_DOUBLE_EQ(DegreesPerSecondToRadiansPerSecond(0.0F), 0.0);
+}
+
 /** @brief 验证 `FrameUtils::DecodesSingleImuSampleFields` 所覆盖的帧转换行为。
  */
 TEST(FrameUtils, DecodesSingleImuSampleFields) {
-  stereo_camera_imu_data_t sample{};
-  sample.timestamp = 1'234;
-  sample.ax = 1.0F;
-  sample.ay = 2.0F;
-  sample.az = 3.0F;
-  sample.gx = 4.0F;
-  sample.gy = 5.0F;
-  sample.gz = 6.0F;
-  sample.idx = 42;
-
-  std::vector<unsigned char> payload = EncodeImuSamples({sample});
+  std::vector<unsigned char> payload =
+      EncodeRawImuSample(1'234, 1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 42);
   stereo_camera_frame_t frame{};
   frame.data = payload.data();
   frame.data_size = static_cast<int>(payload.size());
@@ -139,6 +180,7 @@ TEST(FrameUtils, DecodesSingleImuSampleFields) {
   EXPECT_FLOAT_EQ(decoded[0].gx, 4.0F);
   EXPECT_FLOAT_EQ(decoded[0].gy, 5.0F);
   EXPECT_FLOAT_EQ(decoded[0].gz, 6.0F);
+  EXPECT_EQ(decoded[0].idx, 42);
 }
 
 /** @brief 验证 `FrameUtils::DecodesAndCopiesMultipleImuSamples`

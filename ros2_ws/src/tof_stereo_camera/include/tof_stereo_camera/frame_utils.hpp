@@ -3,7 +3,7 @@
  * @brief 声明 ROS 2 图像与 IMU 帧转换及时间映射工具。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-14
+ * @date 修改：2026-08-20
  */
 
 #ifndef TOF_STEREO_CAMERA__FRAME_UTILS_HPP_
@@ -18,11 +18,16 @@
 #include "rclcpp/time.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "stereo_camera/stereo_camera.h"
+#include "tof_stereo_camera/stream_ids.hpp"
 
 namespace tof_stereo_camera {
 
-constexpr int kItofDepthStreamId = 2; ///< iTOF 深度图在 SDK 中使用的流 ID。
-constexpr int kItofGrayStreamId = 7; ///< iTOF 灰度图在 SDK 中使用的流 ID。
+/**
+ * @brief 将 SDK 陀螺仪的度/秒转换为 ROS IMU 要求的弧度/秒。
+ * @param[in] degrees_per_second SDK 输出的角速度，单位度/秒。
+ * @return 对应的角速度，单位弧度/秒。
+ */
+double DegreesPerSecondToRadiansPerSecond(float degrees_per_second);
 
 /**
  * @brief 判断 iTOF 时间匹配状态是否允许发布。

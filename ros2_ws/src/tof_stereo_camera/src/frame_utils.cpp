@@ -3,7 +3,7 @@
  * @brief ROS 2 图像与 IMU 帧转换工具的实现。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-13
+ * @date 修改：2026-08-20
  */
 
 #include "tof_stereo_camera/frame_utils.hpp"
@@ -24,10 +24,16 @@ namespace {
 
 static_assert(sizeof(stereo_camera_imu_data_t) == 72,
               "stereo_camera_imu_data_t must match the public SDK ABI");
-static_assert(offsetof(stereo_camera_imu_data_t, idx) == 8,
-              "stereo_camera_imu_data_t::idx ABI mismatch");
-static_assert(offsetof(stereo_camera_imu_data_t, ax) == 16,
+static_assert(offsetof(stereo_camera_imu_data_t, timestamp) == 0,
+              "stereo_camera_imu_data_t::timestamp ABI mismatch");
+static_assert(offsetof(stereo_camera_imu_data_t, ax) == 8,
               "stereo_camera_imu_data_t::ax ABI mismatch");
+static_assert(offsetof(stereo_camera_imu_data_t, gx) == 20,
+              "stereo_camera_imu_data_t::gx ABI mismatch");
+static_assert(offsetof(stereo_camera_imu_data_t, idx) == 32,
+              "stereo_camera_imu_data_t::idx ABI mismatch");
+static_assert(offsetof(stereo_camera_imu_data_t, reverve) == 40,
+              "stereo_camera_imu_data_t::reverve ABI mismatch");
 static_assert(sizeof(stereo_camera_frame_t) == 56,
               "stereo_camera_frame_t must match the public SDK ABI");
 static_assert(offsetof(stereo_camera_frame_t, frame_timestamp) == 0,
@@ -43,6 +49,8 @@ static_assert(offsetof(stereo_camera_frame_t, frame_seq_count) == 52,
 
 /// 每微秒包含的纳秒数。
 constexpr std::int64_t kNanosecondsPerMicrosecond = 1'000;
+/// 每度对应的弧度数。
+constexpr double kRadiansPerDegree = 0.017453292519943295;
 
 /**
  * @brief 按 V4L2 字节序构造 FOURCC 数值。
@@ -100,6 +108,11 @@ std::uint64_t PixelCount(const stereo_camera_frame_t &frame) {
 }
 
 } // namespace
+
+/** @copydoc DegreesPerSecondToRadiansPerSecond */
+double DegreesPerSecondToRadiansPerSecond(float degrees_per_second) {
+  return static_cast<double>(degrees_per_second) * kRadiansPerDegree;
+}
 
 /** @copydoc IsPublishableTofMatchState */
 bool IsPublishableTofMatchState(int match_state) {

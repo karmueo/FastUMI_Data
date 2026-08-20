@@ -15,7 +15,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """声明相机、SDK 日志与可选 IMU 滤波组件的启动描述。"""
+    """声明相机、SDK XU、日志与可选 IMU 滤波组件的启动描述。"""
     # 已安装包的共享目录，用于定位随包发布的 RViz 配置。
     package_share = Path(get_package_share_directory("tof_stereo_camera"))
     # RViz 启动时加载的预置显示配置。
@@ -27,16 +27,20 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_itof_depth", default_value="true"),
         DeclareLaunchArgument("enable_itof_gray", default_value="true"),
         DeclareLaunchArgument("enable_imu", default_value="true"),
+        DeclareLaunchArgument("imu_accel_hz", default_value="100"),
+        DeclareLaunchArgument("imu_gyro_hz", default_value="100"),
         DeclareLaunchArgument("enable_imu_filter", default_value="true"),
         DeclareLaunchArgument(
             "imu_filter_type",
-            default_value="madgwick",
+            default_value="complementary",
             choices=["madgwick", "complementary"],
         ),
         DeclareLaunchArgument("enable_rviz", default_value="true"),
-        # 2048 系完整复合帧对应 2048x1536 的 RGB 标定分辨率。
-        DeclareLaunchArgument("width", default_value="2048"),
-        DeclareLaunchArgument("height", default_value="2738"),
+        DeclareLaunchArgument(
+            "stream_profile",
+            default_value="main",
+            choices=["main", "sub"],
+        ),
         DeclareLaunchArgument("timestamp_calibration_frames", default_value="30"),
         DeclareLaunchArgument("timestamp_window_frames", default_value="120"),
         DeclareLaunchArgument("timestamp_max_slew_ppm", default_value="200.0"),
@@ -58,8 +62,9 @@ def generate_launch_description():
             "enable_itof_depth": LaunchConfiguration("enable_itof_depth"),
             "enable_itof_gray": LaunchConfiguration("enable_itof_gray"),
             "enable_imu": LaunchConfiguration("enable_imu"),
-            "width": LaunchConfiguration("width"),
-            "height": LaunchConfiguration("height"),
+            "imu_accel_hz": LaunchConfiguration("imu_accel_hz"),
+            "imu_gyro_hz": LaunchConfiguration("imu_gyro_hz"),
+            "stream_profile": LaunchConfiguration("stream_profile"),
             "pixel_format": LaunchConfiguration("pixel_format"),
             "device_path": LaunchConfiguration("device_path"),
             "timestamp_calibration_frames": LaunchConfiguration("timestamp_calibration_frames"),

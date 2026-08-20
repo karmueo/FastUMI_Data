@@ -19,22 +19,50 @@ source install/setup.bash
 ros2 launch tof_stereo_camera tof_stereo_camera.launch.py
 ```
 
+可以选择主码流或子码流。主码流为 `2048x1536` RGB，子码流为
+`1920x1080` RGB；两种档位均使用包含 iTOF 和元数据的完整复合帧：
+
+```bash
+# 默认主码流
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  stream_profile:=main
+
+# 子码流
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  stream_profile:=sub
+```
+
 可以指定设备或关闭部分输出：
 
 ```bash
 ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
   device_path:=/dev/video3 enable_itof_gray:=false enable_rviz:=false
+
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  enable_itof_gray:=false enable_itof_depth:=false enable_imu:=false
 ```
 
-`device_path` 默认为空，此时使用 SDK 的自动设备选择策略。非空值会直接传给
-`stereo_camera_open()`。节点启动时会记录实际协商后的 FOURCC、宽度和高度。
+`enable_rgb`、`enable_itof_depth` 和 `enable_itof_gray` 会同时控制 ROS topic
+和设备端视频流。关闭流时，节点在启动采集前通过 SDK XU stream mask 禁止设备推送
+对应的 `stream_id`，从而减少 USB 数据和 SDK 解析开销。这三个参数仅能在节点启动时设置。
 
-Launch 默认启动 `imu_filter_madgwick`。可以切换为互补滤波器，或保留原始
-IMU 输出但关闭姿态滤波：
+可以在启动时设置设备 IMU 采样频率：
 
 ```bash
 ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
-  imu_filter_type:=complementary
+  imu_accel_hz:=200 imu_gyro_hz:=200
+```
+
+`device_path` 默认为空，此时使用 SDK 的自动设备选择策略。非空值会直接传给
+`stereo_camera_open()`。节点启动时会记录所选码流档位、RGB 有效尺寸以及实际协商后的
+FOURCC 和完整复合帧尺寸。
+
+Launch 默认启动带静止零偏估计的 `imu_complementary_filter`。可以切换为
+Madgwick，或保留原始 IMU 输出但关闭姿态滤波：
+
+```bash
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  imu_filter_type:=madgwick
 
 ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
   enable_imu_filter:=false
@@ -47,15 +75,16 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `device_path` | 空 | 指定 `/dev/video*`；空值表示自动选择 |
 | `enable_sdk_log` | `false` | 启用 SDK 内部文件日志，仅用于真机排障 |
 | `sdk_log_path` | 空 | SDK 日志文件路径；空值使用 SDK 默认路径 `/tmp/imu_head_dump.log` |
-| `width` | `2048` | 请求的复合图像宽度；默认档位发布 `2048x1536` RGB 子帧 |
-| `height` | `2738` | 请求的完整复合图像高度，包含 RGB、iTOF 和元数据 |
+| `stream_profile` | `main` | 码流档位：`main` 为 `2048x1536` RGB，`sub` 为 `1920x1080` RGB；仅启动时设置 |
 | `pixel_format` | `YUYV` | 请求的像素格式，可选 `YUYV` 或 `NV12` |
-| `enable_rgb` | `true` | 发布 RGB 图像 |
-| `enable_itof_depth` | `true` | 发布 iTOF 深度图 |
-| `enable_itof_gray` | `true` | 发布 iTOF 灰度图 |
+| `enable_rgb` | `true` | 启用设备端 RGB 流并发布 RGB 图像；仅启动时设置 |
+| `enable_itof_depth` | `true` | 启用设备端 iTOF 深度流并发布深度图；仅启动时设置 |
+| `enable_itof_gray` | `true` | 启用设备端 iTOF 灰度流并发布灰度图；仅启动时设置 |
 | `enable_imu` | `true` | 发布标准 IMU 消息 |
+| `imu_accel_hz` | `100` | 加速度计采样频率；允许 `12/25/50/100/200/400/800/1600` Hz，仅启动时设置 |
+| `imu_gyro_hz` | `100` | 陀螺仪采样频率；允许 `25/50/100/200/400/800/1600/3200` Hz，仅启动时设置 |
 | `enable_imu_filter` | `true` | 启动姿态滤波节点；同时要求 `enable_imu=true` |
-| `imu_filter_type` | `madgwick` | 姿态滤波器，可选 `madgwick` 或 `complementary` |
+| `imu_filter_type` | `complementary` | 姿态滤波器，可选 `madgwick` 或 `complementary` |
 | `enable_rviz` | `true` | 启动带图像和 IMU 显示的 RViz |
 | `timestamp_calibration_frames` | `30` | 每个已启用发布流启动时收集的唯一时间戳数；锁定前仅该流静默 |
 | `timestamp_window_frames` | `120` | 用于选择低延迟候选偏移的滚动窗口长度 |
@@ -93,22 +122,32 @@ RGB、iTOF 深度、iTOF 灰度和 IMU 各自维护独立的设备时间序列�
 同步观测分别回退到映射观测时间或主机接收时间。
 同一发布流的重复 SDK 时间戳会静默去重，不发布重复消息，保证图像头时间严格递增。
 
-SDK 的 `gx`、`gy`、`gz` 已是 rad/s。节点直接写入 `sensor_msgs/msg/Imu`，不执行
-单位转换；加速度保持 SDK 提供的 m/s² 值不变。两个滤波器均以 best-effort QoS 订阅
-原始 IMU，不使用磁力计且不发布 TF。Madgwick 默认使用有状态模式和 ENU 世界坐标约定；
-由于没有磁力计，航向角可能随时间漂移。
+SDK 的 `gx`、`gy`、`gz` 单位为度/秒，节点发布前统一转换为
+`sensor_msgs/msg/Imu` 要求的弧度/秒；加速度保持 SDK 提供的 m/s² 值不变。
+两个滤波器均以 best-effort QoS 订阅原始 IMU，不使用磁力计且不发布 TF。默认互补滤波器
+启用静止零偏估计和自适应增益，可抑制设备静止时的持续旋转。Madgwick 保留为可选模式；
+无磁力计时航向角缺少绝对参考，长期运行仍可能漂移。
+
+节点会在格式协商完成后、启动采集流前依次下发视频流掩码和 IMU 频率。RGB、iTOF 深度、
+iTOF 灰度分别对应 stream mask 的 bit 0、bit 2、bit 7，默认全开掩码为 `0x85`。
+IMU 不占 stream mask 位，`enable_imu` 只控制 ROS IMU topic；当前固件仍需要至少一路
+视频流承载复合帧，因此 `enable_imu=true` 时不允许同时关闭全部视频流。任一 XU
+命令传输失败或设备 ACK 非零时，节点会记录命令、返回值和 ACK 并终止启动。
 
 RViz 的 IMU 显示订阅 `/tof_stereo_camera/imu/data`，显示姿态坐标轴和去旋转后的加速度
 向量。默认 Fixed Frame 为 `tof_stereo_camera_imu_frame`，因此没有外部 TF 时也可以独立
 查看 IMU。接入机器人 TF 树后，应将 Fixed Frame 改为真实的世界或机体坐标系，并提供
 对应的有效 TF。
 
-## 0.4.0 行为
+## 0.5.0 行为
 
-默认复合帧规格为 `2048x2738 YUYV`，其中 RGB 子帧为与标定文件一致的
-`2048x1536 bgr8`。驱动适配新版 SDK ABI：`stereo_camera_frame_t` 为
+节点不再暴露容易误解的 `width`、`height` 参数。`stream_profile=main` 映射到
+`2048x2738` 完整复合帧和 `2048x1536` RGB 子帧；`stream_profile=sub` 映射到
+`1920x2362` 完整复合帧和 `1920x1080` RGB 子帧。默认使用与现有标定文件一致的
+主码流，像素格式为 `YUYV`。驱动适配新版 SDK ABI：`stereo_camera_frame_t` 为
 56 字节，`frame_timestamp` 和 IMU 样本 `timestamp` 均为微秒级
-独立设备时钟的微秒时间，IMU 样本 `idx` 位于偏移 8。旧版 SDK 二进制与该布局
+独立设备时钟时间，IMU 样本 `idx` 位于偏移 32，六轴浮点数据从偏移 8 开始。
+旧版 SDK 二进制与该布局
 不兼容，头文件、共享库和调试符号必须成套更新；设备固件也必须输出新版 IMU 布局。
 
 每个有效的 IMU 帧会复制并发布其中全部样本，避免下一次

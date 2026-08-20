@@ -59,7 +59,7 @@ Visualization Manager:
     - Acceleration properties:
         Acc. vector alpha: 1
         Acc. vector color: 255; 0; 0
-        Acc. vector scale: 1
+        Acc. vector scale: 0.1
         Derotate acceleration: true
         Enable acceleration: true
       Axes properties:

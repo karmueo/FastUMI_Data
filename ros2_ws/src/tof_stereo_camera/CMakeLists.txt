@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc)
 
@@ -35,9 +36,16 @@ target_include_directories(frame_utils PUBLIC include)
 target_link_libraries(frame_utils PUBLIC stereo_camera_sdk ${OpenCV_LIBS})
 ament_target_dependencies(frame_utils PUBLIC rclcpp sensor_msgs)
 
+add_library(xu_config STATIC src/xu_config.cpp)
+target_include_directories(xu_config PUBLIC include)
+target_link_libraries(xu_config PUBLIC stereo_camera_sdk)
+
+add_library(stream_profile STATIC src/stream_profile.cpp)
+target_include_directories(stream_profile PUBLIC include)
+
 add_executable(tof_stereo_camera_node src/tof_stereo_camera_node.cpp)
-target_link_libraries(tof_stereo_camera_node frame_utils stereo_camera_sdk)
-ament_target_dependencies(tof_stereo_camera_node rclcpp sensor_msgs)
+target_link_libraries(tof_stereo_camera_node frame_utils stream_profile xu_config stereo_camera_sdk)
+ament_target_dependencies(tof_stereo_camera_node rclcpp rcl_interfaces sensor_msgs)
 set_target_properties(tof_stereo_camera_node PROPERTIES
   BUILD_RPATH "${STEREO_CAMERA_SDK_ROOT}/lib"
   INSTALL_RPATH "$ORIGIN"
@@ -45,6 +53,8 @@ set_target_properties(tof_stereo_camera_node PROPERTIES
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(frame_utils PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(stream_profile PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(xu_config PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(tof_stereo_camera_node PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
@@ -76,6 +86,16 @@ if(BUILD_TESTING)
     target_link_libraries(test_frame_utils frame_utils stereo_camera_sdk)
     ament_target_dependencies(test_frame_utils rclcpp sensor_msgs)
     set_property(TARGET test_frame_utils PROPERTY EXCLUDE_FROM_ALL FALSE)
+  endif()
+  ament_add_gtest(test_xu_config test/test_xu_config.cpp)
+  if(TARGET test_xu_config)
+    target_link_libraries(test_xu_config xu_config stereo_camera_sdk)
+    set_property(TARGET test_xu_config PROPERTY EXCLUDE_FROM_ALL FALSE)
+  endif()
+  ament_add_gtest(test_stream_profile test/test_stream_profile.cpp)
+  if(TARGET test_stream_profile)
+    target_link_libraries(test_stream_profile stream_profile)
+    set_property(TARGET test_stream_profile PROPERTY EXCLUDE_FROM_ALL FALSE)
   endif()
 endif()
 

@@ -3,7 +3,7 @@
  * @brief 打包 stereo_camera SDK 的 ROS 2 图像与 IMU 发布节点。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-14
+ * @date 修改：2026-08-20
  */
 #include <atomic>
 #include <chrono>
@@ -17,12 +17,15 @@
 #include <unordered_map>
 #include <vector>
 
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 
 #include "stereo_camera/stereo_camera.h"
 #include "tof_stereo_camera/frame_utils.hpp"
+#include "tof_stereo_camera/stream_profile.hpp"
+#include "tof_stereo_camera/xu_config.hpp"
 
 namespace tof_stereo_camera {
 namespace {
@@ -43,6 +46,19 @@ void CaptureClockAnchor(std::int64_t *steady_ns, std::int64_t *system_ns) {
   *system_ns = unix_ns;
 }
 
+/**
+ * @brief 创建仅允许节点启动时赋值的 ROS 参数描述符。
+ * @param[in] description 参数用途说明。
+ * @return 设置了只读标志的参数描述符。
+ */
+rcl_interfaces::msg::ParameterDescriptor
+ReadOnlyParameter(const std::string &description) {
+  rcl_interfaces::msg::ParameterDescriptor descriptor; ///< 待返回的只读描述符。
+  descriptor.description = description;
+  descriptor.read_only = true;
+  return descriptor;
+}
+
 } // namespace
 
 /**
@@ -54,15 +70,25 @@ class StereoCameraNode final : public rclcpp::Node {
 public:
   /** @brief 声明运行参数、建立时间同步器并启动采集线程。 */
   StereoCameraNode() : Node("tof_stereo_camera_node") {
-    const bool enable_rgb = this->declare_parameter<bool>("enable_rgb", true);
-    const bool enable_itof_depth =
-        this->declare_parameter<bool>("enable_itof_depth", true);
-    const bool enable_itof_gray =
-        this->declare_parameter<bool>("enable_itof_gray", true);
+    const bool enable_rgb = this->declare_parameter<bool>(
+        "enable_rgb", true,
+        ReadOnlyParameter("同时启用设备端 RGB 流和 ROS RGB topic"));
+    const bool enable_itof_depth = this->declare_parameter<bool>(
+        "enable_itof_depth", true,
+        ReadOnlyParameter("同时启用设备端 iTOF 深度流和 ROS 深度 topic"));
+    const bool enable_itof_gray = this->declare_parameter<bool>(
+        "enable_itof_gray", true,
+        ReadOnlyParameter("同时启用设备端 iTOF 灰度流和 ROS 灰度 topic"));
     const bool enable_imu = this->declare_parameter<bool>("enable_imu", true);
-    // 2048 系完整复合帧对应标定使用的 2048x1536 RGB 子帧。
-    const int width = this->declare_parameter<int>("width", 2048);
-    const int height = this->declare_parameter<int>("height", 2738);
+    const int imu_accel_hz = this->declare_parameter<int>(
+        "imu_accel_hz", 100,
+        ReadOnlyParameter("设备加速度计采样频率，单位 Hz"));
+    const int imu_gyro_hz = this->declare_parameter<int>(
+        "imu_gyro_hz", 100, ReadOnlyParameter("设备陀螺仪采样频率，单位 Hz"));
+    const std::string stream_profile_name =
+        this->declare_parameter<std::string>(
+            "stream_profile", "main",
+            ReadOnlyParameter("码流档位，可选 main 或 sub"));
     const std::string pixel_format =
         this->declare_parameter<std::string>("pixel_format", "YUYV");
     const std::string device_path =
@@ -85,10 +111,14 @@ public:
         "itof_frame_id", "tof_stereo_camera_itof_optical_frame");
     imu_frame_id_ = this->declare_parameter<std::string>(
         "imu_frame_id", "tof_stereo_camera_imu_frame");
-    if (width <= 0 || height <= 0 ||
-        (pixel_format != "YUYV" && pixel_format != "NV12")) {
-      throw std::invalid_argument("width and height must be positive; "
-                                  "pixel_format must be YUYV or NV12");
+    StreamProfile stream_profile; ///< 码流档位对应的固定复合帧格式。
+    std::string stream_profile_error; ///< 接收非法码流档位诊断。
+    if (!ResolveStreamProfile(stream_profile_name, &stream_profile,
+                              &stream_profile_error)) {
+      throw std::invalid_argument(stream_profile_error);
+    }
+    if (pixel_format != "YUYV" && pixel_format != "NV12") {
+      throw std::invalid_argument("pixel_format must be YUYV or NV12");
     }
     if (timestamp_calibration_frames < 2 ||
         timestamp_window_frames < timestamp_calibration_frames ||
@@ -97,6 +127,13 @@ public:
         timestamp_max_slew_ppm >= 1'000'000.0) {
       throw std::invalid_argument(
           "invalid timestamp synchronization parameters");
+    }
+    XuConfiguration xu_configuration; ///< 经过校验的 SDK XU 启动配置。
+    std::string xu_error; ///< 接收 XU 参数校验或设备命令失败原因。
+    if (!BuildXuConfiguration(enable_rgb, enable_itof_depth, enable_itof_gray,
+                              enable_imu, imu_accel_hz, imu_gyro_hz,
+                              &xu_configuration, &xu_error)) {
+      throw std::invalid_argument(xu_error);
     }
     timestamp_calibration_frames_ = timestamp_calibration_frames;
     timestamp_window_frames_ = timestamp_window_frames;
@@ -139,7 +176,8 @@ public:
     if (camera_ == nullptr) {
       throw std::runtime_error("unable to open a stereo camera");
     }
-    if (stereo_camera_set_format(camera_, width, height,
+    if (stereo_camera_set_format(camera_, stream_profile.composite_width,
+                                 stream_profile.composite_height,
                                  pixel_format.c_str()) != 0) {
       stereo_camera_close(camera_);
       camera_ = nullptr;
@@ -163,6 +201,19 @@ public:
     stereo_camera_set_log(enable_sdk_log ? 1 : 0, sdk_log_path_value);
     sdk_log_configured_ = true;
 
+    if (!ApplyXuConfiguration(camera_, xu_configuration, &xu_error)) {
+      stereo_camera_close(camera_);
+      camera_ = nullptr;
+      stereo_camera_set_log(0, nullptr);
+      sdk_log_configured_ = false;
+      throw std::runtime_error(xu_error);
+    }
+    RCLCPP_INFO(this->get_logger(),
+                "SDK XU configuration applied: accel_hz=%u gyro_hz=%u "
+                "stream_mask=0x%08x ack=0",
+                xu_configuration.accel_hz, xu_configuration.gyro_hz,
+                xu_configuration.stream_mask);
+
     if (stereo_camera_start_stream(camera_) != 0) {
       stereo_camera_close(camera_);
       camera_ = nullptr;
@@ -174,9 +225,12 @@ public:
     running_.store(true);
     capture_thread_ = std::thread(&StereoCameraNode::CaptureLoop, this);
     RCLCPP_INFO(this->get_logger(),
-                "stereo camera stream started: device=%s, format=%s %dx%d",
+                "stereo camera stream started: device=%s, profile=%s "
+                "rgb=%dx%d, format=%s %dx%d",
                 device_path.empty() ? "auto" : device_path.c_str(),
-                actual_format, actual_width, actual_height);
+                stream_profile_name.c_str(), stream_profile.rgb_width,
+                stream_profile.rgb_height, actual_format, actual_width,
+                actual_height);
   }
 
   /** @brief 析构时停止采集并释放相机资源。 */
@@ -272,9 +326,12 @@ private:
           rclcpp::Time(sample_time.system_ns, RCL_SYSTEM_TIME);
       message.header.frame_id = imu_frame_id_;
       message.orientation_covariance[0] = -1.0;
-      message.angular_velocity.x = sample.gx;
-      message.angular_velocity.y = sample.gy;
-      message.angular_velocity.z = sample.gz;
+      message.angular_velocity.x =
+          DegreesPerSecondToRadiansPerSecond(sample.gx);
+      message.angular_velocity.y =
+          DegreesPerSecondToRadiansPerSecond(sample.gy);
+      message.angular_velocity.z =
+          DegreesPerSecondToRadiansPerSecond(sample.gz);
       message.linear_acceleration.x = sample.ax;
       message.linear_acceleration.y = sample.ay;
       message.linear_acceleration.z = sample.az;
