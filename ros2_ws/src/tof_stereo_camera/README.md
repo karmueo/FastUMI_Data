@@ -75,7 +75,7 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `device_path` | 空 | 指定 `/dev/video*`；空值表示自动选择 |
 | `enable_sdk_log` | `false` | 启用 SDK 内部文件日志，仅用于真机排障 |
 | `sdk_log_path` | 空 | SDK 日志文件路径；空值使用 SDK 默认路径 `/tmp/imu_head_dump.log` |
-| `stream_profile` | `main` | 码流档位：`main` 为 `2048x1536` RGB，`sub` 为 `1920x1080` RGB；仅启动时设置 |
+| `stream_profile` | `main` | 码流档位：`main` 的 RGB-only 采集尺寸为 `2048x1538`，`sub` 为 `1920x1082`；解析后的有效 RGB 高度分别为 1536 和 1080，仅启动时设置 |
 | `pixel_format` | `YUYV` | 请求的像素格式，可选 `YUYV` 或 `NV12` |
 | `rgb_output_encoding` | `yuv422_yuy2` | RGB topic 编码，可选 `yuv422_yuy2` 或 `bgr8`，仅启动时设置；前者要求 `pixel_format=YUYV` |
 | `enable_rgb` | `true` | 启用设备端 RGB 流并发布 RGB 图像；仅启动时设置 |
@@ -151,10 +151,11 @@ RViz 的 IMU 显示订阅 `/tof_stereo_camera/imu/data`，显示姿态坐标轴�
 
 ## 0.5.0 行为
 
-节点不再暴露容易误解的 `width`、`height` 参数。`stream_profile=main` 映射到
-`2048x2738` 完整复合帧和 `2048x1536` RGB 子帧；`stream_profile=sub` 映射到
-`1920x2362` 完整复合帧和 `1920x1080` RGB 子帧。默认使用与现有标定文件一致的
-主码流，像素格式为 `YUYV`。驱动适配新版 SDK ABI：`stereo_camera_frame_t` 为
+节点不再暴露容易误解的 `width`、`height` 参数。`stream_profile` 默认使用 `main`，
+也可设置为 `sub`。关闭全部 iTOF 图像流时，主、子码流分别协商 `2048x1538` 和
+`1920x1082` RGB-only 复合帧；启用任意 iTOF 图像流时，分别协商 `2048x2738` 和
+`1920x2362` 完整复合帧。解析后的 RGB 有效尺寸分别为 `2048x1536` 和
+`1920x1080`。默认像素格式为 `YUYV`。驱动适配新版 SDK ABI：`stereo_camera_frame_t` 为
 56 字节，`frame_timestamp` 和 IMU 样本 `timestamp` 均为微秒级
 独立设备时钟时间，IMU 样本 `idx` 位于偏移 32，六轴浮点数据从偏移 8 开始。
 旧版 SDK 二进制与该布局

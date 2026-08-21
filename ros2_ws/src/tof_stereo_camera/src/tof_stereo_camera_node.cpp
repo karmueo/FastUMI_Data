@@ -191,8 +191,13 @@ public:
     if (camera_ == nullptr) {
       throw std::runtime_error("unable to open a stereo camera");
     }
-    if (stereo_camera_set_format(camera_, stream_profile.composite_width,
-                                 stream_profile.composite_height,
+    const bool enable_itof =
+        enable_itof_depth || enable_itof_gray; ///< 是否需要完整 iTOF 复合帧。
+    const CaptureFormat capture_format =
+        SelectCaptureFormat(stream_profile,
+                            enable_itof); ///< 实际请求的 UVC 采集尺寸。
+    if (stereo_camera_set_format(camera_, capture_format.width,
+                                 capture_format.height,
                                  pixel_format.c_str()) != 0) {
       stereo_camera_close(camera_);
       camera_ = nullptr;
@@ -241,11 +246,13 @@ public:
     capture_thread_ = std::thread(&StereoCameraNode::CaptureLoop, this);
     RCLCPP_INFO(this->get_logger(),
                 "stereo camera stream started: device=%s, profile=%s "
-                "rgb=%dx%d, format=%s %dx%d, rgb_output_encoding=%s",
+                "rgb=%dx%d, itof=%s, format=%s %dx%d, "
+                "rgb_output_encoding=%s",
                 device_path.empty() ? "auto" : device_path.c_str(),
                 stream_profile_name.c_str(), stream_profile.rgb_width,
-                stream_profile.rgb_height, actual_format, actual_width,
-                actual_height, rgb_output_encoding.c_str());
+                stream_profile.rgb_height, enable_itof ? "enabled" : "disabled",
+                actual_format, actual_width, actual_height,
+                rgb_output_encoding.c_str());
   }
 
   /** @brief 析构时停止采集并释放相机资源。 */

@@ -8,6 +8,12 @@
 #include "tof_stereo_camera/stream_profile.hpp"
 
 namespace tof_stereo_camera {
+namespace {
+
+/** @brief RGB-only 复合帧在有效 RGB 图像之外包含的设备帧头行数。 */
+constexpr int kRgbOnlyHeaderRows = 2;
+
+} // namespace
 
 /** @copydoc ResolveStreamProfile */
 bool ResolveStreamProfile(const std::string &name, StreamProfile *profile,
@@ -26,6 +32,16 @@ bool ResolveStreamProfile(const std::string &name, StreamProfile *profile,
   }
   *error = "stream_profile must be 'main' or 'sub'";
   return false;
+}
+
+/** @copydoc SelectCaptureFormat */
+CaptureFormat SelectCaptureFormat(const StreamProfile &profile,
+                                  bool enable_itof) {
+  if (enable_itof) {
+    return CaptureFormat{profile.composite_width, profile.composite_height};
+  }
+  return CaptureFormat{profile.rgb_width,
+                       profile.rgb_height + kRgbOnlyHeaderRows};
 }
 
 } // namespace tof_stereo_camera

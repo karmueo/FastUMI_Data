@@ -23,6 +23,16 @@ TEST(StreamProfile, ResolvesMainProfile) {
   EXPECT_EQ(profile.composite_height, 2738);
   EXPECT_EQ(profile.rgb_width, 2048);
   EXPECT_EQ(profile.rgb_height, 1536);
+
+  const CaptureFormat rgb_only =
+      SelectCaptureFormat(profile, false); ///< 主码流 RGB-only 采集尺寸。
+  EXPECT_EQ(rgb_only.width, 2048);
+  EXPECT_EQ(rgb_only.height, 1538);
+
+  const CaptureFormat with_itof =
+      SelectCaptureFormat(profile, true); ///< 主码流完整复合帧尺寸。
+  EXPECT_EQ(with_itof.width, 2048);
+  EXPECT_EQ(with_itof.height, 2738);
 }
 
 /** @brief 验证子码流映射到 1920 系完整复合帧。 */
@@ -34,6 +44,16 @@ TEST(StreamProfile, ResolvesSubProfile) {
   EXPECT_EQ(profile.composite_height, 2362);
   EXPECT_EQ(profile.rgb_width, 1920);
   EXPECT_EQ(profile.rgb_height, 1080);
+
+  const CaptureFormat rgb_only =
+      SelectCaptureFormat(profile, false); ///< 子码流 RGB-only 采集尺寸。
+  EXPECT_EQ(rgb_only.width, 1920);
+  EXPECT_EQ(rgb_only.height, 1082);
+
+  const CaptureFormat with_itof =
+      SelectCaptureFormat(profile, true); ///< 子码流完整复合帧尺寸。
+  EXPECT_EQ(with_itof.width, 1920);
+  EXPECT_EQ(with_itof.height, 2362);
 }
 
 /** @brief 验证非法档位名称会得到清晰诊断。 */
