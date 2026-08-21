@@ -24,6 +24,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -76,6 +77,9 @@ struct Options {
   /// 是否创建三路原始图像显示窗口。
   bool display = false;
 
+  /// 是否仅启用 RGB 视频流；IMU 不受视频流掩码影响。
+  bool rgb_only = false;
+
   /// iTOF 深度图显示映射使用的最大原始值。
   int depth_max = 5000;
 
@@ -90,8 +94,8 @@ struct Options {
  * @brief 保存一条传感器类型和流 ID 路径的窗口统计数据。
  */
 struct RouteStats {
-  /// 当前统计窗口内 stereo_camera_parse_frame 的成功返回次数。
-  std::uint64_t callback_count = 0;
+  /// 当前统计窗口内该路由成功解析的帧数。
+  std::uint64_t frame_count = 0;
 
   /// 当前统计窗口内的 IMU 样本数。
   std::uint64_t imu_sample_count = 0;
@@ -101,10 +105,35 @@ struct RouteStats {
 using RouteKey = std::pair<int, int>;
 
 /**
+ * @brief 持有一路 SDK 帧的元数据和 payload 副本。
+ *
+ * SDK 返回的结构体和 payload 会在下一次 parse 调用后失效，因此读取线程
+ * 必须在提交结果并继续调用 SDK 前完成深拷贝。
+ */
+struct OwnedFrame {
+  /// SDK 帧元数据；data 在 view() 中指向本对象持有的 payload。
+  stereo_camera_frame_t metadata{};
+
+  /// 当前路由的 payload 所有权副本；空 payload 保持为空。
+  std::vector<unsigned char> payload;
+
+  /**
+   * @brief 返回供主线程同步处理的元数据和 owned payload 视图。
+   *
+   * @return 元数据副本；非空 payload 时 data 指向 payload.data()。
+   */
+  stereo_camera_frame_t view() {
+    stereo_camera_frame_t frame = metadata; // 当前路由的元数据副本。
+    frame.data = payload.empty() ? nullptr : payload.data();
+    return frame;
+  }
+};
+
+/**
  * @brief 在 SDK 读取线程和主线程之间传递单次阻塞读取结果。
  *
- * 主线程处理完成前，读取线程不会发起下一次解析，确保 SDK 返回的帧指针
- * 在使用期间保持有效。
+ * 读取线程会将一次 stereo_camera_parse_frame 调用结果交给主线程。主线程
+ * 处理完成前，读取线程不会发起下一次调用。
  */
 struct FrameReadState {
   /// 保护读取结果和停止状态的互斥量。
@@ -113,10 +142,10 @@ struct FrameReadState {
   /// 通知读取结果已就绪或线程应退出的条件变量。
   std::condition_variable condition;
 
-  /// 最近一次 SDK 读取结果；允许为空以表示无帧或错误。
-  stereo_camera_frame_t *frame = nullptr;
+  /// 最近一次 SDK 调用结果；成功时仅包含一路帧，空返回时为空。
+  std::vector<OwnedFrame> frames;
 
-  /// 是否有一轮新的读取结果等待主线程处理。
+  /// 是否有一轮读取结果等待主线程处理。
   bool result_ready = false;
 
   /// 是否请求读取线程停止。
@@ -135,21 +164,35 @@ void handle_signal(int signal_number) {
 }
 
 /**
- * @brief 持续执行 SDK 阻塞读取，并逐次将结果交给主线程。
+ * @brief 持续执行 SDK 阻塞读取，并逐次将解析结果交给主线程。
  *
  * @param[in] camera 已启动视频流的 SDK 相机句柄。
  * @param[in,out] state 读取线程与主线程共享的同步状态。
- * @note 主线程通过 stereo_camera_cancel_read 唤醒阻塞读取后，本函数退出。
+ * @note 每个非空 payload 和元数据都会在下一次 SDK 调用前深拷贝；主线程
+ * 通过 stereo_camera_cancel_read 唤醒阻塞读取后，本函数退出。
  */
 void run_frame_reader(stereo_camera_t *camera, FrameReadState *state) {
   while (true) {
+    std::vector<OwnedFrame> frames; // 本次 SDK 调用结果，最多包含一路帧。
     stereo_camera_frame_t *frame =
-        stereo_camera_parse_frame(camera); // 本轮 SDK 阻塞读取结果。
+        stereo_camera_parse_frame(camera); // 当前 SDK 路由帧指针。
+    if (frame != nullptr) {
+      OwnedFrame owned_frame;              // 当前路由的所有权快照。
+      owned_frame.metadata = *frame;       // 先复制所有元数据字段。
+      owned_frame.metadata.data = nullptr; // 禁止保留 SDK 的易失指针。
+      if (frame->data != nullptr && frame->data_size > 0) {
+        const std::size_t payload_size =
+            static_cast<std::size_t>(frame->data_size); // payload 字节数。
+        owned_frame.payload.assign(frame->data, frame->data + payload_size);
+      }
+      frames.push_back(std::move(owned_frame));
+    }
+
     std::unique_lock<std::mutex> lock(state->mutex); // 共享状态访问锁。
     if (state->stop_requested) {
       return;
     }
-    state->frame = frame;
+    state->frames = std::move(frames);
     state->result_ready = true;
     state->condition.notify_one();
     state->condition.wait(lock, [state] {
@@ -289,6 +332,7 @@ void print_usage(std::ostream &output, const char *program_name) {
          << kDefaultFormat << "\n"
          << "  --display       显示 RGB、iTOF Depth 和 iTOF Gray；GPU "
             "直接解释原始 payload\n"
+         << "  --rgb-only      仅启用 RGB 视频流；IMU 仍由设备推送\n"
          << "  --depth-max N   16位深度后备路径的显示最大值；默认 5000\n"
          << "  --gray-max N    16位灰度后备路径的显示最大值；默认 65535\n"
          << "  --verbose       每次 parse_frame 成功返回都打印原始字段\n"
@@ -380,6 +424,10 @@ bool parse_options(int argc, char *argv[], Options *options,
       options->display = true;
       continue;
     }
+    if (argument == "--rgb-only") {
+      options->rgb_only = true;
+      continue;
+    }
     if (argument == "--device") {
       if (!read_option_value(argc, argv, &index, "--device", &value, error)) {
         return false;
@@ -430,17 +478,25 @@ bool parse_options(int argc, char *argv[], Options *options,
 }
 
 /**
- * @brief 为三路显示显式启用 RGB、iTOF Depth 和 iTOF Gray 设备流。
+ * @brief 按运行选项配置设备需要推送的视频流。
  *
  * @param[in] camera 已打开且已协商格式的 SDK 相机句柄。
+ * @param[in] rgb_only 为 true 时只启用 RGB，否则启用三路显示视频流。
  * @param[out] error XU 传输或设备 ACK 失败的诊断信息。
  * @return 设备接受流掩码时返回 true。
  */
-bool configure_display_streams(stereo_camera_t *camera, std::string *error) {
-  const std::uint32_t stream_mask =
-      (std::uint32_t{1} << static_cast<unsigned int>(kRgbStreamId)) |
+bool configure_video_streams(stereo_camera_t *camera, bool rgb_only,
+                             std::string *error) {
+  const std::uint32_t rgb_stream_mask =
+      std::uint32_t{1} << static_cast<unsigned int>(kRgbStreamId);
+  const std::uint32_t display_stream_mask =
+      rgb_stream_mask |
       (std::uint32_t{1} << static_cast<unsigned int>(kItofDepthStreamId)) |
       (std::uint32_t{1} << static_cast<unsigned int>(kItofGrayStreamId));
+  const std::uint32_t stream_mask =
+      rgb_only ? rgb_stream_mask : display_stream_mask;
+  const char *stream_description =
+      rgb_only ? "RGB only" : "RGB + iTOF Depth + iTOF Gray";
   const stereo_camera_xu_stream_mask_param_t parameter{
       stream_mask};         // 设备视频流选择掩码。
   int acknowledgement = -1; // 设备命令 ACK；零表示成功。
@@ -448,8 +504,8 @@ bool configure_display_streams(stereo_camera_t *camera, std::string *error) {
       camera, STEREO_CAMERA_XU_CMD_STREAM_MASK, &parameter, sizeof(parameter),
       &acknowledgement); // SDK XU 调用结果。
   if (result == 0 && acknowledgement == 0) {
-    std::cout << "Display stream mask configured: 0x" << std::hex << stream_mask
-              << std::dec << " (RGB + iTOF Depth + iTOF Gray)\n";
+    std::cout << "Video stream mask configured: 0x" << std::hex << stream_mask
+              << std::dec << " (" << stream_description << ")\n";
     return true;
   }
   std::ostringstream diagnostic; // XU 失败诊断文本。
@@ -461,31 +517,45 @@ bool configure_display_streams(stereo_camera_t *camera, std::string *error) {
 }
 
 /**
- * @brief 打印各路在一个主机时间窗口内的回调和 IMU 样本速率。
+ * @brief 打印 SDK 解析结果、各图像流和 IMU 在主机时间窗口内的速率。
  *
  * @param output 输出流。
  * @param routes 按传感器类型和流 ID 保存的统计数据。
  * @param window_seconds 窗口长度，单位为秒。
+ * @param parsed_frame_count 当前窗口内 SDK 成功返回的路由帧数。
  * @param null_returns 当前窗口内 SDK 返回空指针的次数。
  */
 void print_window_stats(std::ostream &output,
                         const std::map<RouteKey, RouteStats> &routes,
-                        double window_seconds, std::uint64_t null_returns) {
+                        double window_seconds, std::uint64_t parsed_frame_count,
+                        std::uint64_t null_returns) {
+  // 当前窗口内 SDK 路由帧成功返回速率。
+  const double parse_fps =
+      static_cast<double>(parsed_frame_count) / window_seconds;
   output << "[stats] window=" << std::fixed << std::setprecision(3)
-         << window_seconds << " s null_returns=" << null_returns << '\n';
+         << window_seconds << " s null_returns=" << null_returns
+         << " PARSE FPS=" << parse_fps << '\n';
   for (const auto &entry : routes) {
     const RouteKey &route = entry.first;    // 传感器类型和流 ID。
     const RouteStats &stats = entry.second; // 当前路的窗口统计。
-    const double callback_fps =
-        static_cast<double>(stats.callback_count) / window_seconds;
-    output << "  sourcetype=" << route.first << " (" << sensor_name(route.first)
-           << ") stream_id=" << route.second << " callback_fps=" << callback_fps
-           << " parse_frame_returns/s";
-    if (route.first == STEREO_SENSOR_IMU) {
-      const double sample_rate =
+    const double stream_fps =
+        static_cast<double>(stats.frame_count) / window_seconds;
+    if (route.first == STEREO_SENSOR_RGB && route.second == kRgbStreamId) {
+      output << "  RGB FPS=" << stream_fps;
+    } else if (route.first == STEREO_SENSOR_ITOF &&
+               route.second == kItofDepthStreamId) {
+      output << "  ITOF DEPTH FPS=" << stream_fps;
+    } else if (route.first == STEREO_SENSOR_ITOF &&
+               route.second == kItofGrayStreamId) {
+      output << "  ITOF GRAY FPS=" << stream_fps;
+    } else if (route.first == STEREO_SENSOR_IMU) {
+      const double imu_fps =
           static_cast<double>(stats.imu_sample_count) / window_seconds;
-      output << " imu_sample_rate=" << sample_rate
-             << " samples/s (frame_seq_count 优先)";
+      output << "  IMU FPS=" << imu_fps << " (frame_seq_count 优先)";
+    } else {
+      output << "  sourcetype=" << route.first << " ("
+             << sensor_name(route.first) << ") stream_id=" << route.second
+             << " FPS=" << stream_fps;
     }
     output << '\n';
   }
@@ -499,7 +569,7 @@ void print_window_stats(std::ostream &output,
  */
 void reset_window_stats(std::map<RouteKey, RouteStats> *routes) {
   for (auto &entry : *routes) {
-    entry.second.callback_count = 0;
+    entry.second.frame_count = 0;
     entry.second.imu_sample_count = 0;
   }
 }
@@ -556,16 +626,19 @@ int main(int argc, char *argv[]) {
   std::cout << "Negotiated format: " << actual_width << "x" << actual_height
             << " " << actual_format << '\n';
 
-  FrameDisplay display;      // 可选的三路 GPU 显示窗口。
-  std::string display_error; // 显示初始化或帧上传错误。
-  if (options.display && !configure_display_streams(camera, &display_error)) {
-    std::cerr << "Error: " << display_error << '\n';
+  FrameDisplay display;     // 可选的 GPU 显示窗口。
+  std::string stream_error; // 视频流掩码配置错误。
+  if ((options.display || options.rgb_only) &&
+      !configure_video_streams(camera, options.rgb_only, &stream_error)) {
+    std::cerr << "Error: " << stream_error << '\n';
     stereo_camera_close(camera);
     return 1;
   }
+  std::string display_error; // 显示初始化或帧上传错误。
   if (options.display &&
-      !display.Initialize({options.depth_max, options.gray_max},
-                          &display_error)) {
+      !display.Initialize(
+          {options.depth_max, options.gray_max, !options.rgb_only},
+          &display_error)) {
     std::cerr << "Error: display initialization failed: " << display_error
               << '\n';
     stereo_camera_close(camera);
@@ -587,6 +660,7 @@ int main(int argc, char *argv[]) {
   Clock::time_point window_start = Clock::now(); // 当前主机时间窗口起点。
   int exit_code = 0;                             // 采集循环退出状态。
   std::uint64_t consecutive_null_frames = 0; // 连续无帧/错误返回次数。
+  std::uint64_t parsed_frame_count = 0; // 当前窗口内成功解析的路由帧数。
   std::uint64_t null_returns = 0; // 当前统计窗口内的空指针返回次数。
   Clock::time_point last_success_frame_time = window_start; // 最近成功帧时间。
   Clock::time_point last_null_warning_time =
@@ -606,21 +680,25 @@ int main(int argc, char *argv[]) {
       break;
     }
 
-    stereo_camera_frame_t *frame = nullptr; // 当前等待处理的 SDK 帧指针。
+    std::vector<OwnedFrame> batch; // 当前等待处理的完整 UVC 路由批次。
     bool result_ready = false; // 是否取得一轮 SDK 读取结果。
     {
       std::unique_lock<std::mutex> lock(read_state.mutex); // 读取状态访问锁。
       read_state.condition.wait_for(
-          lock, kDisplayRefreshInterval,
-          [&read_state] { return read_state.result_ready; });
+          lock, kDisplayRefreshInterval, [&read_state] {
+            return read_state.result_ready || read_state.stop_requested;
+          });
+      if (read_state.stop_requested) {
+        break;
+      }
       result_ready = read_state.result_ready;
       if (result_ready) {
-        frame = read_state.frame;
+        batch = std::move(read_state.frames);
       }
     }
 
     if (result_ready) {
-      if (frame == nullptr) {
+      if (batch.empty()) {
         ++null_returns;
         ++consecutive_null_frames;
         const Clock::time_point null_time =
@@ -644,54 +722,63 @@ int main(int argc, char *argv[]) {
         }
       } else {
         consecutive_null_frames = 0;
+        parsed_frame_count += static_cast<std::uint64_t>(batch.size());
         const Clock::time_point frame_time =
-            Clock::now(); // 成功帧到达的主机单调时钟时间。
+            Clock::now(); // 当前路由帧到达的主机单调时钟时间。
         last_success_frame_time = frame_time;
+        bool display_updated = false; // 本批次是否至少更新一路显示纹理。
 
-        const RouteKey route_key{frame->sourcetype,
-                                 frame->stream_id}; // 当前帧路由标识。
-        const auto insertion = routes.emplace(route_key, RouteStats{});
-        RouteStats &stats = insertion.first->second; // 当前路的统计对象。
-        if (insertion.second || options.verbose) {
-          print_frame_metadata(std::cout, *frame,
-                               insertion.second ? "[frame first] "
-                                                : "[frame] ");
-        }
-        if (insertion.second && frame->sourcetype == STEREO_SENSOR_ITOF) {
-          print_itof_payload_diagnostics(*frame);
-        }
-        ++stats.callback_count;
-        if (frame->sourcetype == STEREO_SENSOR_IMU) {
-          std::uint64_t sample_count =
-              frame->frame_seq_count; // 当前 IMU 回调包含的样本数。
-          if (sample_count == 0 && frame->data_size > 0) {
-            sample_count = static_cast<std::uint64_t>(frame->data_size) /
-                           sizeof(stereo_camera_imu_data_t);
+        for (OwnedFrame &owned_frame : batch) {
+          stereo_camera_frame_t frame =
+              owned_frame.view(); // 当前路由的稳定元数据和 payload 视图。
+          const RouteKey route_key{frame.sourcetype,
+                                   frame.stream_id}; // 当前帧路由标识。
+          const auto insertion = routes.emplace(route_key, RouteStats{});
+          RouteStats &stats = insertion.first->second; // 当前路的统计对象。
+          if (insertion.second || options.verbose) {
+            print_frame_metadata(std::cout, frame,
+                                 insertion.second ? "[frame first] "
+                                                  : "[frame] ");
           }
-          stats.imu_sample_count += sample_count;
+          if (insertion.second && frame.sourcetype == STEREO_SENSOR_ITOF) {
+            print_itof_payload_diagnostics(frame);
+          }
+          ++stats.frame_count;
+          if (frame.sourcetype == STEREO_SENSOR_IMU) {
+            std::uint64_t sample_count =
+                frame.frame_seq_count; // 当前 IMU 回调包含的样本数。
+            if (sample_count == 0 && frame.data_size > 0) {
+              sample_count = static_cast<std::uint64_t>(frame.data_size) /
+                             sizeof(stereo_camera_imu_data_t);
+            }
+            stats.imu_sample_count += sample_count;
+          }
+
+          if (options.display) {
+            display_error.clear();
+            const bool image_updated =
+                display.Update(frame, &display_error); // 是否更新了显示纹理。
+            if (!display_error.empty()) {
+              std::string &last_error =
+                  display_route_errors[route_key]; // 当前路最近一次显示错误。
+              if (last_error != display_error) {
+                std::cerr << "Warning: display skipped sourcetype="
+                          << frame.sourcetype
+                          << " stream_id=" << frame.stream_id << ": "
+                          << display_error << '\n';
+                last_error = display_error;
+              }
+            } else if (image_updated) {
+              display_route_errors.erase(route_key);
+              display_updated = true;
+            }
+          }
         }
 
-        if (options.display) {
-          display_error.clear();
-          const bool image_updated =
-              display.Update(*frame, &display_error); // 是否更新了显示纹理。
-          if (!display_error.empty()) {
-            std::string &last_error =
-                display_route_errors[route_key]; // 当前路最近一次显示错误。
-            if (last_error != display_error) {
-              std::cerr << "Warning: display skipped sourcetype="
-                        << frame->sourcetype
-                        << " stream_id=" << frame->stream_id << ": "
-                        << display_error << '\n';
-              last_error = display_error;
-            }
-          } else if (image_updated) {
-            display_route_errors.erase(route_key);
-            if (frame_time - last_display_time >= kDisplayRefreshInterval) {
-              display.Render();
-              last_display_time = frame_time;
-            }
-          }
+        if (options.display && display_updated &&
+            frame_time - last_display_time >= kDisplayRefreshInterval) {
+          display.Render();
+          last_display_time = frame_time;
         }
       }
 
@@ -699,6 +786,7 @@ int main(int argc, char *argv[]) {
         std::lock_guard<std::mutex> lock(
             read_state.mutex); // 标记本轮结果已处理的状态锁。
         read_state.result_ready = false;
+        read_state.frames.clear();
       }
       read_state.condition.notify_one();
     }
@@ -707,8 +795,10 @@ int main(int argc, char *argv[]) {
     const double window_seconds =
         std::chrono::duration<double>(now - window_start).count();
     if (window_seconds >= 1.0) {
-      print_window_stats(std::cout, routes, window_seconds, null_returns);
+      print_window_stats(std::cout, routes, window_seconds, parsed_frame_count,
+                         null_returns);
       reset_window_stats(&routes);
+      parsed_frame_count = 0;
       null_returns = 0;
       window_start = now;
     }

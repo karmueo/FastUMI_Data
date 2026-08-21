@@ -36,6 +36,7 @@ cmake --build /tmp/tof_stereo_sdk_example_build --parallel 2
 --height N
 --format FOURCC
 --display
+--rgb-only
 --depth-max N
 --gray-max N
 --verbose
@@ -50,6 +51,16 @@ cmake --build /tmp/tof_stereo_sdk_example_build --parallel 2
 ```
 
 `--help` 只打印用法并在打开相机前成功退出，因此无硬件时也可以验证命令行接口。参数错误会打印错误和用法并返回非零状态。
+
+### 仅启用 RGB 视频流
+
+使用 `--rgb-only` 会在启动采集前下发视频流掩码 `0x1`，只启用 RGB（bit 0），不推送 iTOF Depth 和 iTOF Gray：
+
+```bash
+/tmp/tof_stereo_sdk_example_build/stereo_camera_example --rgb-only
+```
+
+视频流掩码不控制 IMU，因此该模式下设备仍会推送 IMU 数据。与 `--display` 同时使用时，窗口只显示 RGB，并使用完整窗口区域。
 
 ### 原始格式 GPU 显示
 
@@ -92,8 +103,8 @@ stereo_camera_open
 
 启动后先打印实际协商的宽度、高度和 FOURCC。每个 `sourcetype + stream_id` 第一次出现时打印一行原始 `stereo_camera_frame_t` 字段，包括 `sourcetype`、`stream_id`、`frame_seqidx`、`frame_timestamp`（微秒）、`width`、`height`、`FOURCC`、`data_size`（字节）、`match_state` 和 `frame_seq_count`。
 
-每约一秒打印各路窗口统计。`callback_fps` 的单位是 `parse_frame_returns/s`，表示主机 `std::chrono::steady_clock` 窗口内 SDK `stereo_camera_parse_frame` 成功返回的速率，不等同于设备声明帧率。IMU 路额外打印 `imu_sample_rate`，单位是 `samples/s`；样本数优先采用 `frame_seq_count`，该字段为零且 `data_size` 可推导时才按 SDK 结构体大小作后备估计。统计只读取返回结构体元数据，不访问 payload。
-当 SDK 的 `stereo_camera_parse_frame` 返回空指针且程序仍在运行时，示例会将其计入当前窗口的 `null_returns`。单个偶发空返回立即重试，不等待；连续空返回阶段每次重试前退避 1ms。仅当距最近成功帧（尚无成功帧时从启动时刻计时）至少 1 秒，才按主机 `std::chrono::steady_clock` 最多约每秒输出一次 `no frame/error` 提示；成功帧会重置连续失败计数和最近成功时间。`[stats]` 头行会显示窗口内空返回数，FPS 和 IMU 样本率只统计成功返回的帧。
+每约一秒打印窗口统计。`PARSE FPS` 表示主机 `std::chrono::steady_clock` 窗口内 `stereo_camera_parse_frame` 成功返回的路由帧数除以实际窗口时长；`RGB FPS`、`ITOF DEPTH FPS` 和 `ITOF GRAY FPS` 分别表示对应路由的成功帧数除以实际窗口时长。`IMU FPS` 表示窗口内 IMU 样本数除以实际窗口时长；样本数优先采用 `frame_seq_count`，该字段为零且 `data_size` 可推导时才按 SDK 结构体大小作后备估计。这些结果是主机接收侧测得的窗口平均值，不等同于设备声明帧率。统计只读取返回结构体元数据，不访问 payload。
+当 SDK 的 `stereo_camera_parse_frame` 返回空指针且程序仍在运行时，示例会将其计入当前窗口的 `null_returns`。单个偶发空返回立即重试，不等待；连续空返回阶段每次重试前退避 1ms。仅当距最近成功帧（尚无成功帧时从启动时刻计时）至少 1 秒，才按主机 `std::chrono::steady_clock` 最多约每秒输出一次 `no frame/error` 提示；成功帧会重置连续失败计数和最近成功时间。`[stats]` 头行会显示窗口内空返回数，所有 FPS 只统计成功读取的数据。
 
 使用 `--verbose` 时，每次 `stereo_camera_parse_frame` 成功返回都会打印上述原始字段。终端 I/O 会影响极限 FPS 测量，需观察最高速率时应保持默认输出或重定向输出。
 

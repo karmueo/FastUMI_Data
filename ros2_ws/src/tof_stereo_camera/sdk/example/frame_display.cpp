@@ -236,9 +236,12 @@ public:
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
                         SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    const char *window_title = options_.show_itof
+                                   ? "stereo_camera | RGB (top) | iTOF Depth "
+                                     "(bottom-left) | iTOF Gray (bottom-right)"
+                                   : "stereo_camera | RGB"; // 显示窗口标题。
     window_ = SDL_CreateWindow(
-        "stereo_camera | RGB (top) | iTOF Depth (bottom-left) | iTOF Gray "
-        "(bottom-right)",
+        window_title,
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, kWindowWidth,
         kWindowHeight, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (window_ == nullptr) {
@@ -329,7 +332,7 @@ public:
     return true;
   }
 
-  /** @brief 按固定三窗格布局绘制最新纹理。 */
+  /** @brief 按已启用的单窗格或三窗格布局绘制最新纹理。 */
   void Render() {
     int window_width = 0;  // 当前 drawable 宽度。
     int window_height = 0; // 当前 drawable 高度。
@@ -337,6 +340,13 @@ public:
     glViewport(0, 0, window_width, window_height);
     glClearColor(0.04F, 0.04F, 0.04F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
+    if (!options_.show_itof) {
+      const Pane rgb_pane{0, 0, window_width,
+                          window_height}; // RGB 全窗口显示区域。
+      DrawSlot(rgb_, rgb_pane, 1.0F);
+      SDL_GL_SwapWindow(window_);
+      return;
+    }
     const int bottom_height = window_height / 2; // 底部窗格高度。
     const std::array<Pane, 3> panes{{
         {0, bottom_height, window_width, window_height - bottom_height},
