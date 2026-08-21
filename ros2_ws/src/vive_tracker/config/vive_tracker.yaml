@@ -5,7 +5,7 @@
     # 目标 VIVE Tracker 的硬件序列号，用于从 OpenVR 设备列表中选择指定 Tracker。
     serial: LHR-B77A06A7
     # OpenVR 位姿查询及 Pose、Status、Odometry 和动态 TF 的发布频率，单位为 Hz，取值范围为 (0, 1000]。
-    publish_rate_hz: 60.0
+    publish_rate_hz: 100.0
     # Path 轨迹追加和发布的最大频率，单位为 Hz，取值范围为 (0, publish_rate_hz]。
     path_publish_rate_hz: 10.0
     # OpenVR 跟踪原点模式，可选值为 standing、seated 或 raw。

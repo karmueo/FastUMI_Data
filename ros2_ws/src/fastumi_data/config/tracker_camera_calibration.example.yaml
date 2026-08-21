@@ -11,7 +11,8 @@ filtering:
   frame_stride: 2
   min_tags: 6
   max_pose_gap_ms: 50.0
-  # Tracker 漂移或重定位已确认时，可限制首帧后的有效标定时长。
+  # 以首个抽帧图像的 header 时间为零点，使用闭区间内的样本。
+  sample_start_offset_s: null
   sample_end_offset_s: null
 
 optimization:

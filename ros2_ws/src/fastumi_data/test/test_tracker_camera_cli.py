@@ -52,6 +52,7 @@ def test_parser_defaults_match_target_bag_topics() -> None:
     assert arguments.tag_family == "tag36h11"
     assert arguments.frame_stride == 2
     assert arguments.min_tags == 6
+    assert arguments.sample_start_offset_s is None
     assert arguments.sample_end_offset_s is None
     assert arguments.progress_interval_seconds == pytest.approx(30.0)
 
@@ -101,21 +102,29 @@ def test_parser_rejects_invalid_progress_interval(value: str) -> None:
     assert error.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "option", ["--sample-start-offset-s", "--sample-end-offset-s"]
+)
 @pytest.mark.parametrize("value", ["-1", "nan", "inf"])
-def test_parser_rejects_invalid_sample_end_offset(value: str) -> None:
-    """样本结束偏移必须是有限非负数。"""
+def test_parser_rejects_invalid_sample_offset(
+    option: str, value: str,
+) -> None:
+    """样本开始和结束偏移都必须是有限非负数。"""
     with pytest.raises(SystemExit) as error:
         build_argument_parser().parse_args(
-            minimum_arguments(["--sample-end-offset-s", value])
+            minimum_arguments([option, value])
         )
     assert error.value.code == 2
 
 
-def test_sample_window_stops_after_header_time_limit(monkeypatch) -> None:
-    """样本结束偏移应以首个抽帧图像 header 时间为基准并包含边界。"""
+def test_sample_window_uses_inclusive_header_time_limits(monkeypatch) -> None:
+    """样本窗口应以首个抽帧图像 header 时间为基准并包含两侧边界。"""
     frames = [
         ImageFrame(timestamp, timestamp, np.zeros((2, 2, 3), np.uint8))
-        for timestamp in (1_000_000_000, 2_000_000_000, 3_000_000_001)
+        for timestamp in (
+            1_000_000_000, 2_000_000_000,
+            3_000_000_000, 4_000_000_001,
+        )
     ]
     monkeypatch.setattr(
         "fastumi_data.tracker_camera_cli.iter_image_frames",
@@ -123,12 +132,26 @@ def test_sample_window_stops_after_header_time_limit(monkeypatch) -> None:
     )
     arguments = SimpleNamespace(
         bag="unused", image_topic="/camera/image", frame_stride=1,
-        sample_end_offset_s=1.0,
+        sample_start_offset_s=1.0, sample_end_offset_s=2.0,
     )
     selected = list(_iter_sample_frames(arguments))
     assert [frame.timestamp_ns for frame in selected] == [
-        1_000_000_000, 2_000_000_000,
+        2_000_000_000, 3_000_000_000,
     ]
+
+
+def test_validation_rejects_reversed_sample_window() -> None:
+    """样本开始偏移晚于结束偏移时应返回参数错误。"""
+    parser = build_argument_parser()
+    arguments = parser.parse_args(minimum_arguments([
+        "--sample-start-offset-s", "20",
+        "--sample-end-offset-s", "10",
+    ]))
+
+    with pytest.raises(SystemExit) as error:
+        validate_arguments(arguments, parser)
+
+    assert error.value.code == 2
 
 
 def test_settings_file_overrides_defaults_but_cli_wins(tmp_path: Path) -> None:
@@ -140,6 +163,7 @@ def test_settings_file_overrides_defaults_but_cli_wins(tmp_path: Path) -> None:
 filtering:
   frame_stride: 4
   min_tags: 8
+  sample_start_offset_s: 10.0
   sample_end_offset_s: 90.0
 optimization:
   time_offset_min_ms: -40.0
@@ -161,17 +185,22 @@ optimization:
     assert merged.image_topic == "/configured/rgb/image"
     assert merged.frame_stride == 4
     assert merged.min_tags == 10
+    assert merged.sample_start_offset_s == pytest.approx(10.0)
     assert merged.sample_end_offset_s == pytest.approx(90.0)
     assert merged.time_offset_min_ms == pytest.approx(-40.0)
 
 
-def test_settings_file_converts_sample_end_offset_string(
+def test_settings_file_converts_sample_window_strings(
     tmp_path: Path,
 ) -> None:
-    """设置文件中的数值字符串应按 CLI 规则转换为浮点数。"""
+    """设置文件中的窗口数值字符串应按 CLI 规则转换为浮点数。"""
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(
-        'filtering:\n  sample_end_offset_s: "90.0"\n',
+        (
+            'filtering:\n'
+            '  sample_start_offset_s: "10.0"\n'
+            '  sample_end_offset_s: "90.0"\n'
+        ),
         encoding="utf-8",
     )
     parser = build_argument_parser()
@@ -181,18 +210,23 @@ def test_settings_file_converts_sample_end_offset_string(
 
     merged = apply_settings_file(arguments, parser)
 
+    assert merged.sample_start_offset_s == pytest.approx(10.0)
+    assert isinstance(merged.sample_start_offset_s, float)
     assert merged.sample_end_offset_s == pytest.approx(90.0)
     assert isinstance(merged.sample_end_offset_s, float)
 
 
+@pytest.mark.parametrize(
+    "key", ["sample_start_offset_s", "sample_end_offset_s"]
+)
 @pytest.mark.parametrize("value", ["-1", ".nan", ".inf", "invalid"])
-def test_settings_file_rejects_invalid_sample_end_offset(
-    tmp_path: Path, value: str,
+def test_settings_file_rejects_invalid_sample_offset(
+    tmp_path: Path, key: str, value: str,
 ) -> None:
-    """设置文件中的样本结束偏移也必须是有限非负数。"""
+    """设置文件中的样本窗口偏移必须是有限非负数。"""
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(
-        f"filtering:\n  sample_end_offset_s: {value}\n",
+        f"filtering:\n  {key}: {value}\n",
         encoding="utf-8",
     )
     parser = build_argument_parser()
@@ -201,7 +235,7 @@ def test_settings_file_rejects_invalid_sample_end_offset(
     )
 
     with pytest.raises(
-        ValueError, match=r"filtering\.sample_end_offset_s"
+        ValueError, match=rf"filtering\.{key}"
     ):
         apply_settings_file(arguments, parser)
 

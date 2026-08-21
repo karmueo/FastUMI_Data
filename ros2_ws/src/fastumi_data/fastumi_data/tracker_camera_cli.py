@@ -212,6 +212,7 @@ SETTING_GROUPS = {
         "frame_stride": "frame_stride",
         "min_tags": "min_tags",
         "max_pose_gap_ms": "max_pose_gap_ms",
+        "sample_start_offset_s": "sample_start_offset_s",
         "sample_end_offset_s": "sample_end_offset_s",
     },
     "optimization": {
@@ -241,7 +242,7 @@ def _finite_positive_float(value: str) -> float:
 
 
 def _finite_nonnegative_float(value: str) -> float:
-    """解析有限非负浮点数，供样本时间上界参数使用。"""
+    """解析有限非负浮点数，供样本时间窗口参数使用。"""
     try:
         parsed = float(value)
     except (TypeError, ValueError) as error:
@@ -276,6 +277,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-tags", type=int, default=defaults.min_tags)
     parser.add_argument(
         "--max-pose-gap-ms", type=float, default=defaults.max_pose_gap_ms
+    )
+    parser.add_argument(
+        "--sample-start-offset-s",
+        type=_finite_nonnegative_float,
+        help=(
+            "跳过首个抽帧图像 header 时间之后指定秒数之前的样本；"
+            "默认从记录开头处理"
+        ),
     )
     parser.add_argument(
         "--sample-end-offset-s",
@@ -355,7 +364,12 @@ def apply_settings_file(
         for key, value in values.items():
             attribute = mappings[key]
             if getattr(arguments, attribute) == parser.get_default(attribute):
-                if attribute == "sample_end_offset_s" and value is not None:
+                if (
+                    attribute in {
+                        "sample_start_offset_s", "sample_end_offset_s"
+                    }
+                    and value is not None
+                ):
                     try:
                         value = _finite_nonnegative_float(value)
                     except argparse.ArgumentTypeError as error:
@@ -383,6 +397,14 @@ def validate_arguments(
     """
     if not arguments.detect_only and not arguments.camera_config:
         parser.error("完整标定必须显式指定 --camera-config")
+    start_offset_s = arguments.sample_start_offset_s
+    end_offset_s = arguments.sample_end_offset_s
+    if (
+        start_offset_s is not None
+        and end_offset_s is not None
+        and start_offset_s > end_offset_s
+    ):
+        parser.error("--sample-start-offset-s 不能大于 --sample-end-offset-s")
     return arguments
 
 
@@ -556,8 +578,9 @@ def _motion_diverse_indices(transforms: Sequence[np.ndarray]) -> list[int]:
 
 
 def _iter_sample_frames(arguments: argparse.Namespace):
-    """按首个抽帧图像的 header 时间应用可选样本结束上界。"""
+    """按首个抽帧图像的 header 时间应用可选闭区间样本窗口。"""
     first_timestamp_ns = None
+    start_offset_s = getattr(arguments, "sample_start_offset_s", None)
     end_offset_s = getattr(arguments, "sample_end_offset_s", None)
     for frame in iter_image_frames(
         arguments.bag, arguments.image_topic, arguments.frame_stride
@@ -565,6 +588,8 @@ def _iter_sample_frames(arguments: argparse.Namespace):
         if first_timestamp_ns is None:
             first_timestamp_ns = frame.timestamp_ns
         elapsed_s = (frame.timestamp_ns - first_timestamp_ns) * 1.0e-9
+        if start_offset_s is not None and elapsed_s < start_offset_s:
+            continue
         if end_offset_s is not None and elapsed_s > end_offset_s:
             break
         yield frame
@@ -849,6 +874,7 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                 "frame_stride": arguments.frame_stride,
                 "min_tags": arguments.min_tags,
                 "max_pose_gap_ms": arguments.max_pose_gap_ms,
+                "sample_start_offset_s": arguments.sample_start_offset_s,
                 "sample_end_offset_s": arguments.sample_end_offset_s,
                 "time_offset_min_ms": arguments.time_offset_min_ms,
                 "time_offset_max_ms": arguments.time_offset_max_ms,

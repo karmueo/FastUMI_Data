@@ -22,6 +22,8 @@ def generate_launch_description() -> LaunchDescription:
     camera_type = LaunchConfiguration("camera_type")
     # ToF 相机的可选 UVC 设备路径，留空时由驱动自动发现。
     device_path = LaunchConfiguration("device_path")
+    # ToF 相机码流档位，主码流与子码流分别对应不同 RGB 分辨率。
+    stream_profile = LaunchConfiguration("stream_profile")
     # XV 原始鱼眼图像的可选去畸变输出开关。
     rgb_fisheye_undistort_enable = LaunchConfiguration(
         "rgb_fisheye_undistort_enable"
@@ -43,6 +45,15 @@ def generate_launch_description() -> LaunchDescription:
             "device_path",
             default_value="",
             description="可选 ToF UVC 设备路径；留空时自动发现。",
+        ),
+        DeclareLaunchArgument(
+            "stream_profile",
+            default_value="main",
+            choices=["main", "sub"],
+            description=(
+                "ToF 码流档位：main 为 2048x1536 RGB，"
+                "sub 为 1920x1080 RGB。"
+            ),
         ),
         DeclareLaunchArgument(
             "rgb_fisheye_undistort_enable",
@@ -79,6 +90,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         launch_arguments={
             "device_path": device_path,
+            "stream_profile": stream_profile,
             "enable_rgb": "true",
             "enable_itof_depth": "false",
             "enable_itof_gray": "false",

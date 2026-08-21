@@ -85,6 +85,7 @@ def test_launch_defaults_to_tof_and_enables_rviz() -> None:
     assert set(arguments) == {
         "camera_type",
         "device_path",
+        "stream_profile",
         "rgb_fisheye_undistort_enable",
         "tracker_serial",
         "use_rviz",
@@ -96,6 +97,10 @@ def test_launch_defaults_to_tof_and_enables_rviz() -> None:
     assert perform_substitutions(
         launch_context, arguments["use_rviz"].default_value
     ) == "true"
+    assert arguments["stream_profile"].choices == ["main", "sub"]
+    assert perform_substitutions(
+        launch_context, arguments["stream_profile"].default_value
+    ) == "main"
 
     # 两个相机子 launch 均关闭自身附带的录制或 RViz 功能。
     included_launches = [
@@ -108,6 +113,12 @@ def test_launch_defaults_to_tof_and_enables_rviz() -> None:
     tracker_arguments = dict(included_launches[2].launch_arguments)
     assert tof_arguments["enable_rviz"] == "false"
     assert xv_arguments["record_bag"] == "false"
+
+    # ToF 子 launch 接收顶层选择的主码流或子码流档位。
+    launch_context.launch_configurations["stream_profile"] = "sub"
+    assert perform_substitutions(
+        launch_context, [tof_arguments["stream_profile"]]
+    ) == "sub"
 
     # Tracker 接收顶层默认开启的 RViz 开关。
     launch_context.launch_configurations["use_rviz"] = "true"

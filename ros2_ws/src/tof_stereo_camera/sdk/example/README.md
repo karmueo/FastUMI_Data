@@ -28,43 +28,42 @@ cmake --build /tmp/tof_stereo_sdk_example_build --parallel 2
 /tmp/tof_stereo_sdk_example_build/stereo_camera_example
 ```
 
-默认参数是由 SDK 自动选择设备、复合帧 `2048x2738`、`YUYV`：
+默认参数是由 SDK 自动选择设备、主码流 RGB `2048x1536`、启用 iTOF、`YUYV`：
 
 ```text
 --device PATH
---width N
---height N
+--stream-profile NAME
 --format FOURCC
+--enable-itof BOOL
 --display
---rgb-only
---depth-max N
---gray-max N
 --verbose
 --help
 ```
 
-例如指定设备和格式：
+码流档位固定为 `main=2048x1536` 和 `sub=1920x1080`。例如指定设备、子码流和格式：
 
 ```bash
 /tmp/tof_stereo_sdk_example_build/stereo_camera_example \
-    --device /dev/video3 --width 2048 --height 2738 --format YUYV
+    --device /dev/video3 --stream-profile sub --format YUYV
 ```
+
+程序不提供 `--width` 和 `--height` 自定义分辨率参数，避免请求设备不支持的码流组合。启用 iTOF 时，主、子码流分别协商完整复合帧 `2048x2738` 和 `1920x2362`；关闭 iTOF 时，设备会在 RGB 高度中加入 2 行复合帧头部，实际协商尺寸分别为 `2048x1538` 和 `1920x1082`。SDK 解析后的 RGB 尺寸始终为 `2048x1536` 和 `1920x1080`。
 
 `--help` 只打印用法并在打开相机前成功退出，因此无硬件时也可以验证命令行接口。参数错误会打印错误和用法并返回非零状态。
 
-### 仅启用 RGB 视频流
+### 启用或关闭 iTOF
 
-使用 `--rgb-only` 会在启动采集前下发视频流掩码 `0x1`，只启用 RGB（bit 0），不推送 iTOF Depth 和 iTOF Gray：
+默认启用 iTOF Depth 和 Gray，并下发视频流掩码 `0x85`。如需只启用 RGB，设置 `--enable-itof false`：
 
 ```bash
-/tmp/tof_stereo_sdk_example_build/stereo_camera_example --rgb-only
+/tmp/tof_stereo_sdk_example_build/stereo_camera_example --enable-itof false
 ```
 
-视频流掩码不控制 IMU，因此该模式下设备仍会推送 IMU 数据。与 `--display` 同时使用时，窗口只显示 RGB，并使用完整窗口区域。
+视频流掩码不控制 IMU，因此两种模式下设备都会推送 IMU 数据。`--enable-itof` 同时决定采集格式、视频流掩码和启用显示时的窗口布局，与是否创建显示窗口无关。
 
 ### 原始格式 GPU 显示
 
-使用默认 YUYV 显示 RGB、iTOF Depth 和 iTOF Gray：
+使用默认参数显示 RGB、iTOF Depth 和 iTOF Gray：
 
 ```bash
 /tmp/tof_stereo_sdk_example_build/stereo_camera_example --display
@@ -76,16 +75,7 @@ cmake --build /tmp/tof_stereo_sdk_example_build --parallel 2
 /tmp/tof_stereo_sdk_example_build/stereo_camera_example --display --format NV12
 ```
 
-窗口上半区为 RGB，左下为 iTOF Depth，右下为 iTOF Gray。`--display` 会在启动采集前显式下发视频流掩码 `0x85`，启用 RGB（bit 0）、iTOF Depth（bit 2）和 iTOF Gray（bit 7），设备拒绝命令时会打印 SDK 返回值和 ACK 后退出。关闭窗口或按 `Esc` 会停止采集并正常清理 SDK 资源。RGB、Depth 和 Gray 均优先依据实际 FOURCC 按 YUYV packed 或 NV12 双平面布局直接上传 GPU；非 YUV 的 iTOF payload 使用 16 位无符号单通道纹理后备路径。shader 仅为屏幕显示进行颜色解释或灰度映射，不在 CPU 内存中创建 RGB/BGR 图像。
-
-当其他固件返回非 YUV 的 16 位单通道 iTOF 数据时，深度后备路径默认以 `5000` 为显示上限并采用近处更亮的灰度映射，灰度后备路径默认以 `65535` 为显示上限。画面过暗或过亮时可以调整原始值范围，例如：
-
-```bash
-/tmp/tof_stereo_sdk_example_build/stereo_camera_example \
-    --display --depth-max 8000 --gray-max 4095
-```
-
-当前实测设备的 iTOF Depth 和 Gray 均为 YUYV，两个范围参数不会参与其显示。首帧诊断会打印 16 位误读范围，用于识别 YUYV 中固定约为 `0x80` 的 U/V 色度字节；该扫描每路只执行一次。
+`--display` 只控制是否创建显示窗口。默认 `--enable-itof true` 时，窗口上半区显示 RGB，左下显示 iTOF Depth，右下显示 iTOF Gray；设置 `--enable-itof false` 时，RGB 使用全窗口单窗格布局。关闭窗口或按 `Esc` 会停止采集并正常清理 SDK 资源。各路图像依据实际 FOURCC 按 YUYV packed 或 NV12 双平面布局直接上传 GPU；shader 只负责屏幕颜色或灰度解释，不在 CPU 内存中创建 RGB/BGR 中间图像。
 
 ## 输出语义
 

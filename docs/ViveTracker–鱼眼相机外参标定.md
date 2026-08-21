@@ -66,13 +66,15 @@ ament Python 把 console script 安装在包的 `lib/fastumi_data/` 目录。推
 完整求解前必须先运行检测预检：
 
 ```bash
+BAG=/path/to/tracker_fisheye_bag
 ros2 run fastumi_data calibrate_tracker_camera \
-  --bag /path/to/tracker_fisheye_bag \
+  --bag ${BAG} \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/example/detection \
   --tag-family tag36h11 \
   --frame-stride 2 \
   --min-tags 6 \
+  --camera-config ros2_ws/src/tof_stereo_camera/config/calibration.yaml \
   --detect-only
 ```
 
@@ -118,17 +120,19 @@ ros2 run fastumi_data calibrate_tracker_camera \
 预检通过后执行：
 
 ```bash
+BAG=/path/to/tracker_fisheye_bag
+CAMERA_CONFIG=ros2_ws/src/tof_stereo_camera/config/calibration.yaml
 ros2 run fastumi_data calibrate_tracker_camera \
-  --bag /path/to/tracker_fisheye_bag \
-  --camera-config /path/to/camera_intrinsics.yaml \
+  --bag ${BAG} \
+  --camera-config ${CAMERA_CONFIG} \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/tracker_camera_$(date +%Y%m%d_%H%M%S)/final \
   --tag-family tag36h11 \
   --frame-stride 2 \
   --min-tags 6 \
   --max-pose-gap-ms 50 \
-  --time-offset-min-ms -20 \
-  --time-offset-max-ms 20 \
+  --time-offset-min-ms -100 \
+  --time-offset-max-ms 100 \
   --time-offset-step-ms 2
 ```
 
@@ -149,6 +153,7 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | `--frame-stride` | `2` | 图像抽帧步长；每隔指定帧数参与检测和标定。 |
 | `--min-tags` | `6` | 一帧进入 PnP 和后续优化所需的最少有效标签数。 |
 | `--max-pose-gap-ms` | `50.0` | Tracker 位姿插值允许的最大间隔，单位为毫秒；超过该间隔的帧会被拒绝。 |
+| `--sample-start-offset-s` | 无 | 可选样本开始偏移，单位为秒；以首个抽帧图像的 header 时间为零点并包含边界，默认从开头处理。 |
 | `--sample-end-offset-s` | 无 | 可选样本结束偏移，单位为秒；以首个抽帧图像的 header 时间为零点并包含边界，默认处理完整记录。 |
 | `--time-offset-min-ms` | `-100.0` | 图像与 Tracker 时间偏移搜索下界，单位为毫秒。 |
 | `--time-offset-max-ms` | `100.0` | 图像与 Tracker 时间偏移搜索上界，单位为毫秒。 |
@@ -230,8 +235,8 @@ ros2 run fastumi_data tracker_camera_report \
 ### Tracker 漂移或重定位
 
 若单帧 PnP 误差稳定，但固定板闭环误差在快速运动后突增并缓慢恢复，可判定该时段不满足
-刚性标定假设。先通过逐帧指标和叠加图确认突变点，再用 `--sample-end-offset-s` 只选取
-突变前的连续稳定区间；质量阈值保持不变。
+刚性标定假设。先通过逐帧指标和叠加图确认突变点，再用
+`--sample-start-offset-s` 和 `--sample-end-offset-s` 选取连续稳定区间；质量阈值保持不变。
 
 ### 时间偏移触边
 
@@ -459,8 +464,9 @@ ros2 run fastumi_data calibrate_aruco_tcp \
 ## 独立 Kalibr 内参
 
 ```bash
+BGA=/path/to/tracker_fisheye_bag
 ros2 run fastumi_camera_calibration calibrate_camera_intrinsics \
-  --bag /path/to/tracker_fisheye_bag \
+  --bag ${BAG} \
   --target-config docs/april_6x6.yaml \
   --output-dir dataset/calibration/camera_intrinsics
 ```

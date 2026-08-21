@@ -18,7 +18,10 @@ source ros2_ws/install/setup.bash
 ToF 相机，并默认开启 RViz2：
 
 ```bash
-ros2 launch fastumi_data tracker_camera.launch.py
+ros2 launch fastumi_data tracker_camera.launch.py stream_profile:=main
+
+# 或者使用小分辨率
+ros2 launch fastumi_data tracker_camera.launch.py stream_profile:=sub
 ```
 
 使用 XV 相机时执行：
