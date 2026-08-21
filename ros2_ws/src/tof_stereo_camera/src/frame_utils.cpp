@@ -18,6 +18,7 @@
 #include <sstream>
 
 #include <opencv2/imgproc.hpp>
+#include <sensor_msgs/image_encodings.hpp>
 
 namespace tof_stereo_camera {
 namespace {
@@ -121,10 +122,52 @@ bool IsPublishableTofMatchState(int match_state) {
          match_state == STEREO_MATCH_STALE;
 }
 
+/** @copydoc ParseRgbOutputEncoding */
+bool ParseRgbOutputEncoding(const std::string &value,
+                            RgbOutputEncoding *output_encoding,
+                            std::string *error) {
+  if (value == sensor_msgs::image_encodings::YUV422_YUY2) {
+    *output_encoding = RgbOutputEncoding::kYuv422Yuy2;
+    return true;
+  }
+  if (value == sensor_msgs::image_encodings::BGR8) {
+    *output_encoding = RgbOutputEncoding::kBgr8;
+    return true;
+  }
+  *error = "rgb_output_encoding must be yuv422_yuy2 or bgr8";
+  return false;
+}
+
 /** @copydoc ConvertRgbFrame */
 bool ConvertRgbFrame(const stereo_camera_frame_t &frame,
+                     RgbOutputEncoding output_encoding,
                      sensor_msgs::msg::Image *message, std::string *error) {
   const std::uint64_t pixels = PixelCount(frame);
+  if (output_encoding == RgbOutputEncoding::kYuv422Yuy2) {
+    if (frame.pixel_format != kFourccYuyv) {
+      *error = "yuv422_yuy2 output requires a YUYV RGB frame";
+      return false;
+    }
+    if ((frame.width % 2) != 0 || !ValidateFrame(frame, pixels * 2U, error)) {
+      if ((frame.width % 2) != 0) {
+        *error = "YUYV width must be even";
+      }
+      return false;
+    }
+    message->height = static_cast<std::uint32_t>(frame.height);
+    message->width = static_cast<std::uint32_t>(frame.width);
+    message->encoding = sensor_msgs::image_encodings::YUV422_YUY2;
+    message->is_bigendian = 0;
+    message->step = static_cast<std::uint32_t>(frame.width * 2);
+    message->data.assign(frame.data, frame.data + frame.data_size);
+    return true;
+  }
+
+  if (output_encoding != RgbOutputEncoding::kBgr8) {
+    *error = "unsupported RGB output encoding strategy";
+    return false;
+  }
+
   cv::Mat bgr;
   if (frame.pixel_format == kFourccYuyv) {
     if ((frame.width % 2) != 0 || !ValidateFrame(frame, pixels * 2U, error)) {
@@ -152,7 +195,7 @@ bool ConvertRgbFrame(const stereo_camera_frame_t &frame,
 
   message->height = static_cast<std::uint32_t>(frame.height);
   message->width = static_cast<std::uint32_t>(frame.width);
-  message->encoding = "bgr8";
+  message->encoding = sensor_msgs::image_encodings::BGR8;
   message->is_bigendian = 0;
   message->step = static_cast<std::uint32_t>(frame.width * 3);
   message->data.assign(bgr.datastart, bgr.dataend);

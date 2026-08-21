@@ -36,14 +36,33 @@ double DegreesPerSecondToRadiansPerSecond(float degrees_per_second);
  */
 bool IsPublishableTofMatchState(int match_state);
 
+/** @brief RGB 图像发布时采用的 ROS 编码策略。 */
+enum class RgbOutputEncoding {
+  kYuv422Yuy2, ///< 直接复制 SDK 的 YUYV packed payload。
+  kBgr8,       ///< 使用 OpenCV 转换 SDK 的 YUYV 或 NV12 payload。
+};
+
 /**
- * @brief 将 SDK RGB 帧转换为独立持有的 `bgr8` ROS 图像。
- * @param[in] frame 待转换的 YUYV 或 NV12 SDK 帧；payload 仅在本次调用期间读取。
+ * @brief 解析节点参数指定的 RGB 输出编码策略。
+ * @param[in] value 参数的字符串值。
+ * @param[out] output_encoding 接收解析出的编码策略，不可为 `nullptr`。
+ * @param[out] error 接收失败原因，不可为 `nullptr`。
+ * @return 值为 `yuv422_yuy2` 或 `bgr8` 时返回 true。
+ */
+bool ParseRgbOutputEncoding(const std::string &value,
+                            RgbOutputEncoding *output_encoding,
+                            std::string *error);
+
+/**
+ * @brief 按指定输出编码将 SDK RGB 帧复制或转换为独立持有的 ROS 图像。
+ * @param[in] frame 待处理的 SDK 帧；payload 仅在本次调用期间读取。
+ * @param[in] output_encoding 选择直接复制 YUYV 或转换为 BGR。
  * @param[out] message 接收转换结果，不可为 `nullptr`。
  * @param[out] error 接收失败原因，不可为 `nullptr`。
  * @return 转换成功时返回 true。
  */
 bool ConvertRgbFrame(const stereo_camera_frame_t &frame,
+                     RgbOutputEncoding output_encoding,
                      sensor_msgs::msg::Image *message, std::string *error);
 
 /**

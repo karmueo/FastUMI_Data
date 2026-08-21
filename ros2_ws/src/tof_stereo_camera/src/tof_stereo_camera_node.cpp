@@ -91,6 +91,10 @@ public:
             ReadOnlyParameter("码流档位，可选 main 或 sub"));
     const std::string pixel_format =
         this->declare_parameter<std::string>("pixel_format", "YUYV");
+    const std::string rgb_output_encoding =
+        this->declare_parameter<std::string>(
+            "rgb_output_encoding", "yuv422_yuy2",
+            ReadOnlyParameter("RGB 图像输出编码，可选 yuv422_yuy2 或 bgr8"));
     const std::string device_path =
         this->declare_parameter<std::string>("device_path", "");
     // 是否启用 SDK 面向真机排障的内部文件日志。
@@ -119,6 +123,17 @@ public:
     }
     if (pixel_format != "YUYV" && pixel_format != "NV12") {
       throw std::invalid_argument("pixel_format must be YUYV or NV12");
+    }
+    std::string rgb_output_encoding_error; ///< 接收 RGB 输出编码参数诊断。
+    if (!ParseRgbOutputEncoding(rgb_output_encoding, &rgb_output_encoding_,
+                                &rgb_output_encoding_error)) {
+      throw std::invalid_argument(rgb_output_encoding_error);
+    }
+    if (enable_rgb &&
+        rgb_output_encoding_ == RgbOutputEncoding::kYuv422Yuy2 &&
+        pixel_format != "YUYV") {
+      throw std::invalid_argument(
+          "rgb_output_encoding=yuv422_yuy2 requires pixel_format=YUYV");
     }
     if (timestamp_calibration_frames < 2 ||
         timestamp_window_frames < timestamp_calibration_frames ||
@@ -226,11 +241,11 @@ public:
     capture_thread_ = std::thread(&StereoCameraNode::CaptureLoop, this);
     RCLCPP_INFO(this->get_logger(),
                 "stereo camera stream started: device=%s, profile=%s "
-                "rgb=%dx%d, format=%s %dx%d",
+                "rgb=%dx%d, format=%s %dx%d, rgb_output_encoding=%s",
                 device_path.empty() ? "auto" : device_path.c_str(),
                 stream_profile_name.c_str(), stream_profile.rgb_width,
                 stream_profile.rgb_height, actual_format, actual_width,
-                actual_height);
+                actual_height, rgb_output_encoding.c_str());
   }
 
   /** @brief 析构时停止采集并释放相机资源。 */
@@ -282,7 +297,7 @@ private:
                   const FrameTimestampResult &time) {
     sensor_msgs::msg::Image message;
     std::string error;
-    if (!ConvertRgbFrame(frame, &message, &error)) {
+    if (!ConvertRgbFrame(frame, rgb_output_encoding_, &message, &error)) {
       WarnThrottled("rgb_convert", "dropping RGB frame: " + error);
       return;
     }
@@ -475,6 +490,8 @@ private:
       last_warnings_;
   /// 写入 RGB 图像消息头的坐标系名称。
   std::string rgb_frame_id_;
+  /// RGB 图像发布时采用的编码策略，仅在节点启动时设置。
+  RgbOutputEncoding rgb_output_encoding_ = RgbOutputEncoding::kYuv422Yuy2;
   /// 写入 iTOF 图像消息头的坐标系名称。
   std::string itof_frame_id_;
   /// 写入 IMU 消息头的坐标系名称。

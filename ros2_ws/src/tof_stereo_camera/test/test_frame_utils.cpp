@@ -88,7 +88,63 @@ std::vector<unsigned char> EncodeRawImuSample(std::int64_t timestamp, float ax,
   return payload;
 }
 
-/** @brief 验证 `FrameUtils::ConvertsYuyvToBgr8` 所覆盖的帧转换行为。 */
+/** @brief 验证 YUYV 原始输出复制 payload 且消息独立持有数据。 */
+TEST(FrameUtils, CopiesYuyvPayloadToYuv422Yuy2) {
+  std::vector<unsigned char> payload{16, 128, 235, 128, 64, 96, 192, 160};
+  stereo_camera_frame_t frame{};
+  frame.width = 2;
+  frame.height = 2;
+  frame.pixel_format = MakeFourcc('Y', 'U', 'Y', 'V');
+  frame.data = payload.data();
+  frame.data_size = static_cast<int>(payload.size());
+
+  sensor_msgs::msg::Image image;
+  std::string error;
+  ASSERT_TRUE(ConvertRgbFrame(frame, RgbOutputEncoding::kYuv422Yuy2, &image,
+                              &error));
+  EXPECT_EQ(image.encoding, "yuv422_yuy2");
+  EXPECT_EQ(image.step, 4U);
+  EXPECT_EQ(image.data.size(), payload.size());
+  EXPECT_EQ(image.data, payload);
+  payload[0] = 99;
+  EXPECT_EQ(image.data[0], 16U);
+}
+
+/** @brief 验证原始 YUYV 输出拒绝尺寸不匹配的 payload。 */
+TEST(FrameUtils, RejectsWrongYuyvPayloadSize) {
+  std::vector<unsigned char> payload(3U, 0U);
+  stereo_camera_frame_t frame{};
+  frame.width = 2;
+  frame.height = 1;
+  frame.pixel_format = MakeFourcc('Y', 'U', 'Y', 'V');
+  frame.data = payload.data();
+  frame.data_size = static_cast<int>(payload.size());
+
+  sensor_msgs::msg::Image image;
+  std::string error;
+  EXPECT_FALSE(ConvertRgbFrame(frame, RgbOutputEncoding::kYuv422Yuy2, &image,
+                               &error));
+  EXPECT_FALSE(error.empty());
+}
+
+/** @brief 验证原始 YUYV 输出拒绝奇数宽度。 */
+TEST(FrameUtils, RejectsOddYuyvWidth) {
+  std::vector<unsigned char> payload(6U, 0U);
+  stereo_camera_frame_t frame{};
+  frame.width = 3;
+  frame.height = 1;
+  frame.pixel_format = MakeFourcc('Y', 'U', 'Y', 'V');
+  frame.data = payload.data();
+  frame.data_size = static_cast<int>(payload.size());
+
+  sensor_msgs::msg::Image image;
+  std::string error;
+  EXPECT_FALSE(ConvertRgbFrame(frame, RgbOutputEncoding::kYuv422Yuy2, &image,
+                               &error));
+  EXPECT_EQ(error, "YUYV width must be even");
+}
+
+/** @brief 验证 legacy BGR 路径仍可将 YUYV 转换为 BGR8。 */
 TEST(FrameUtils, ConvertsYuyvToBgr8) {
   std::vector<unsigned char> payload{16, 128, 235, 128};
   stereo_camera_frame_t frame{};
@@ -100,10 +156,19 @@ TEST(FrameUtils, ConvertsYuyvToBgr8) {
 
   sensor_msgs::msg::Image image;
   std::string error;
-  ASSERT_TRUE(ConvertRgbFrame(frame, &image, &error));
+  ASSERT_TRUE(ConvertRgbFrame(frame, RgbOutputEncoding::kBgr8, &image,
+                              &error));
   EXPECT_EQ(image.encoding, "bgr8");
   EXPECT_EQ(image.step, 6U);
   EXPECT_EQ(image.data.size(), 6U);
+}
+
+/** @brief 验证仅接受文档定义的 RGB 输出编码参数值。 */
+TEST(FrameUtils, RejectsUnsupportedRgbOutputEncoding) {
+  RgbOutputEncoding output_encoding = RgbOutputEncoding::kYuv422Yuy2;
+  std::string error;
+  EXPECT_FALSE(ParseRgbOutputEncoding("rgb8", &output_encoding, &error));
+  EXPECT_EQ(error, "rgb_output_encoding must be yuv422_yuy2 or bgr8");
 }
 
 /** @brief 验证 `FrameUtils::RejectsWrongMono16PayloadSize` 所覆盖的帧转换行为。

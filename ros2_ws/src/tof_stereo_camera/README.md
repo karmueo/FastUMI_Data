@@ -77,6 +77,7 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `sdk_log_path` | 空 | SDK 日志文件路径；空值使用 SDK 默认路径 `/tmp/imu_head_dump.log` |
 | `stream_profile` | `main` | 码流档位：`main` 为 `2048x1536` RGB，`sub` 为 `1920x1080` RGB；仅启动时设置 |
 | `pixel_format` | `YUYV` | 请求的像素格式，可选 `YUYV` 或 `NV12` |
+| `rgb_output_encoding` | `yuv422_yuy2` | RGB topic 编码，可选 `yuv422_yuy2` 或 `bgr8`，仅启动时设置；前者要求 `pixel_format=YUYV` |
 | `enable_rgb` | `true` | 启用设备端 RGB 流并发布 RGB 图像；仅启动时设置 |
 | `enable_itof_depth` | `true` | 启用设备端 iTOF 深度流并发布深度图；仅启动时设置 |
 | `enable_itof_gray` | `true` | 启用设备端 iTOF 灰度流并发布灰度图；仅启动时设置 |
@@ -94,7 +95,7 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 
 | 话题 | 类型 | 编码 / 内容 |
 | --- | --- | --- |
-| `/tof_stereo_camera/rgb/image_raw` | `sensor_msgs/msg/Image` | `bgr8` |
+| `/tof_stereo_camera/rgb/image_raw` | `sensor_msgs/msg/Image` | 默认 `yuv422_yuy2`，保留 SDK YUYV packed payload；设为 `bgr8` 时为兼容模式 |
 | `/tof_stereo_camera/itof/depth/image_raw` | `sensor_msgs/msg/Image` | `16UC1`，设备深度单位未定义 |
 | `/tof_stereo_camera/itof/gray/image_raw` | `sensor_msgs/msg/Image` | `mono16` |
 | `/tof_stereo_camera/imu/data_raw` | `sensor_msgs/msg/Imu` | m/s² 加速度和 rad/s 角速度 |
@@ -105,6 +106,15 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 当整批没有有效 `sample.timestamp` 时，所有样本回退到主机稳态接收时刻经固定锚点投影的系统时间。SDK 未提供
 姿态，因此 `orientation_covariance[0]` 为 `-1`。角速度和线加速度协方差保持全零，
 表示未知。
+
+RGB 默认直接发布 `yuv422_yuy2`，每像素占 2 字节，避免驱动端转换为 BGR 的额外开销。
+本机 Jazzy 的 `cv_bridge` 已验证可将该编码转换为请求的 `bgr8`，现有需要 BGR 的订阅端可
+保持使用 `cv_bridge` 请求 `bgr8`。如需驱动维持旧版 BGR topic 行为，使用：
+
+```bash
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  rgb_output_encoding:=bgr8
+```
 
 ## 时间同步
 

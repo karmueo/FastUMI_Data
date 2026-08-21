@@ -47,6 +47,11 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_sdk_log", default_value="false"),
         DeclareLaunchArgument("sdk_log_path", default_value=""),
         DeclareLaunchArgument("pixel_format", default_value="YUYV"),
+        DeclareLaunchArgument(
+            "rgb_output_encoding",
+            default_value="yuv422_yuy2",
+            choices=["yuv422_yuy2", "bgr8"],
+        ),
         DeclareLaunchArgument("device_path", default_value=""),
     ]
 
@@ -66,6 +71,7 @@ def generate_launch_description():
             "imu_gyro_hz": LaunchConfiguration("imu_gyro_hz"),
             "stream_profile": LaunchConfiguration("stream_profile"),
             "pixel_format": LaunchConfiguration("pixel_format"),
+            "rgb_output_encoding": LaunchConfiguration("rgb_output_encoding"),
             "device_path": LaunchConfiguration("device_path"),
             "timestamp_calibration_frames": LaunchConfiguration("timestamp_calibration_frames"),
             "timestamp_window_frames": LaunchConfiguration("timestamp_window_frames"),
