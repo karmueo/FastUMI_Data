@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
+find_package(fastumi_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -45,7 +46,8 @@ target_include_directories(stream_profile PUBLIC include)
 
 add_executable(tof_stereo_camera_node src/tof_stereo_camera_node.cpp)
 target_link_libraries(tof_stereo_camera_node frame_utils stream_profile xu_config stereo_camera_sdk)
-ament_target_dependencies(tof_stereo_camera_node rclcpp rcl_interfaces sensor_msgs)
+ament_target_dependencies(tof_stereo_camera_node fastumi_interfaces rclcpp
+  rcl_interfaces sensor_msgs)
 set_target_properties(tof_stereo_camera_node PROPERTIES
   BUILD_RPATH "${STEREO_CAMERA_SDK_ROOT}/lib"
   INSTALL_RPATH "$ORIGIN"
@@ -81,6 +83,8 @@ install(FILES README.md
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_launch test/test_launch.py)
   ament_add_gtest(test_frame_utils test/test_frame_utils.cpp)
   if(TARGET test_frame_utils)
     target_link_libraries(test_frame_utils frame_utils stereo_camera_sdk)

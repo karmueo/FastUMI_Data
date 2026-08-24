@@ -32,6 +32,34 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
   stream_profile:=sub
 ```
 
+RGB 60 FPS 场景建议仅启用 RGB 子码流，并在统一运行环境中配置
+Fast DDS `LARGE_DATA` 和异步发布。例如在 `~/.bashrc` 中添加：
+
+```bash
+export FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA
+export RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
+```
+
+修改后需要重新打开终端，并重启发布端和订阅端。Launch 不设置或覆盖任何
+Fast DDS 环境变量，仅为传感器发布器设置深度 16 的有界 `BEST_EFFORT` QoS。
+建议启动命令为：
+
+```bash
+ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
+  stream_profile:=sub \
+  enable_itof_depth:=false \
+  enable_itof_gray:=false \
+  enable_imu:=false \
+  enable_imu_filter:=false \
+  enable_rviz:=false
+```
+
+可通过 `printenv FASTDDS_BUILTIN_TRANSPORTS` 检查当前终端。变量输出为 `UDPv4` 时，
+1920x1080 YUYV 原始图像的订阅速率可能降至约 50--55 FPS。本机多轮实测 SDK 帧序号
+稳定为 60 FPS，正确配置订阅端后的图像接收速率约为 58.9--59.8 FPS，具体值受系统负载
+和 Python `ros2 topic hz` 回调开销影响。原始图像必须逐帧完整交付时，仍需使用采集/发布
+线程解耦或源端压缩，避免依赖 `BEST_EFFORT` 的无丢失语义。
+
 可以指定设备或关闭部分输出：
 
 ```bash
@@ -78,6 +106,8 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `stream_profile` | `main` | 码流档位：`main` 的 RGB-only 采集尺寸为 `2048x1538`，`sub` 为 `1920x1082`；解析后的有效 RGB 高度分别为 1536 和 1080，仅启动时设置 |
 | `pixel_format` | `YUYV` | 请求的像素格式，可选 `YUYV` 或 `NV12` |
 | `rgb_output_encoding` | `yuv422_yuy2` | RGB topic 编码，可选 `yuv422_yuy2` 或 `bgr8`，仅启动时设置；前者要求 `pixel_format=YUYV` |
+| `sensor_qos_depth` | `16` | 所有传感器发布器的 `KEEP_LAST` 队列深度，允许 1 到 32；用于吸收大图像交付的短时抖动 |
+| `sensor_qos_reliability` | `best_effort` | 所有传感器发布器的可靠性，可选 `best_effort` 或 `reliable`；可靠模式建议配合异步发布和足够队列深度 |
 | `enable_rgb` | `true` | 启用设备端 RGB 流并发布 RGB 图像；仅启动时设置 |
 | `enable_itof_depth` | `true` | 启用设备端 iTOF 深度流并发布深度图；仅启动时设置 |
 | `enable_itof_gray` | `true` | 启用设备端 iTOF 灰度流并发布灰度图；仅启动时设置 |
@@ -90,16 +120,27 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 | `timestamp_calibration_frames` | `30` | 每个已启用发布流启动时收集的唯一时间戳数；锁定前仅该流静默 |
 | `timestamp_window_frames` | `120` | 用于选择低延迟候选偏移的滚动窗口长度 |
 | `timestamp_max_slew_ppm` | `200.0` | 偏移更新相对设备时间的最大斜率，单位 ppm |
+| `timestamp_future_warning_threshold_us` | `1000` | 映射时间超前于接收时间达到该阈值时告警，单位微秒；所有超前时间仍会被钳制 |
 
 ## 话题
 
 | 话题 | 类型 | 编码 / 内容 |
 | --- | --- | --- |
 | `/tof_stereo_camera/rgb/image_raw` | `sensor_msgs/msg/Image` | 默认 `yuv422_yuy2`，保留 SDK YUYV packed payload；设为 `bgr8` 时为兼容模式 |
+| `/tof_stereo_camera/rgb/frame_seqidx` | `fastumi_interfaces/msg/FrameSequence` | 对应 RGB 图像的 SDK 采集帧序号 |
 | `/tof_stereo_camera/itof/depth/image_raw` | `sensor_msgs/msg/Image` | `16UC1`，设备深度单位未定义 |
+| `/tof_stereo_camera/itof/depth/frame_seqidx` | `fastumi_interfaces/msg/FrameSequence` | 对应 iTOF 深度图像的 SDK 采集帧序号 |
 | `/tof_stereo_camera/itof/gray/image_raw` | `sensor_msgs/msg/Image` | `mono16` |
+| `/tof_stereo_camera/itof/gray/frame_seqidx` | `fastumi_interfaces/msg/FrameSequence` | 对应 iTOF 灰度图像的 SDK 采集帧序号 |
 | `/tof_stereo_camera/imu/data_raw` | `sensor_msgs/msg/Imu` | m/s² 加速度和 rad/s 角速度 |
+| `/tof_stereo_camera/imu/frame_seqidx` | `fastumi_interfaces/msg/FrameSequence` | 每个非空 SDK IMU 批次的采集序号 |
 | `/tof_stereo_camera/imu/data` | `sensor_msgs/msg/Imu` | 滤波后的姿态、加速度和角速度 |
+
+`FrameSequence.header` 与对应图像消息的 `Header` 完全一致，可按时间戳关联；
+`frame_seqidx` 保留 SDK 原值，其中 `0` 表示 SDK 未提供有效序号。IMU 每个成功解码并实际
+发布的非空 SDK 批次只发布一条序号消息，其 `Header` 与该批首条原始 IMU 消息一致。
+时间同步标定中、重复、匹配无效、转换失败或被时间同步器丢弃的帧不会产生序号消息。
+默认 FastUMI MCAP 录制包含 RGB 图像及其序号话题；其他序号话题可按需加入录制参数。
 
 每个 `stereo_camera_imu_data_t` 样本发布一条 IMU 消息。消息优先使用样本自身的
 微秒级独立设备时间戳。当批内存在有效同步观测时，无效样本回退到该批映射后的同步观测时间；
@@ -120,8 +161,10 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
 
 SDK 时间戳属于独立的微秒设备时钟。节点在每次 `stereo_camera_parse_frame()` 返回后立即
 采样主机稳态时间；每个已启用发布流分别以 30 个唯一帧完成启动锁定，锁定前仅该流静默。
-锁定使用低延迟候选偏移的滚动最小值，并以 `timestamp_max_slew_ppm` 限制后续校正，保持
-设备采集间隔。发布头时间通过固定的稳态/系统时钟配对投影到 Unix 系统时钟，不使用通用
+锁定使用低延迟候选偏移的滚动最小值，通常以 `timestamp_max_slew_ppm` 限制后续校正。
+映射时间超过当前接收时间时，节点立即向下校正偏移并钳制当前帧；超前量达到
+`timestamp_future_warning_threshold_us` 才输出告警。发布头时间通过固定的稳态/系统时钟配对投影到
+Unix 系统时钟，不使用通用
 `now()` 重新盖章。主机接收回退时间同样写入全局严格单调下界；恢复后的有效帧若无法严格
 晚于该回退时间会丢弃并重新标定。剩余偏差主要来自 USB、内核调度和接收路径延迟。
 

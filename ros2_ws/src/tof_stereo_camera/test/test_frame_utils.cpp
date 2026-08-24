@@ -384,6 +384,26 @@ TEST(TimestampMapper, LocksAfterExactBootstrapAndRemovesEpoch) {
   EXPECT_NEAR(third.steady_ns, 110'000'000, 1);
 }
 
+/** @brief 验证未来映射会钳制并立即向下校正偏移。 */
+TEST(TimestampMapper, FutureMappingImmediatelyCorrectsOffsetDownward) {
+  TimestampMapper mapper(0, 0, 2, 10, 200.0);
+  mapper.ObserveFrame(1'000, 6'000'000);
+  const auto locked = mapper.ObserveFrame(2'000, 7'000'000);
+  ASSERT_TRUE(locked.ready);
+
+  const auto clamped = mapper.ObserveFrame(3'000, 7'500'000);
+  ASSERT_TRUE(clamped.ready);
+  EXPECT_TRUE(clamped.receive_clamped);
+  EXPECT_EQ(clamped.future_by_ns, 499'800);
+  EXPECT_EQ(clamped.steady_ns, 7'500'000);
+  EXPECT_EQ(clamped.offset_ns, 4'500'000);
+
+  const auto corrected = mapper.ObserveFrame(4'000, 8'500'000);
+  EXPECT_TRUE(corrected.ready);
+  EXPECT_FALSE(corrected.receive_clamped);
+  EXPECT_EQ(corrected.offset_ns, 4'500'000);
+}
+
 /** @brief 验证有效复合帧重复值不会推进启动状态并复用快照。 */
 TEST(TimestampMapper, DuplicateValidFrameReusesSnapshot) {
   TimestampMapper mapper(0, 0, 3, 10, 200.0);

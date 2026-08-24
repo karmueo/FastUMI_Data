@@ -62,6 +62,7 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
   enable_itof_gray:=false \
   enable_imu:=false \
   enable_imu_filter:=false \
+  stream_profile:=main \
   enable_rviz:=false
 ```
 

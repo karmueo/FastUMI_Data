@@ -426,6 +426,9 @@ FrameTimestampResult TimestampMapper::ObserveFrame(std::uint64_t timestamp_us,
     std::int64_t mapped = 0;
     if (AddNs(sdk_ns, applied_offset_ns_, &mapped)) {
       if (mapped > receive_ns) {
+        result.future_by_ns = mapped - receive_ns;
+        // 当前候选偏移是已观测到的因果上界，可安全立即向下校正。
+        applied_offset_ns_ = candidate;
         mapped = receive_ns;
         result.receive_clamped = true;
       }

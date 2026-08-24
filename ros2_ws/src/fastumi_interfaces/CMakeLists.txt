@@ -12,12 +12,19 @@ rosidl_generate_interfaces(
   ${PROJECT_NAME}
   "msg/EpisodeAnnotation.msg"
   "msg/EpisodeEvent.msg"
+  "msg/FrameSequence.msg"
   "msg/GripperState.msg"
   "msg/TrackerStatus.msg"
   "srv/DeleteEpisodeAnnotation.srv"
   "srv/ListEpisodeAnnotations.srv"
   DEPENDENCIES builtin_interfaces std_msgs
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_frame_sequence_interface
+    test/test_frame_sequence_interface.py)
+endif()
 
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()

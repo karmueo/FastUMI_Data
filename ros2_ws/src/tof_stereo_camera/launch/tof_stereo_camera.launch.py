@@ -41,9 +41,16 @@ def generate_launch_description():
             default_value="main",
             choices=["main", "sub"],
         ),
-        DeclareLaunchArgument("timestamp_calibration_frames", default_value="30"),
+        DeclareLaunchArgument(
+            "timestamp_calibration_frames",
+            default_value="30",
+        ),
         DeclareLaunchArgument("timestamp_window_frames", default_value="120"),
         DeclareLaunchArgument("timestamp_max_slew_ppm", default_value="200.0"),
+        DeclareLaunchArgument(
+            "timestamp_future_warning_threshold_us",
+            default_value="1000",
+        ),
         DeclareLaunchArgument("enable_sdk_log", default_value="false"),
         DeclareLaunchArgument("sdk_log_path", default_value=""),
         DeclareLaunchArgument("pixel_format", default_value="YUYV"),
@@ -51,6 +58,12 @@ def generate_launch_description():
             "rgb_output_encoding",
             default_value="yuv422_yuy2",
             choices=["yuv422_yuy2", "bgr8"],
+        ),
+        DeclareLaunchArgument("sensor_qos_depth", default_value="16"),
+        DeclareLaunchArgument(
+            "sensor_qos_reliability",
+            default_value="best_effort",
+            choices=["best_effort", "reliable"],
         ),
         DeclareLaunchArgument("device_path", default_value=""),
     ]
@@ -72,10 +85,23 @@ def generate_launch_description():
             "stream_profile": LaunchConfiguration("stream_profile"),
             "pixel_format": LaunchConfiguration("pixel_format"),
             "rgb_output_encoding": LaunchConfiguration("rgb_output_encoding"),
+            "sensor_qos_depth": LaunchConfiguration("sensor_qos_depth"),
+            "sensor_qos_reliability": LaunchConfiguration(
+                "sensor_qos_reliability"
+            ),
             "device_path": LaunchConfiguration("device_path"),
-            "timestamp_calibration_frames": LaunchConfiguration("timestamp_calibration_frames"),
-            "timestamp_window_frames": LaunchConfiguration("timestamp_window_frames"),
-            "timestamp_max_slew_ppm": LaunchConfiguration("timestamp_max_slew_ppm"),
+            "timestamp_calibration_frames": LaunchConfiguration(
+                "timestamp_calibration_frames"
+            ),
+            "timestamp_window_frames": LaunchConfiguration(
+                "timestamp_window_frames"
+            ),
+            "timestamp_max_slew_ppm": LaunchConfiguration(
+                "timestamp_max_slew_ppm"
+            ),
+            "timestamp_future_warning_threshold_us": LaunchConfiguration(
+                "timestamp_future_warning_threshold_us"
+            ),
             "enable_sdk_log": LaunchConfiguration("enable_sdk_log"),
             "sdk_log_path": LaunchConfiguration("sdk_log_path"),
         }],
@@ -88,8 +114,8 @@ def generate_launch_description():
     )
     # 使滤波器订阅端与相机的 SensorDataQoS 可靠性匹配。
     imu_input_qos = {
-        "qos_overrides./tof_stereo_camera/imu/data_raw.subscription.reliability":
-            "best_effort",
+        "qos_overrides./tof_stereo_camera/imu/data_raw.subscription."
+        "reliability": "best_effort",
     }
     # 可选的 Madgwick 姿态滤波节点。
     madgwick_filter_node = Node(

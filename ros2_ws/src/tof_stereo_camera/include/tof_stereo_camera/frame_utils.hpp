@@ -110,6 +110,7 @@ struct FrameTimestampResult {
   bool has_offset_snapshot = false; ///< `offset_ns` 是否有效。
   bool newly_locked = false;        ///< 本帧是否刚完成 epoch 锁定。
   bool receive_clamped = false; ///< 映射时间晚于接收时间而被钳制。
+  std::int64_t future_by_ns = 0; ///< 钳制前超前于接收时间的纳秒数。
 };
 
 /** @brief 描述 IMU 样本映射结果。 */

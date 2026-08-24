@@ -3,7 +3,7 @@
  * @brief 打包 stereo_camera SDK 的 ROS 2 图像与 IMU 发布节点。
  * @author 待确认
  * @date 创建：待确认
- * @date 修改：2026-08-20
+ * @date 修改：2026-08-24
  */
 #include <atomic>
 #include <chrono>
@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "fastumi_interfaces/msg/frame_sequence.hpp"
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
@@ -95,6 +96,13 @@ public:
         this->declare_parameter<std::string>(
             "rgb_output_encoding", "yuv422_yuy2",
             ReadOnlyParameter("RGB 图像输出编码，可选 yuv422_yuy2 或 bgr8"));
+    const int sensor_qos_depth = this->declare_parameter<int>(
+        "sensor_qos_depth", 16,
+        ReadOnlyParameter("传感器发布器 KEEP_LAST 队列深度，允许 1 到 32"));
+    const std::string sensor_qos_reliability =
+        this->declare_parameter<std::string>(
+            "sensor_qos_reliability", "best_effort",
+            ReadOnlyParameter("传感器发布可靠性，可选 best_effort 或 reliable"));
     const std::string device_path =
         this->declare_parameter<std::string>("device_path", "");
     // 是否启用 SDK 面向真机排障的内部文件日志。
@@ -107,6 +115,10 @@ public:
         this->declare_parameter<int>("timestamp_window_frames", 120);
     const double timestamp_max_slew_ppm =
         this->declare_parameter<double>("timestamp_max_slew_ppm", 200.0);
+    // 超前量达到该微秒阈值时输出时间戳钳制告警。
+    const int timestamp_future_warning_threshold_us =
+        this->declare_parameter<int>("timestamp_future_warning_threshold_us",
+                                     1000);
     const std::string sdk_log_path =
         this->declare_parameter<std::string>("sdk_log_path", "");
     rgb_frame_id_ = this->declare_parameter<std::string>(
@@ -135,6 +147,14 @@ public:
       throw std::invalid_argument(
           "rgb_output_encoding=yuv422_yuy2 requires pixel_format=YUYV");
     }
+    if (sensor_qos_depth < 1 || sensor_qos_depth > 32) {
+      throw std::invalid_argument("sensor_qos_depth must be between 1 and 32");
+    }
+    if (sensor_qos_reliability != "best_effort" &&
+        sensor_qos_reliability != "reliable") {
+      throw std::invalid_argument(
+          "sensor_qos_reliability must be best_effort or reliable");
+    }
     if (timestamp_calibration_frames < 2 ||
         timestamp_window_frames < timestamp_calibration_frames ||
         !std::isfinite(timestamp_max_slew_ppm) ||
@@ -142,6 +162,12 @@ public:
         timestamp_max_slew_ppm >= 1'000'000.0) {
       throw std::invalid_argument(
           "invalid timestamp synchronization parameters");
+    }
+    if (timestamp_future_warning_threshold_us < 0 ||
+        timestamp_future_warning_threshold_us > 1'000'000) {
+      throw std::invalid_argument(
+          "timestamp_future_warning_threshold_us must be between 0 and "
+          "1000000");
     }
     XuConfiguration xu_configuration; ///< 经过校验的 SDK XU 启动配置。
     std::string xu_error; ///< 接收 XU 参数校验或设备命令失败原因。
@@ -153,6 +179,9 @@ public:
     timestamp_calibration_frames_ = timestamp_calibration_frames;
     timestamp_window_frames_ = timestamp_window_frames;
     timestamp_max_slew_ppm_ = timestamp_max_slew_ppm;
+    timestamp_future_warning_threshold_ns_ =
+        static_cast<std::int64_t>(timestamp_future_warning_threshold_us) *
+        1000;
     std::int64_t anchor_steady_ns = 0;
     std::int64_t anchor_system_ns = 0;
     CaptureClockAnchor(&anchor_steady_ns, &anchor_system_ns);
@@ -167,23 +196,39 @@ public:
     itof_depth_timestamp_mapper_ = make_mapper();
     itof_gray_timestamp_mapper_ = make_mapper();
     imu_timestamp_mapper_ = make_mapper();
-    rclcpp::SensorDataQoS sensor_qos; ///< 仅保留最新传感器样本，避免慢订阅端积压旧帧。
-    sensor_qos.keep_last(1).best_effort();
+    rclcpp::SensorDataQoS sensor_qos; ///< 有界传感器队列，吸收大图像交付的短时抖动。
+    sensor_qos.keep_last(static_cast<std::size_t>(sensor_qos_depth));
+    if (sensor_qos_reliability == "reliable")
+      sensor_qos.reliable();
+    else
+      sensor_qos.best_effort();
     if (enable_rgb) {
       rgb_publisher_ = this->create_publisher<sensor_msgs::msg::Image>(
           "rgb/image_raw", sensor_qos);
+      rgb_sequence_publisher_ =
+          this->create_publisher<fastumi_interfaces::msg::FrameSequence>(
+              "rgb/frame_seqidx", sensor_qos);
     }
     if (enable_itof_depth) {
       itof_depth_publisher_ = this->create_publisher<sensor_msgs::msg::Image>(
           "itof/depth/image_raw", sensor_qos);
+      itof_depth_sequence_publisher_ =
+          this->create_publisher<fastumi_interfaces::msg::FrameSequence>(
+              "itof/depth/frame_seqidx", sensor_qos);
     }
     if (enable_itof_gray) {
       itof_gray_publisher_ = this->create_publisher<sensor_msgs::msg::Image>(
           "itof/gray/image_raw", sensor_qos);
+      itof_gray_sequence_publisher_ =
+          this->create_publisher<fastumi_interfaces::msg::FrameSequence>(
+              "itof/gray/frame_seqidx", sensor_qos);
     }
     if (enable_imu) {
       imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
           "imu/data_raw", sensor_qos);
+      imu_sequence_publisher_ =
+          this->create_publisher<fastumi_interfaces::msg::FrameSequence>(
+              "imu/frame_seqidx", sensor_qos);
     }
 
     const char *requested_device =
@@ -300,6 +345,24 @@ private:
   rclcpp::Time FrameTime(const FrameTimestampResult &time) const {
     return rclcpp::Time(time.system_ns, RCL_SYSTEM_TIME);
   }
+
+  /**
+   * @brief 发布与传感器消息头严格对应的 SDK 帧序号。
+   * @param[in] header 已发布传感器消息的消息头。
+   * @param[in] frame_seqidx SDK 原始帧序号，0 表示无效。
+   * @param[in] publisher 目标帧序号发布器。
+   */
+  void PublishFrameSequence(
+      const std_msgs::msg::Header &header, std::uint64_t frame_seqidx,
+      const rclcpp::Publisher<fastumi_interfaces::msg::FrameSequence>::SharedPtr
+          &publisher) {
+    fastumi_interfaces::msg::FrameSequence
+        sequence_message; ///< 待发布的帧序号消息。
+    sequence_message.header = header;
+    sequence_message.frame_seqidx = frame_seqidx;
+    publisher->publish(std::move(sequence_message));
+  }
+
   /** @brief 转换并发布一帧 RGB 图像。 */
   void PublishRgb(const stereo_camera_frame_t &frame,
                   const FrameTimestampResult &time) {
@@ -311,7 +374,11 @@ private:
     }
     message.header.stamp = FrameTime(time);
     message.header.frame_id = rgb_frame_id_;
+    const std_msgs::msg::Header published_header =
+        message.header; ///< 为对应帧序号保留消息头副本。
     rgb_publisher_->publish(std::move(message));
+    PublishFrameSequence(published_header, frame.frame_seqidx,
+                         rgb_sequence_publisher_);
   }
   /** @brief 发布一个经时间匹配校验的 iTOF 深度或灰度帧。 */
   void PublishItof(const stereo_camera_frame_t &frame, bool depth,
@@ -330,14 +397,23 @@ private:
     }
     message.header.stamp = FrameTime(time);
     message.header.frame_id = itof_frame_id_;
-    if (depth)
+    const std_msgs::msg::Header published_header =
+        message.header; ///< 为对应帧序号保留消息头副本。
+    if (depth) {
       itof_depth_publisher_->publish(std::move(message));
-    else
+      PublishFrameSequence(published_header, frame.frame_seqidx,
+                           itof_depth_sequence_publisher_);
+    } else {
       itof_gray_publisher_->publish(std::move(message));
+      PublishFrameSequence(published_header, frame.frame_seqidx,
+                           itof_gray_sequence_publisher_);
+    }
   }
   /** @brief 保留 SDK 解码顺序并全量发布一批 IMU 样本。 */
   void PublishImu(const std::vector<stereo_camera_imu_data_t> &samples,
+                  std::uint64_t frame_seqidx,
                   const FrameTimestampResult &time) {
+    bool sequence_published = false; ///< 标记当前 IMU 批次是否已发布帧序号。
     for (const stereo_camera_imu_data_t &sample : samples) {
       const ImuTimestampResult sample_time =
           imu_timestamp_mapper_->MapImuSample(sample.timestamp, time);
@@ -358,7 +434,14 @@ private:
       message.linear_acceleration.x = sample.ax;
       message.linear_acceleration.y = sample.ay;
       message.linear_acceleration.z = sample.az;
+      const std_msgs::msg::Header published_header =
+          message.header; ///< 为批次首条 IMU 的帧序号保留消息头副本。
       imu_publisher_->publish(std::move(message));
+      if (!sequence_published) {
+        PublishFrameSequence(published_header, frame_seqidx,
+                             imu_sequence_publisher_);
+        sequence_published = true;
+      }
     }
   }
   /** @brief 在专用线程中读取 SDK 帧，并以唯一复合帧推进同步器。 */
@@ -380,11 +463,14 @@ private:
                         std::string("dropping frame: stream=") + label +
                             " monotonic timestamp conflicts with receive-time "
                             "upper bound");
-        if (time.receive_clamped)
+        if (time.receive_clamped &&
+            time.future_by_ns >= timestamp_future_warning_threshold_ns_)
           WarnThrottled(
               std::string(label) + ":clamp",
               std::string("clamping future outer-frame timestamp: stream=") +
-                  label + " to receive time");
+                  label + " future_by_us=" +
+                  std::to_string(time.future_by_ns / 1000) +
+                  " to receive time");
         if (time.newly_locked)
           RCLCPP_INFO(this->get_logger(),
                       "timestamp synchronization locked: stream=%s "
@@ -446,7 +532,7 @@ private:
         log_timestamp(imu_timestamp_mapper_.get(), time, "imu");
         if (time.status == FrameTimestampStatus::kReady ||
             time.status == FrameTimestampStatus::kInvalidHostFallback)
-          PublishImu(samples, time);
+          PublishImu(samples, frame->frame_seqidx, time);
         continue;
       }
       if (mapper == nullptr)
@@ -493,6 +579,8 @@ private:
   int timestamp_calibration_frames_ = 30;
   int timestamp_window_frames_ = 120;
   double timestamp_max_slew_ppm_ = 200.0;
+  /// 未来时间戳超过该阈值时输出告警，单位纳秒。
+  std::int64_t timestamp_future_warning_threshold_ns_ = 1'000'000;
   /// 按稳定类别键保存上次告警时刻，避免不同流互相抑制。
   std::unordered_map<std::string, std::chrono::steady_clock::time_point>
       last_warnings_;
@@ -506,12 +594,24 @@ private:
   std::string imu_frame_id_;
   /// 发布 RGB 图像的 ROS 发布器；为空时该话题关闭。
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr rgb_publisher_;
+  /// 发布 RGB SDK 帧序号的 ROS 发布器；为空时该话题关闭。
+  rclcpp::Publisher<fastumi_interfaces::msg::FrameSequence>::SharedPtr
+      rgb_sequence_publisher_;
   /// 发布 iTOF 深度图的 ROS 发布器；为空时该话题关闭。
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr itof_depth_publisher_;
+  /// 发布 iTOF 深度 SDK 帧序号的 ROS 发布器；为空时该话题关闭。
+  rclcpp::Publisher<fastumi_interfaces::msg::FrameSequence>::SharedPtr
+      itof_depth_sequence_publisher_;
   /// 发布 iTOF 灰度图的 ROS 发布器；为空时该话题关闭。
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr itof_gray_publisher_;
+  /// 发布 iTOF 灰度 SDK 帧序号的 ROS 发布器；为空时该话题关闭。
+  rclcpp::Publisher<fastumi_interfaces::msg::FrameSequence>::SharedPtr
+      itof_gray_sequence_publisher_;
   /// 发布原始 IMU 数据的 ROS 发布器；为空时该话题关闭。
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
+  /// 发布 IMU SDK 批次序号的 ROS 发布器；为空时该话题关闭。
+  rclcpp::Publisher<fastumi_interfaces::msg::FrameSequence>::SharedPtr
+      imu_sequence_publisher_;
 };
 
 } // namespace tof_stereo_camera
