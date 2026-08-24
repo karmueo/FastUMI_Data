@@ -167,7 +167,8 @@ public:
     itof_depth_timestamp_mapper_ = make_mapper();
     itof_gray_timestamp_mapper_ = make_mapper();
     imu_timestamp_mapper_ = make_mapper();
-    const auto sensor_qos = rclcpp::SensorDataQoS();
+    rclcpp::SensorDataQoS sensor_qos; ///< 仅保留最新传感器样本，避免慢订阅端积压旧帧。
+    sensor_qos.keep_last(1).best_effort();
     if (enable_rgb) {
       rgb_publisher_ = this->create_publisher<sensor_msgs::msg::Image>(
           "rgb/image_raw", sensor_qos);
