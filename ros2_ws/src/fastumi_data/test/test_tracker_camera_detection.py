@@ -16,6 +16,7 @@ from fastumi_data.tracker_camera_detection import (
     OpenCvAprilTagDetector,
     OpenCvCheckerboardDetector,
     RawTagDetection,
+    aprilgrid_tag_to_pitch_ratios,
     build_aprilgrid_observation,
     build_checkerboard_observation,
     validate_checkerboard_observations,
@@ -40,8 +41,50 @@ def test_build_observation_sorts_ids_and_matches_object_points() -> None:
     )
     assert observation.tag_ids == (0, 7, 35)
     assert observation.image_points_px.shape == (12, 2)
+    assert observation.feature_count == 12
+    assert observation.corner_count == 12
     np.testing.assert_allclose(
         observation.object_points_m[:4], tag_object_corners(make_spec(), 0)
+    )
+
+
+def test_aprilgrid_calibration_points_keep_original_corners() -> None:
+    """AprilGrid 标定点应保留鱼眼图像中的原始四角对应。"""
+    image_corners = np.asarray([
+        [10.0, 30.0], [30.0, 30.0],
+        [30.0, 10.0], [10.0, 10.0],
+    ])
+    observation = build_aprilgrid_observation(
+        123,
+        [RawTagDetection(0, image_corners, None, None)],
+        make_spec(),
+        min_tags=1,
+    )
+    np.testing.assert_allclose(observation.image_points_px, image_corners)
+    np.testing.assert_allclose(
+        observation.object_points_m, tag_object_corners(make_spec(), 0)
+    )
+    assert observation.feature_count == 4
+
+
+def test_aprilgrid_tag_to_pitch_ratio_uses_adjacent_tags() -> None:
+    """几何诊断应按相邻标签边长和中心距计算无量纲比例。"""
+    first = np.asarray([
+        [0.0, 10.0], [10.0, 10.0], [10.0, 0.0], [0.0, 0.0]
+    ])
+    second = first + np.asarray([13.0, 0.0])
+    observation = build_aprilgrid_observation(
+        0,
+        [
+            RawTagDetection(0, first, None, None),
+            RawTagDetection(1, second, None, None),
+        ],
+        make_spec(),
+        min_tags=2,
+    )
+    np.testing.assert_allclose(
+        aprilgrid_tag_to_pitch_ratios(observation, make_spec()),
+        [10.0 / 13.0],
     )
 
 

@@ -35,6 +35,7 @@ from fastumi_data.tracker_camera_detection import (
     DetectionRejected,
     OpenCvAprilTagDetector,
     OpenCvCheckerboardDetector,
+    aprilgrid_tag_to_pitch_ratios,
     build_aprilgrid_observation,
     build_checkerboard_observation,
     validate_checkerboard_observations,
@@ -633,6 +634,7 @@ def _run_detection_only(
         "probe_frames": len(reservoir),
         "target_type": _target_type(target),
         "detector_settings": dict(detector.settings),
+        "warnings": [],
     }
     if checkerboard:
         corner_histogram = Counter(
@@ -653,6 +655,38 @@ def _run_detection_only(
             observation.tag_count for observation in observations
         )
         tag_id_frame_counts = Counter(tag_ids)
+        observed_ratios = np.concatenate([
+            aprilgrid_tag_to_pitch_ratios(observation, target)
+            for observation in observations
+        ]) if observations else np.empty(0, dtype=np.float64)
+        configured_ratio = 1.0 / (1.0 + float(target.tag_spacing))
+        observed_ratio_summary = {
+            "sample_count": int(len(observed_ratios)),
+            "configured": configured_ratio,
+            "median": (
+                float(np.median(observed_ratios))
+                if len(observed_ratios) else None
+            ),
+            "p05": (
+                float(np.percentile(observed_ratios, 5.0))
+                if len(observed_ratios) else None
+            ),
+            "p95": (
+                float(np.percentile(observed_ratios, 95.0))
+                if len(observed_ratios) else None
+            ),
+        }
+        observed_median = observed_ratio_summary["median"]
+        if (
+            observed_median is not None
+            and abs(observed_median - configured_ratio) / configured_ratio
+            > 0.05
+        ):
+            summary["warnings"].append(
+                "检测角点的 tag/pitch 中位比例 "
+                f"{observed_median:.3f} 与配置值 {configured_ratio:.3f} "
+                "相差超过 5%；请复核检测轮廓与标定板物理标签边界"
+            )
         summary.update({
             "tag_family": target.tag_family,
             "tag_id_min": min(tag_ids) if tag_ids else None,
@@ -665,6 +699,7 @@ def _run_detection_only(
                 str(tag_id): tag_id_frame_counts[tag_id]
                 for tag_id in sorted(tag_id_frame_counts)
             },
+            "tag_to_pitch_ratio": observed_ratio_summary,
         })
     summary_path = output_dir / "detection_summary.json"
     summary_path.write_text(

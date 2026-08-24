@@ -66,8 +66,9 @@ def test_load_default_tof_camera_and_target_files() -> None:
     assert camera.distortion_model == "equidistant"
     assert camera.k[0, 0] == pytest.approx(405.67036610341245)
     assert camera.d[0] == pytest.approx(0.08165390616646588)
-    assert target.tag_size_m == pytest.approx(0.052)
-    assert target.tag_spacing == pytest.approx(0.3725)
+    assert target.tag_size_m == pytest.approx(0.055)
+    assert target.tag_spacing == pytest.approx(0.3)
+    assert target.board_extent_m == pytest.approx((0.4125, 0.4125))
     assert target.tag_family == "tag36h11"
 
 

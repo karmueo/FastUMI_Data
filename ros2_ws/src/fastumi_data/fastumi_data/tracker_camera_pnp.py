@@ -1,4 +1,4 @@
-"""使用原始鱼眼目标板角点估计单帧 ``^camera T_board``。"""
+"""使用原始鱼眼目标特征点估计单帧 ``^camera T_board``。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class PoseEstimationError(RuntimeError):
 
 @dataclass(frozen=True)
 class BoardPoseEstimate:
-    """保存 ``^camera T_board`` 和原始鱼眼像素质量指标。"""
+    """保存 ``^camera T_board`` 和原始鱼眼特征点质量指标。"""
 
     camera_from_board: np.ndarray
     median_error_px: float
@@ -43,6 +43,15 @@ def _checked_points(
     ):
         raise PoseEstimationError("二维三维角点必须是有限数值")
     return object_points, image_points
+
+
+def _object_points_are_noncollinear(object_points_m: np.ndarray) -> bool:
+    """判断目标点是否至少张成二维平面，满足 IPPE 的几何约束。"""
+    centered_points = object_points_m - np.mean(object_points_m, axis=0)
+    singular_values = np.linalg.svd(centered_points, compute_uv=False)
+    if len(singular_values) < 2 or singular_values[0] <= 0.0:
+        return False
+    return bool(singular_values[1] > singular_values[0] * 1.0e-10)
 
 
 def _transform_from_vectors(
@@ -131,14 +140,16 @@ def estimate_camera_from_board(
 ) -> BoardPoseEstimate:
     """从整板原始鱼眼角点估计 ``^camera T_board``。
 
-    角点先去畸变至以 ``K`` 表示的虚拟针孔像素平面，再通过 IPPE 生成
+    特征点先去畸变至以 ``K`` 表示的虚拟针孔像素平面，再通过 IPPE 生成
     共面候选；候选以全点正深度和原始鱼眼 P95 误差筛选，最后使用 LM 精化。
     """
     object_points, image_points = _checked_points(
         observation.object_points_m, observation.image_points_px
     )
-    if len(object_points) < 8:
-        raise PoseEstimationError("整板 PnP 至少 8 个角点")
+    if len(object_points) < 4:
+        raise PoseEstimationError("整板 PnP 至少 4 个非共线特征点")
+    if not _object_points_are_noncollinear(object_points):
+        raise PoseEstimationError("整板 PnP 特征点不能共线")
     undistorted = cv2.fisheye.undistortPoints(
         image_points.reshape(-1, 1, 2),
         camera.k,

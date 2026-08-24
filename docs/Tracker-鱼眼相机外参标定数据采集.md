@@ -18,7 +18,7 @@ source ros2_ws/install/setup.bash
 ToF 相机，并默认开启 RViz2：
 
 ```bash
-ros2 launch fastumi_data tracker_camera.launch.py stream_profile:=main
+ros2 launch fastumi_data tracker_camera.launch.py
 
 # 或者使用小分辨率
 ros2 launch fastumi_data tracker_camera.launch.py stream_profile:=sub
@@ -63,7 +63,8 @@ ros2 launch tof_stereo_camera tof_stereo_camera.launch.py \
   enable_imu:=false \
   enable_imu_filter:=false \
   stream_profile:=main \
-  enable_rviz:=false
+  enable_rviz:=true \
+  sensor_qos_reliability:=reliable
 ```
 
 驱动默认自动选择 UVC 设备。需要指定设备时，在命令中增加

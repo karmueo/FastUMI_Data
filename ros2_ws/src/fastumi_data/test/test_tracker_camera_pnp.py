@@ -1,5 +1,7 @@
 """验证 AprilGrid 原始鱼眼角点投影和单帧 IPPE 位姿估计。"""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
@@ -116,6 +118,34 @@ def test_fisheye_pnp_remains_accurate_with_pixel_noise() -> None:
     assert result.p95_error_px < 1.0
 
 
+def test_fisheye_ippe_accepts_tags_from_one_grid_row() -> None:
+    """同一行标签的四角仍张成平面，应产生有效 IPPE 位姿。"""
+    camera = make_project_camera()
+    spec = AprilGridSpec(6, 6, 0.055, 0.3, "tag36h11")
+    tag_ids = tuple(range(4))
+    object_points = np.vstack([
+        tag_object_corners(spec, tag_id) for tag_id in tag_ids
+    ])
+    expected = pose_to_matrix(
+        np.array([-0.12, -0.04, 0.65]),
+        Rotation.from_euler(
+            "xyz", [8.0, -12.0, 4.0], degrees=True
+        ).as_quat(),
+    )
+    image_points = project_fisheye_points(object_points, expected, camera)
+    observation = AprilGridObservation(
+        0, image_points, object_points, tag_ids, len(tag_ids)
+    )
+
+    result = estimate_camera_from_board(observation, camera)
+
+    translation_mm, rotation_deg = transform_error(
+        expected, result.camera_from_board
+    )
+    assert translation_mm < 0.1
+    assert rotation_deg < 0.05
+
+
 def test_reprojection_errors_are_euclidean_pixel_distances() -> None:
     """重投影误差应逐角点返回二维像素欧氏距离。"""
     camera, object_points, expected, image_points = make_fixture()
@@ -129,23 +159,44 @@ def test_reprojection_errors_are_euclidean_pixel_distances() -> None:
 
 
 def test_pose_estimation_rejects_nonfinite_or_too_few_points() -> None:
-    """非法角点或少于两组标签不能进入整板 IPPE。"""
+    """非法角点或少于四个特征点不能进入整板 IPPE。"""
     camera, object_points, _, image_points = make_fixture()
     invalid = image_points.copy()
     invalid[0, 0] = np.nan
-    with pytest.raises(PoseEstimationError, match="有限"):
-        estimate_camera_from_board(
-            make_observation(invalid, object_points), camera
-        )
-    small_observation = AprilGridObservation(
-        0,
-        image_points[:4],
-        object_points[:4],
-        (0,),
-        1,
+    invalid_observation = SimpleNamespace(
+        image_points_px=invalid,
+        object_points_m=object_points,
     )
-    with pytest.raises(PoseEstimationError, match="至少 8"):
+    with pytest.raises(PoseEstimationError, match="有限"):
+        estimate_camera_from_board(invalid_observation, camera)
+    small_observation = SimpleNamespace(
+        image_points_px=image_points[:3],
+        object_points_m=object_points[:3],
+    )
+    with pytest.raises(PoseEstimationError, match="至少 4"):
         estimate_camera_from_board(small_observation, camera)
+
+
+def test_pose_estimation_rejects_collinear_object_points() -> None:
+    """IPPE 前应明确拒绝四个或更多共线目标点。"""
+    camera = make_project_camera()
+    object_points = np.asarray([
+        [0.0, 0.0, 0.0],
+        [0.1, 0.0, 0.0],
+        [0.2, 0.0, 0.0],
+        [0.3, 0.0, 0.0],
+    ])
+    observation = SimpleNamespace(
+        object_points_m=object_points,
+        image_points_px=np.asarray([
+            [500.0, 600.0],
+            [550.0, 600.0],
+            [600.0, 600.0],
+            [650.0, 600.0],
+        ]),
+    )
+    with pytest.raises(PoseEstimationError, match="不能共线"):
+        estimate_camera_from_board(observation, camera)
 
 
 def test_fisheye_ippe_accepts_checkerboard_observation() -> None:

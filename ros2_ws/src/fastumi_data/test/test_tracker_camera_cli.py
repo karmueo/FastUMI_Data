@@ -334,8 +334,56 @@ def test_detect_only_failure_still_writes_diagnostics(
     assert any("至少 5 帧" in failure for failure in summary["failures"])
     assert summary["tag_count_histogram"] == {"1": 3}
     assert summary["tag_id_frame_counts"] == {"0": 3}
+    assert summary["tag_to_pitch_ratio"]["sample_count"] == 0
+    assert summary["warnings"] == []
     assert summary["detector_settings"]["max_correction_bits"] == 3
     assert outcome.output_paths["overlay_000"].exists()
+
+
+def test_detect_only_warns_about_tag_boundary_ratio(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """检测边长与配置比例明显不符时应保留 warning 但通过预检。"""
+    frames = [
+        ImageFrame(index, index, np.full((40, 60, 3), 255, np.uint8))
+        for index in range(20)
+    ]
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.iter_image_frames",
+        lambda *args, **kwargs: iter(frames),
+    )
+    first = np.asarray([
+        [5.0, 15.0], [15.0, 15.0], [15.0, 5.0], [5.0, 5.0]
+    ])
+    second = first + np.asarray([20.0, 0.0])
+    detector = SimpleNamespace(
+        settings={"corner_refinement": "contour"},
+        detect=lambda image: [
+            RawTagDetection(0, first, None, None),
+            RawTagDetection(1, second, None, None),
+        ],
+    )
+    arguments = SimpleNamespace(
+        output_dir=str(tmp_path),
+        bag="unused",
+        image_topic="/camera/image",
+        frame_stride=1,
+        min_tags=2,
+    )
+
+    outcome = _run_detection_only(
+        arguments,
+        detector,
+        AprilGridSpec(6, 6, 0.055, 0.3, "tag36h11"),
+    )
+
+    summary = json.loads(
+        outcome.output_paths["detection_summary"].read_text(encoding="utf-8")
+    )
+    assert outcome.accepted is True
+    assert summary["tag_to_pitch_ratio"]["sample_count"] == 20
+    assert summary["tag_to_pitch_ratio"]["median"] == pytest.approx(0.5)
+    assert any("相差超过 5%" in warning for warning in summary["warnings"])
 
 
 def test_full_mode_insufficient_frames_writes_failure_summary(

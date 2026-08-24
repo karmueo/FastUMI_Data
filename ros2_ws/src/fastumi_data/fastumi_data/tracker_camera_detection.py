@@ -42,7 +42,8 @@ class AprilGridObservation:
     """保存一帧按标签 ID 排序的 AprilGrid 二维三维对应。
 
     ``image_points_px`` 形状为 ``(4N, 2)``；``object_points_m`` 是板坐标系
-    下形状为 ``(4N, 3)`` 的米制点。
+    下形状为 ``(4N, 3)`` 的米制角点。PnP 和联合优化直接使用这些角点，
+    保持鱼眼投影下严格的二维三维对应。
     """
 
     timestamp_ns: int
@@ -66,6 +67,10 @@ class AprilGridObservation:
             raise ValueError("目标角点数量必须等于 tag_count 的四倍")
         if len(self.tag_ids) != self.tag_count:
             raise ValueError("tag_ids 数量必须等于 tag_count")
+        if not np.all(np.isfinite(image_points)) or not np.all(
+            np.isfinite(object_points)
+        ):
+            raise ValueError("AprilGrid 观测点必须是有限数值")
         image_points.setflags(write=False)
         object_points.setflags(write=False)
         object.__setattr__(self, "image_points_px", image_points)
@@ -73,7 +78,12 @@ class AprilGridObservation:
 
     @property
     def feature_count(self) -> int:
-        """返回通用角点数量视图，单位为点。"""
+        """返回进入 PnP 和联合优化的标签角点数量。"""
+        return len(self.image_points_px)
+
+    @property
+    def corner_count(self) -> int:
+        """返回检测器保留的原始标签角点数量。"""
         return len(self.image_points_px)
 
 
@@ -335,6 +345,59 @@ def build_aprilgrid_observation(
         tag_count=len(tag_ids),
         ignored_tag_ids=tuple(sorted(ignored_ids)),
     )
+
+
+def aprilgrid_tag_to_pitch_ratios(
+    observation: AprilGridObservation,
+    spec: AprilGridSpec,
+) -> np.ndarray:
+    """估计图像中标签边长与相邻标签中心距的比例。
+
+    该诊断直接使用原始检测角点，不依赖相机内参。透视和鱼眼畸变会带来一定
+    离散度，因此结果用于发现明显的角点边界偏差，不作为质量门。
+
+    Args:
+        observation: 单帧 AprilGrid 四角观测。
+        spec: 目标板行列规格。
+
+    Returns:
+        每一对水平或竖直相邻标签产生的无量纲比例数组。
+    """
+    corners_by_id = {
+        tag_id: corners
+        for tag_id, corners in zip(
+            observation.tag_ids,
+            observation.image_points_px.reshape(-1, 4, 2),
+        )
+    }
+    ratios = []
+    for tag_id, corners in corners_by_id.items():
+        row, column = divmod(tag_id, spec.tag_cols)
+        neighbor_ids = []
+        if column + 1 < spec.tag_cols:
+            neighbor_ids.append(tag_id + 1)
+        if row + 1 < spec.tag_rows:
+            neighbor_ids.append(tag_id + spec.tag_cols)
+        side_length = float(np.mean(np.linalg.norm(
+            np.roll(corners, -1, axis=0) - corners, axis=1
+        )))
+        center = np.mean(corners, axis=0)
+        for neighbor_id in neighbor_ids:
+            neighbor = corners_by_id.get(neighbor_id)
+            if neighbor is None:
+                continue
+            neighbor_side = float(np.mean(np.linalg.norm(
+                np.roll(neighbor, -1, axis=0) - neighbor, axis=1
+            )))
+            center_distance = float(np.linalg.norm(
+                np.mean(neighbor, axis=0) - center
+            ))
+            if center_distance <= 0.0:
+                continue
+            ratio = 0.5 * (side_length + neighbor_side) / center_distance
+            if np.isfinite(ratio) and ratio > 0.0:
+                ratios.append(ratio)
+    return np.asarray(ratios, dtype=np.float64)
 
 
 def build_checkerboard_observation(

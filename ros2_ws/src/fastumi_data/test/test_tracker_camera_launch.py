@@ -86,6 +86,7 @@ def test_launch_defaults_to_tof_and_enables_rviz() -> None:
         "camera_type",
         "device_path",
         "stream_profile",
+        "sensor_qos_reliability",
         "rgb_fisheye_undistort_enable",
         "tracker_serial",
         "use_rviz",
@@ -101,6 +102,14 @@ def test_launch_defaults_to_tof_and_enables_rviz() -> None:
     assert perform_substitutions(
         launch_context, arguments["stream_profile"].default_value
     ) == "main"
+    assert arguments["sensor_qos_reliability"].choices == [
+        "best_effort",
+        "reliable",
+    ]
+    assert perform_substitutions(
+        launch_context,
+        arguments["sensor_qos_reliability"].default_value,
+    ) == "reliable"
 
     # 两个相机子 launch 均关闭自身附带的录制或 RViz 功能。
     included_launches = [
@@ -119,6 +128,15 @@ def test_launch_defaults_to_tof_and_enables_rviz() -> None:
     assert perform_substitutions(
         launch_context, [tof_arguments["stream_profile"]]
     ) == "sub"
+
+    # ToF 子 launch 接收顶层选择的传感器话题可靠性。
+    launch_context.launch_configurations[
+        "sensor_qos_reliability"
+    ] = "reliable"
+    assert perform_substitutions(
+        launch_context,
+        [tof_arguments["sensor_qos_reliability"]],
+    ) == "reliable"
 
     # Tracker 接收顶层默认开启的 RViz 开关。
     launch_context.launch_configurations["use_rviz"] = "true"

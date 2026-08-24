@@ -1,9 +1,7 @@
-# 该文件描述 2026-07-31 Tracker–鱼眼标定实际使用的 6×6 AprilGrid。
-# tagSpacing=0.3725 来自 66 个跨时段轮廓观测的几何复核；tagSize=52.0 mm 来自
-# Tracker 米制运动约束下的 48–56 mm 粗扫与 51.8–53.2 mm 留出集细扫。原
-# 55 mm/0.30 会产生约 2 px 单帧 PnP 系统残差；打印或更换目标板后必须重新实测。
+# 该文件描述 Tracker–鱼眼标定实际使用的 6×6 AprilGrid 真实物理尺寸。
+# 标签边长为 55 mm，标签间空白为 16.5 mm，中心间距为 71.5 mm。
 target_type: 'aprilgrid'
 tagCols: 6
 tagRows: 6
-tagSize: 0.052
-tagSpacing: 0.3725
+tagSize: 0.055
+tagSpacing: 0.3

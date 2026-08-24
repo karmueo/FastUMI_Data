@@ -24,6 +24,10 @@ def generate_launch_description() -> LaunchDescription:
     device_path = LaunchConfiguration("device_path")
     # ToF 相机码流档位，主码流与子码流分别对应不同 RGB 分辨率。
     stream_profile = LaunchConfiguration("stream_profile")
+    # ToF 传感器话题的 DDS 可靠性，可靠模式用于避免录包传输层丢帧。
+    sensor_qos_reliability = LaunchConfiguration(
+        "sensor_qos_reliability"
+    )
     # XV 原始鱼眼图像的可选去畸变输出开关。
     rgb_fisheye_undistort_enable = LaunchConfiguration(
         "rgb_fisheye_undistort_enable"
@@ -54,6 +58,12 @@ def generate_launch_description() -> LaunchDescription:
                 "ToF 码流档位：main 为 2048x1536 RGB，"
                 "sub 为 1920x1080 RGB。"
             ),
+        ),
+        DeclareLaunchArgument(
+            "sensor_qos_reliability",
+            default_value="reliable",
+            choices=["best_effort", "reliable"],
+            description="ToF 传感器话题的 DDS 可靠性。",
         ),
         DeclareLaunchArgument(
             "rgb_fisheye_undistort_enable",
@@ -91,6 +101,7 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={
             "device_path": device_path,
             "stream_profile": stream_profile,
+            "sensor_qos_reliability": sensor_qos_reliability,
             "enable_rgb": "true",
             "enable_itof_depth": "false",
             "enable_itof_gray": "false",

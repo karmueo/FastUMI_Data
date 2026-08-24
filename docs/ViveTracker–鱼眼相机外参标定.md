@@ -19,7 +19,8 @@
 - 相机模型：完整标定必须通过 `--camera-config` 显式传入 Kalibr
   `cam0 + pinhole + equidistant` 或兼容 ToF 配置；`--detect-only` 不加载内参。
 - 标定板：目标 YAML 由 `target_type` 分派。`docs/april_6x6.yaml` 使用 6×6 AprilGrid、
-  `tagSize=0.052 m`、`tagSpacing=0.3725`、`tag36h11`、ID 0–35；
+  `tagSize=0.055 m`、`tagSpacing=0.3`、`tag36h11`、ID 0–35；标签间空白为
+  16.5 mm，中心间距为 71.5 mm；
   `docs/checkerboard_11x8.yaml` 使用 11×8 个内部角点，行列间距均为 0.03 m。
   棋盘格的 `targetCols` 和 `targetRows` 是内部角点数量，坐标按 OpenCV 行优先顺序生成：
   `[column * colSpacingMeters, row * rowSpacingMeters, 0]`。打印或更换目标板后必须复核实际尺寸。
@@ -131,6 +132,8 @@ ros2 run fastumi_data calibrate_tracker_camera \
 
 - 至少 20 帧跨时段样本稳定检出。
 - AprilGrid 每帧至少 6 个标签，ID 均在 0–35 内，同一帧没有重复 ID。
+- `tag_to_pitch_ratio` 记录检测标签边长与相邻中心距的统计值；其配置值为
+  `1 / (1 + tagSpacing)`。偏差超过 5% 时报告 warning，提示检测四角与物理边界存在系统偏差。
 - 棋盘格每帧必须检出完整 11×8 个内部角点；摘要包含 `corner_count_histogram`、
   `expected_corner_count` 和检测器参数，不生成 Tag ID 或标签族字段。
 - 角点覆盖图像中不同区域，板面姿态包含三轴旋转和明显平移变化。
@@ -138,6 +141,9 @@ ros2 run fastumi_data calibrate_tracker_camera \
 ## 5. 完整标定
 
 预检通过后执行：
+
+棋盘格标定时，将下面的 `--target-config` 值改为
+`docs/checkerboard_11x8.yaml`。
 
 ```bash
 BAG=/path/to/tracker_fisheye_bag
@@ -188,8 +194,12 @@ ros2 run fastumi_data calibrate_tracker_camera \
 | `--allow-high-residual` | 关闭 | 质量门失败时仍以零退出码结束，但报告中的 `accepted` 和失败指标保持真实状态。 |
 
 流水线依次执行两遍 MCAP 读取、状态过滤、按 `target_type` 分派的目标检测、鱼眼 IPPE PnP、运动
-去冗余、五算法 Hand-Eye 初值、时间偏移粗扫描、13 参数原始鱼眼角点联合优化和报告
+去冗余、五算法 Hand-Eye 初值、时间偏移粗扫描、13 参数原始鱼眼特征点联合优化和报告
 写入。验证集按完整时间块划分，不进入优化残差。
+
+AprilGrid 的 PnP 与联合优化使用每个 Tag 的全部四角，保持原始鱼眼像素与
+三维标定板角点的一一对应。`tag_to_pitch_ratio` 诊断用于发现检测轮廓与物理
+标签边界间的明显系统偏移。棋盘格继续使用全部内部角点。
 
 `--allow-high-residual` 只允许 CLI 在质量门失败时保留零退出码，报告中的
 `accepted` 和失败指标保持真实状态。部署前仍应要求 `accepted=true`。
