@@ -1,4 +1,4 @@
-"""使用原始鱼眼 AprilGrid 角点估计单帧 ``^camera T_board``。"""
+"""使用原始鱼眼目标板角点估计单帧 ``^camera T_board``。"""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from fastumi_data.tracker_camera_detection import CalibrationObservation
 from fastumi_data.tracker_camera_config import FisheyeCameraModel
-from fastumi_data.tracker_camera_detection import AprilGridObservation
 
 
 class PoseEstimationError(RuntimeError):
-    """表示当前 AprilGrid 观测无法产生有效正深度位姿。"""
+    """表示当前目标板观测无法产生有效正深度位姿。"""
 
 
 @dataclass(frozen=True)
@@ -126,7 +126,7 @@ def fisheye_reprojection_errors(
 
 
 def estimate_camera_from_board(
-    observation: AprilGridObservation,
+    observation: CalibrationObservation,
     camera: FisheyeCameraModel,
 ) -> BoardPoseEstimate:
     """从整板原始鱼眼角点估计 ``^camera T_board``。

@@ -10,9 +10,13 @@ import numpy as np
 import pytest
 
 from fastumi_data.tracker_camera_bag import ImageFrame
-from fastumi_data.tracker_camera_config import AprilGridSpec
+from fastumi_data.tracker_camera_config import (
+    AprilGridSpec,
+    CheckerboardSpec,
+)
 from fastumi_data.tracker_camera_cli import (
     _OptimizationProgressAdapter,
+    _make_target_detector,
     PipelineOutcome,
     _collect_samples,
     _iter_sample_frames,
@@ -593,3 +597,51 @@ def test_settings_rejects_removed_intrinsics_group(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="未知设置分组: intrinsics"):
         apply_settings_file(arguments, parser)
+
+
+def test_checkerboard_detection_summary_and_overlay(
+    tmp_path, monkeypatch
+) -> None:
+    """棋盘格预检应输出完整角点统计且覆盖图不包含 Tag 诊断字段。"""
+    frames = [
+        ImageFrame(index, index, np.full((100, 140, 3), 255, np.uint8))
+        for index in range(20)
+    ]
+    monkeypatch.setattr(
+        "fastumi_data.tracker_camera_cli.iter_image_frames",
+        lambda *args, **kwargs: iter(frames),
+    )
+    spec = CheckerboardSpec(11, 8, 0.03, 0.03)
+    image_points = np.asarray(
+        [[10.0 + column * 10.0, 10.0 + row * 10.0]
+         for row in range(spec.target_rows)
+         for column in range(spec.target_cols)]
+    )
+    detector = SimpleNamespace(
+        settings={"pattern_size": [11, 8]},
+        detect=lambda image: image_points,
+    )
+    arguments = SimpleNamespace(
+        output_dir=str(tmp_path),
+        bag="unused",
+        image_topic="/camera/image",
+        frame_stride=1,
+        min_tags=99,
+    )
+    outcome = _run_detection_only(arguments, detector, spec)
+    assert outcome.accepted is True
+    summary = json.loads(
+        outcome.output_paths["detection_summary"].read_text(encoding="utf-8")
+    )
+    assert summary["target_type"] == "checkerboard"
+    assert summary["target_cols"] == 11
+    assert summary["target_rows"] == 8
+    assert summary["expected_corner_count"] == 88
+    assert summary["corner_count_histogram"] == {"88": 20}
+    assert "tag_family" not in summary
+    assert "tag_id_frame_counts" not in summary
+    assert len(list(tmp_path.glob("detection_overlay_*.png"))) == 20
+    assert (
+        _make_target_detector(spec, "tag36h11").settings["pattern_size"]
+        == [11, 8]
+    )

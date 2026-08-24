@@ -1,4 +1,4 @@
-"""提供可插拔 AprilTag 检测后端并组装 AprilGrid 整板观测。"""
+"""提供 AprilGrid/棋盘格检测后端并组装通用整板观测。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import numpy as np
 
 from fastumi_data.tracker_camera_config import (
     AprilGridSpec,
+    CheckerboardSpec,
+    checkerboard_object_points,
     tag_object_corners,
 )
 
@@ -68,6 +70,62 @@ class AprilGridObservation:
         object_points.setflags(write=False)
         object.__setattr__(self, "image_points_px", image_points)
         object.__setattr__(self, "object_points_m", object_points)
+
+    @property
+    def feature_count(self) -> int:
+        """返回通用角点数量视图，单位为点。"""
+        return len(self.image_points_px)
+
+
+@dataclass(frozen=True)
+class CheckerboardObservation:
+    """保存一帧完整棋盘格内部角点的二维三维对应。"""
+
+    timestamp_ns: int
+    image_points_px: np.ndarray
+    object_points_m: np.ndarray
+    feature_count: int | None = None
+
+    def __post_init__(self) -> None:
+        """复制并校验棋盘格二维三维点的一一对应关系。"""
+        image_points = np.array(
+            self.image_points_px, dtype=np.float64, copy=True
+        )
+        object_points = np.array(
+            self.object_points_m, dtype=np.float64, copy=True
+        )
+        if image_points.ndim != 2 or image_points.shape[1:] != (2,):
+            raise ValueError("棋盘格图像点必须是 Nx2 数组")
+        if object_points.shape != (len(image_points), 3):
+            raise ValueError("棋盘格目标点必须是与图像点等长的 Nx3 数组")
+        if len(image_points) == 0:
+            raise ValueError("棋盘格观测至少需要一个角点")
+        if not np.all(np.isfinite(image_points)) or not np.all(
+            np.isfinite(object_points)
+        ):
+            raise ValueError("棋盘格观测点必须是有限数值")
+        feature_count = (
+            len(image_points)
+            if self.feature_count is None
+            else int(self.feature_count)
+        )
+        if feature_count != len(image_points) or feature_count <= 0:
+            raise ValueError("feature_count 必须等于棋盘格角点数量且为正数")
+        image_points.setflags(write=False)
+        object_points.setflags(write=False)
+        object.__setattr__(self, "timestamp_ns", int(self.timestamp_ns))
+        object.__setattr__(self, "image_points_px", image_points)
+        object.__setattr__(self, "object_points_m", object_points)
+        object.__setattr__(self, "feature_count", feature_count)
+
+
+class CalibrationObservation(Protocol):
+    """约束 AprilGrid/棋盘格观测向 PnP 提供通用点接口。"""
+
+    timestamp_ns: int
+    image_points_px: np.ndarray
+    object_points_m: np.ndarray
+    feature_count: int
 
 
 class TagDetector(Protocol):
@@ -143,6 +201,82 @@ class OpenCvAprilTagDetector:
         return sorted(detections, key=lambda item: item.tag_id)
 
 
+class OpenCvCheckerboardDetector:
+    """使用 OpenCV 经典棋盘格算法检测并精化完整内部角点。"""
+
+    FIND_FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
+    SUBPIX_WINDOW = (11, 11)
+    SUBPIX_CRITERIA = (
+        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_MAX_ITER,
+        30,
+        0.01,
+    )
+
+    def __init__(self, spec: CheckerboardSpec) -> None:
+        """创建指定内部角点行列的棋盘格检测器。"""
+        if not isinstance(spec, CheckerboardSpec):
+            raise TypeError("棋盘格检测器需要 CheckerboardSpec")
+        self.spec = spec
+        self._pattern_size = (spec.target_cols, spec.target_rows)
+
+    @property
+    def settings(self) -> dict[str, object]:
+        """返回经典棋盘格检测和亚像素精化参数。"""
+        return {
+            "pattern_size": list(self._pattern_size),
+            "flags": int(self.FIND_FLAGS),
+            "find_flags": int(self.FIND_FLAGS),
+            "find_flags_names": ["adaptive_thresh", "normalize_image"],
+            "corner_subpix_window": list(self.SUBPIX_WINDOW),
+            "corner_subpix_criteria": {
+                "type": "EPS|MAX_ITER",
+                "max_iterations": 30,
+                "epsilon": 0.01,
+            },
+        }
+
+    @staticmethod
+    def _grayscale(image: np.ndarray) -> np.ndarray:
+        """把 mono8/BGR/BGRA 输入统一成 uint8 灰度图。"""
+        image = np.asarray(image)
+        if image.ndim == 2:
+            grayscale = image
+        elif image.ndim == 3 and image.shape[2] == 3:
+            grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        elif image.ndim == 3 and image.shape[2] == 4:
+            grayscale = cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+        else:
+            raise ValueError("检测图像必须是 mono8、BGR 或 BGRA 格式")
+        if grayscale.dtype != np.uint8:
+            raise ValueError("检测图像必须使用 uint8 像素")
+        return grayscale
+
+    def detect(self, image: np.ndarray) -> np.ndarray:
+        """检测并返回完整精化角点，失败时返回 ``(0, 2)`` 数组。"""
+        grayscale = self._grayscale(image)
+        found, corners = cv2.findChessboardCorners(
+            grayscale, self._pattern_size, flags=self.FIND_FLAGS
+        )
+        if not found or corners is None:
+            return np.empty((0, 2), dtype=np.float64)
+        corners = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
+        if len(corners) != self.spec.corner_count:
+            return np.empty((0, 2), dtype=np.float64)
+        refined = cv2.cornerSubPix(
+            grayscale,
+            corners,
+            self.SUBPIX_WINDOW,
+            (-1, -1),
+            self.SUBPIX_CRITERIA,
+        )
+        refined = np.asarray(refined, dtype=np.float64).reshape(-1, 2)
+        if refined.shape != (self.spec.corner_count, 2) or not np.all(
+            np.isfinite(refined)
+        ):
+            return np.empty((0, 2), dtype=np.float64)
+        return refined
+
+
 def build_aprilgrid_observation(
     timestamp_ns: int,
     detections: Sequence[RawTagDetection],
@@ -201,6 +335,54 @@ def build_aprilgrid_observation(
         tag_count=len(tag_ids),
         ignored_tag_ids=tuple(sorted(ignored_ids)),
     )
+
+
+def build_checkerboard_observation(
+    timestamp_ns: int,
+    image_points_px: np.ndarray,
+    spec: CheckerboardSpec,
+) -> CheckerboardObservation:
+    """校验完整棋盘格角点并组装通用二维三维观测。"""
+    corners = np.asarray(image_points_px, dtype=np.float64)
+    expected = spec.corner_count
+    if corners.shape != (expected, 2):
+        raise DetectionRejected(
+            f"棋盘格检测得到 {len(corners) if corners.ndim else 0} 个角点，"
+            f"需要完整 {expected} 个"
+        )
+    if not np.all(np.isfinite(corners)):
+        raise DetectionRejected("棋盘格角点必须是有限数值")
+    return CheckerboardObservation(
+        timestamp_ns=int(timestamp_ns),
+        image_points_px=corners,
+        object_points_m=checkerboard_object_points(spec),
+        feature_count=expected,
+    )
+
+
+def validate_checkerboard_observations(
+    observations: Sequence[CheckerboardObservation],
+    spec: CheckerboardSpec,
+    minimum_probe_frames: int = 5,
+) -> None:
+    """确认棋盘格预检帧数足够且每帧都包含完整内部角点。"""
+    if minimum_probe_frames <= 0:
+        raise ValueError("minimum_probe_frames 必须为正整数")
+    if len(observations) < minimum_probe_frames:
+        raise DetectionRejected(
+            f"棋盘格预检至少 {minimum_probe_frames} 帧有效观测"
+        )
+    incomplete = sorted(
+        {
+            int(observation.feature_count)
+            for observation in observations
+            if observation.feature_count != spec.corner_count
+        }
+    )
+    if incomplete:
+        raise DetectionRejected(
+            f"棋盘格观测角点数量 {incomplete}，需要完整 {spec.corner_count} 个"
+        )
 
 
 def validate_tag_family(

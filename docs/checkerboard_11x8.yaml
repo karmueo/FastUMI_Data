@@ -1,0 +1,7 @@
+# 棋盘格目标配置；targetCols/targetRows 表示 OpenCV 内部角点数量。
+# checkerboard.yaml
+target_type: 'checkerboard'
+targetCols: 11          # 内部角点列数；OpenCV 以列方向生成坐标。9x6 棋盘格填 8
+targetRows: 8           # 内部角点行数；OpenCV 以行优先顺序生成坐标。9x6 棋盘格填 5
+rowSpacingMeters: 0.03 # 行方向相邻内部角点间距，等于实际方格边长，单位米
+colSpacingMeters: 0.03 # 列方向相邻内部角点间距，等于实际方格边长，单位米

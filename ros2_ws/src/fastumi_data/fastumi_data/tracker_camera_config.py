@@ -1,10 +1,10 @@
-"""解析 Tracker–鱼眼相机标定配置并生成 AprilGrid 米制几何。"""
+"""解析 Tracker–鱼眼相机标定配置并生成目标板米制几何。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Union
 
 from ament_index_python.packages import get_package_share_directory
 import numpy as np
@@ -112,6 +112,66 @@ class AprilGridSpec:
             self.tag_size_m + (self.tag_cols - 1) * pitch,
             self.tag_size_m + (self.tag_rows - 1) * pitch,
         )
+
+    @property
+    def target_type(self) -> str:
+        """返回目标类型标识，供通用标定流水线分派。"""
+        return "aprilgrid"
+
+
+@dataclass(frozen=True)
+class CheckerboardSpec:
+    """保存棋盘格内部角点的行列和米制横纵向间距。
+
+    ``target_cols`` 与 ``target_rows`` 表示内部角点数量。板坐标系原点位于
+    左上角内部角点，x 沿列方向、y 沿行方向，坐标顺序与 OpenCV 棋盘格检测
+    保持一致。
+    """
+
+    target_cols: int
+    target_rows: int
+    row_spacing_m: float
+    col_spacing_m: float
+    target_type: str = "checkerboard"
+
+    def __post_init__(self) -> None:
+        """校验内部角点尺寸、间距和固定目标类型。"""
+        for name in ("target_cols", "target_rows"):
+            value = getattr(self, name)
+            try:
+                integral = int(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"棋盘格 {name} 必须是正整数") from error
+            if isinstance(value, bool) or integral != value or integral < 3:
+                raise ValueError(f"棋盘格 {name} 必须是至少为 3 的正整数")
+            object.__setattr__(self, name, integral)
+        for name in ("row_spacing_m", "col_spacing_m"):
+            value = getattr(self, name)
+            try:
+                spacing = float(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"棋盘格 {name} 必须是有限正数") from error
+            if not np.isfinite(spacing) or spacing <= 0.0:
+                raise ValueError(f"棋盘格 {name} 必须是有限正数")
+            object.__setattr__(self, name, spacing)
+        if self.target_type != "checkerboard":
+            raise ValueError("棋盘格 target_type 必须是 checkerboard")
+
+    @property
+    def corner_count(self) -> int:
+        """返回整板内部角点总数。"""
+        return self.target_cols * self.target_rows
+
+    @property
+    def board_extent_m(self) -> tuple[float, float]:
+        """返回最外侧内部角点之间的宽度和高度，单位为米。"""
+        return (
+            (self.target_cols - 1) * self.col_spacing_m,
+            (self.target_rows - 1) * self.row_spacing_m,
+        )
+
+
+CalibrationTargetSpec = Union[AprilGridSpec, CheckerboardSpec]
 
 
 @dataclass(frozen=True)
@@ -256,6 +316,66 @@ def load_aprilgrid(
         if isinstance(error, ValueError) and not isinstance(error, KeyError):
             raise
         raise ValueError("AprilGrid 配置缺少有效行列、尺寸或间距") from error
+
+
+def load_checkerboard(path: str) -> CheckerboardSpec:
+    """从目标 YAML 加载棋盘格内部角点规格。"""
+    document = _load_yaml_mapping(path)
+    if document.get("target_type") != "checkerboard":
+        raise ValueError("标定目标 target_type 必须是 checkerboard")
+    try:
+        return CheckerboardSpec(
+            target_cols=document["targetCols"],
+            target_rows=document["targetRows"],
+            row_spacing_m=float(document["rowSpacingMeters"]),
+            col_spacing_m=float(document["colSpacingMeters"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        if isinstance(error, ValueError) and not isinstance(error, KeyError):
+            raise
+        raise ValueError(
+            "棋盘格配置缺少有效内部角点行列或间距"
+        ) from error
+
+
+def load_calibration_target(
+    path: str, tag_family: str = "tag36h11"
+) -> CalibrationTargetSpec:
+    """按 YAML ``target_type`` 加载 AprilGrid 或棋盘格目标。"""
+    document = _load_yaml_mapping(path)
+    target_type = document.get("target_type")
+    if target_type == "aprilgrid":
+        return load_aprilgrid(path, tag_family)
+    if target_type == "checkerboard":
+        return load_checkerboard(path)
+    raise ValueError(
+        "标定目标 target_type 必须是 aprilgrid 或 checkerboard"
+    )
+
+
+def checkerboard_object_points(spec: CheckerboardSpec) -> np.ndarray:
+    """按 OpenCV 行优先顺序生成整板内部角点的米制三维坐标。
+
+    返回形状为 ``(target_rows * target_cols, 3)`` 的数组，单点坐标为
+    ``[column * col_spacing_m, row * row_spacing_m, 0]``。
+    """
+    rows, columns = np.indices(
+        (spec.target_rows, spec.target_cols), dtype=np.float64
+    )
+    points = np.stack(
+        (
+            columns.reshape(-1) * spec.col_spacing_m,
+            rows.reshape(-1) * spec.row_spacing_m,
+            np.zeros(spec.corner_count, dtype=np.float64),
+        ),
+        axis=1,
+    )
+    return points
+
+
+def checkerboard_object_corners(spec: CheckerboardSpec) -> np.ndarray:
+    """兼容性别名：返回棋盘格内部角点的米制三维坐标。"""
+    return checkerboard_object_points(spec)
 
 
 def tag_object_corners(spec: AprilGridSpec, tag_id: int) -> np.ndarray:

@@ -6,13 +6,19 @@ import pytest
 
 from fastumi_data.tracker_camera_config import (
     AprilGridSpec,
+    CheckerboardSpec,
+    checkerboard_object_points,
     tag_object_corners,
 )
 from fastumi_data.tracker_camera_detection import (
+    CheckerboardObservation,
     DetectionRejected,
     OpenCvAprilTagDetector,
+    OpenCvCheckerboardDetector,
     RawTagDetection,
     build_aprilgrid_observation,
+    build_checkerboard_observation,
+    validate_checkerboard_observations,
     validate_tag_family,
 )
 
@@ -153,3 +159,95 @@ def test_tag_family_probe_requires_enough_valid_frames() -> None:
     validate_tag_family(
         [observation, observation], make_spec(), minimum_probe_frames=2
     )
+
+
+def make_checkerboard_spec() -> CheckerboardSpec:
+    """返回测试使用的 11×8 内部角点棋盘格。"""
+    return CheckerboardSpec(11, 8, 0.03, 0.03)
+
+
+def make_checkerboard_image(spec: CheckerboardSpec) -> np.ndarray:
+    """生成带灰色边界的高对比度经典棋盘格图像。"""
+    square_size = 40
+    board = np.empty(
+        (
+            (spec.target_rows + 1) * square_size,
+            (spec.target_cols + 1) * square_size,
+        ),
+        dtype=np.uint8,
+    )
+    for row in range(spec.target_rows + 1):
+        for column in range(spec.target_cols + 1):
+            value = 255 if (row + column) % 2 == 0 else 0
+            board[
+                row * square_size:(row + 1) * square_size,
+                column * square_size:(column + 1) * square_size,
+            ] = value
+    image = np.full(
+        (board.shape[0] + 80, board.shape[1] + 80), 127, dtype=np.uint8
+    )
+    image[40:-40, 40:-40] = board
+    return image
+
+
+def test_opencv_checkerboard_detector_accepts_image_formats() -> None:
+    """经典检测器应在 mono8、BGR 和 BGRA 输入中返回完整精化网格。"""
+    spec = make_checkerboard_spec()
+    detector = OpenCvCheckerboardDetector(spec)
+    gray = make_checkerboard_image(spec)
+    for image in (
+        gray,
+        cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR),
+        cv2.cvtColor(gray, cv2.COLOR_GRAY2BGRA),
+    ):
+        corners = detector.detect(image)
+        assert corners.shape == (spec.corner_count, 2)
+        assert np.all(np.isfinite(corners))
+    assert detector.settings["pattern_size"] == [11, 8]
+    assert detector.settings["corner_subpix_window"] == [11, 11]
+
+
+@pytest.mark.parametrize(
+    "image,message",
+    [
+        (np.zeros((300, 400, 2), dtype=np.uint8), "mono8"),
+        (np.zeros((300, 400), dtype=np.float32), "uint8"),
+    ],
+)
+def test_checkerboard_detector_rejects_invalid_image_formats(
+    image: np.ndarray, message: str
+) -> None:
+    """检测器应拒绝错误通道数和非 uint8 图像。"""
+    detector = OpenCvCheckerboardDetector(make_checkerboard_spec())
+    with pytest.raises(ValueError, match=message):
+        detector.detect(image)
+
+
+def test_checkerboard_detector_returns_empty_for_incomplete_grid() -> None:
+    """没有完整棋盘格时检测器应返回约定的空 Nx2 数组。"""
+    detector = OpenCvCheckerboardDetector(make_checkerboard_spec())
+    corners = detector.detect(np.full((300, 400), 127, dtype=np.uint8))
+    assert corners.shape == (0, 2)
+
+
+def test_checkerboard_observation_requires_all_configured_corners() -> None:
+    """棋盘格观测必须保留完整二维三维对应及固定角点数量。"""
+    spec = make_checkerboard_spec()
+    image_points = np.arange(spec.corner_count * 2, dtype=np.float64).reshape(
+        spec.corner_count, 2
+    )
+    observation = build_checkerboard_observation(123, image_points, spec)
+    assert isinstance(observation, CheckerboardObservation)
+    assert observation.feature_count == spec.corner_count
+    np.testing.assert_allclose(
+        observation.object_points_m, checkerboard_object_points(spec)
+    )
+    validate_checkerboard_observations([observation] * 5, spec)
+    with pytest.raises(DetectionRejected, match="完整 88"):
+        build_checkerboard_observation(123, image_points[:-1], spec)
+    with pytest.raises(DetectionRejected, match="有限"):
+        build_checkerboard_observation(
+            123,
+            np.full((spec.corner_count, 2), np.nan),
+            spec,
+        )

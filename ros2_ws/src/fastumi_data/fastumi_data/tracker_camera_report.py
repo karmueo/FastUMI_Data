@@ -1,4 +1,4 @@
-"""评估 Tracker–相机标定质量并生成可复现报告与独立复核工具。"""
+"""评估 Tracker–目标板相机标定质量并生成可复现报告与独立复核工具。"""
 
 from __future__ import annotations
 
@@ -67,13 +67,15 @@ class ReportContext:
     image_topic: str
     tracker_topic: str
     status_topic: str
-    tag_family: str
+    tag_family: str | None
     settings_snapshot: Mapping[str, Any]
     camera_provenance: Mapping[str, Any] | None = None
     thresholds: QualityThresholds = QualityThresholds()
     frame_metrics: tuple[Mapping[str, Any], ...] = ()
     overlay_samples: tuple[OverlaySample, ...] = ()
     warnings: tuple[str, ...] = ()
+    target_type: str = "aprilgrid"
+    target_spec: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -214,6 +216,8 @@ def _atomic_save_figure(path: Path, figure: plt.Figure) -> None:
 FRAME_METRIC_FIELDS = (
     "timestamp_ns",
     "partition",
+    "target_type",
+    "feature_count",
     "tag_count",
     "pnp_median_px",
     "pnp_p95_px",
@@ -227,9 +231,13 @@ FRAME_METRIC_FIELDS = (
 
 def _csv_value(field: str, value: Any) -> str | int:
     """按固定精度把逐帧 CSV 值转换为稳定文本。"""
-    if field in {"timestamp_ns", "tag_count"}:
+    if field == "timestamp_ns":
         return int(value)
-    if field == "partition":
+    if field == "feature_count":
+        return int(value)
+    if field == "tag_count":
+        return "" if value is None else int(value)
+    if field in {"partition", "target_type"}:
         return str(value)
     return f"{float(value):.9f}"
 
@@ -347,6 +355,10 @@ def write_calibration_report(
         warnings.append("缺少 Matplotlib，已跳过 PNG 诊断图；可安装后重新生成")
     if not context.overlay_samples:
         warnings.append("没有可视化样本，未生成角点叠加图")
+    report_metrics = dict(result.metrics)
+    report_metrics.update({
+        "target_type": context.target_type,
+    })
     calibration_path = destination / "calibration.yaml"
     summary_path = destination / "summary.json"
     frame_metrics_path = destination / "frame_metrics.csv"
@@ -372,7 +384,9 @@ def write_calibration_report(
         "time_offset_ms": float(result.time_offset_ms),
         "train_indices": list(result.train_indices),
         "validation_indices": list(result.validation_indices),
-        "metrics": dict(result.metrics),
+        "metrics": report_metrics,
+        "target_type": context.target_type,
+        "target_spec": dict(context.target_spec or {}),
         "thresholds": asdict(context.thresholds),
         "inputs": {
             "bag": {
@@ -394,7 +408,6 @@ def write_calibration_report(
             "tracker_pose": context.tracker_topic,
             "tracker_status": context.status_topic,
         },
-        "tag_family": context.tag_family,
         "settings_snapshot": dict(context.settings_snapshot),
         "software_versions": {
             "python": platform.python_version(),
@@ -404,6 +417,8 @@ def write_calibration_report(
         },
         "warnings": warnings,
     }
+    if context.target_type == "aprilgrid" and context.tag_family:
+        document["tag_family"] = context.tag_family
     _atomic_write_text(
         calibration_path,
         yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
@@ -411,7 +426,9 @@ def write_calibration_report(
     summary = {
         "accepted": decision.accepted,
         "quality_failures": list(decision.failures),
-        "metrics": dict(result.metrics),
+        "target_type": context.target_type,
+        "target_spec": dict(context.target_spec or {}),
+        "metrics": report_metrics,
         "time_offset_ms": float(result.time_offset_ms),
         "warnings": warnings,
     }

@@ -259,3 +259,42 @@ def test_report_records_provided_camera_provenance(tmp_path: Path) -> None:
     assert document["inputs"]["camera_provenance"] == (
         provided.camera_provenance
     )
+
+
+def test_checkerboard_report_writes_target_metadata_without_tag_family(
+    tmp_path: Path,
+) -> None:
+    """棋盘格报告应写目标规格和特征数，并省略 AprilGrid 标签族。"""
+    base = make_report_context(tmp_path)
+    checker_frame = {
+        **base.frame_metrics[0],
+        "target_type": "checkerboard",
+        "feature_count": 88,
+        "tag_count": None,
+    }
+    context = ReportContext(
+        **{
+            **base.__dict__,
+            "tag_family": None,
+            "target_type": "checkerboard",
+            "target_spec": {
+                "target_cols": 11,
+                "target_rows": 8,
+                "corner_count": 88,
+            },
+            "frame_metrics": (checker_frame,),
+        }
+    )
+    paths = write_calibration_report(
+        tmp_path / "checkerboard-report",
+        make_passing_optimization_result(),
+        context,
+    )
+    document = yaml.safe_load(
+        paths["calibration"].read_text(encoding="utf-8")
+    )
+    assert document["target_type"] == "checkerboard"
+    assert document["target_spec"]["corner_count"] == 88
+    assert "tag_family" not in document
+    assert "checkerboard" in paths["frame_metrics"].read_text(encoding="utf-8")
+    assert ",88," in paths["frame_metrics"].read_text(encoding="utf-8")

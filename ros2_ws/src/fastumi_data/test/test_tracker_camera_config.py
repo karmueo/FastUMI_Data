@@ -7,10 +7,13 @@ import pytest
 
 from fastumi_data.tracker_camera_config import (
     AprilGridSpec,
+    CheckerboardSpec,
     CalibrationSettings,
     FisheyeCameraModel,
+    checkerboard_object_points,
     default_camera_config_path,
     load_aprilgrid,
+    load_calibration_target,
     load_kalibr_camera,
     tag_object_corners,
 )
@@ -175,3 +178,159 @@ cam0:
     )
     with pytest.raises(ValueError, match="同时包含"):
         load_kalibr_camera(str(camera_path))
+
+
+def test_checkerboard_spec_and_object_points(tmp_path: Path) -> None:
+    """棋盘格规格应按内部角点数和行优先坐标生成。"""
+    path = tmp_path / "checkerboard.yaml"
+    path.write_text(
+        "target_type: checkerboard\n"
+        "targetCols: 11\n"
+        "targetRows: 8\n"
+        "rowSpacingMeters: 0.03\n"
+        "colSpacingMeters: 0.025\n",
+        encoding="utf-8",
+    )
+    spec = load_calibration_target(str(path))
+    assert isinstance(spec, CheckerboardSpec)
+    assert spec.corner_count == 88
+    assert spec.board_extent_m == pytest.approx((0.25, 0.21))
+    np.testing.assert_allclose(
+        checkerboard_object_points(spec)[[0, 1, 11]],
+        [[0.0, 0.0, 0.0], [0.025, 0.0, 0.0], [0.0, 0.03, 0.0]],
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (0, 8, 0.03, 0.03),
+        (1, 8, 0.03, 0.03),
+        (11, 2, 0.03, 0.03),
+        (11, 0, 0.03, 0.03),
+        (11.5, 8, 0.03, 0.03),
+        (11, 8, 0.0, 0.03),
+    ],
+)
+def test_checkerboard_spec_rejects_invalid_geometry(arguments) -> None:
+    """棋盘格尺寸必须受 OpenCV 支持，间距必须是有限正数。"""
+    with pytest.raises(ValueError):
+        CheckerboardSpec(*arguments)
+
+
+def _write_checkerboard_yaml(path: Path, fields: dict) -> None:
+    """写入测试使用的棋盘格 YAML 字段。"""
+    content = "\n".join(
+        f"{key}: {value}" for key, value in fields.items()
+    )
+    path.write_text(content + "\n", encoding="utf-8")
+
+
+def _checkerboard_yaml_fields() -> dict[str, str]:
+    """返回测试使用的完整棋盘格 YAML 字段。"""
+    return {
+        "target_type": "checkerboard",
+        "targetCols": "11",
+        "targetRows": "8",
+        "rowSpacingMeters": "0.03",
+        "colSpacingMeters": "0.03",
+    }
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "target_type",
+        "targetCols",
+        "targetRows",
+        "rowSpacingMeters",
+        "colSpacingMeters",
+    ],
+)
+def test_checkerboard_loader_requires_fields(
+    tmp_path: Path, missing_field: str
+) -> None:
+    """棋盘格 YAML 缺少任一必需字段时应拒绝加载。"""
+    fields = _checkerboard_yaml_fields()
+    fields.pop(missing_field)
+    path = tmp_path / "checkerboard-missing.yaml"
+    _write_checkerboard_yaml(path, fields)
+    with pytest.raises(ValueError):
+        load_calibration_target(str(path))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("targetCols", "1"),
+        ("targetRows", "2"),
+        ("targetCols", "11.5"),
+        ("targetRows", "8.5"),
+        ("targetCols", "true"),
+        ("targetRows", "false"),
+    ],
+)
+def test_checkerboard_loader_rejects_unsupported_dimensions(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """棋盘格内部角点行列必须是 OpenCV 支持的非布尔正整数。"""
+    fields = _checkerboard_yaml_fields()
+    fields[field] = value
+    path = tmp_path / "checkerboard-dimensions.yaml"
+    _write_checkerboard_yaml(path, fields)
+    with pytest.raises(ValueError, match="正整数"):
+        load_calibration_target(str(path))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("targetCols", "columns"),
+        ("targetRows", "rows"),
+        ("rowSpacingMeters", "spacing"),
+        ("colSpacingMeters", "spacing"),
+    ],
+)
+def test_checkerboard_loader_rejects_nonnumeric_values(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """棋盘格尺寸和间距字段必须可解析为数值。"""
+    fields = _checkerboard_yaml_fields()
+    fields[field] = value
+    path = tmp_path / "checkerboard-nonnumeric.yaml"
+    _write_checkerboard_yaml(path, fields)
+    with pytest.raises(ValueError):
+        load_calibration_target(str(path))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("rowSpacingMeters", ".nan"),
+        ("rowSpacingMeters", ".inf"),
+        ("colSpacingMeters", ".nan"),
+        ("colSpacingMeters", ".inf"),
+    ],
+)
+def test_checkerboard_loader_rejects_nonfinite_spacing(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """棋盘格行列间距必须是有限正数。"""
+    fields = _checkerboard_yaml_fields()
+    fields[field] = value
+    path = tmp_path / "checkerboard-spacing.yaml"
+    _write_checkerboard_yaml(path, fields)
+    with pytest.raises(ValueError, match="有限正数"):
+        load_calibration_target(str(path))
+
+
+def test_checkerboard_loader_rejects_unsupported_target_type(
+    tmp_path: Path,
+) -> None:
+    """目标类型不属于支持集合时应拒绝加载。"""
+    fields = _checkerboard_yaml_fields()
+    fields["target_type"] = "circle"
+    path = tmp_path / "unsupported-target.yaml"
+    _write_checkerboard_yaml(path, fields)
+    with pytest.raises(ValueError, match="aprilgrid 或 checkerboard"):
+        load_calibration_target(str(path))

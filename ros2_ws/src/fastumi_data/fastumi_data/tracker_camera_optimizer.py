@@ -1,4 +1,4 @@
-"""扫描 Tracker 时间偏移并联合优化外参、固定板位姿和时间。"""
+"""扫描 Tracker 时间偏移并联合优化目标板外参、位姿和时间。"""
 
 from __future__ import annotations
 
@@ -44,14 +44,18 @@ class CalibrationSample:
     """保存一帧联合优化所需的原始角点和 PnP 初值。
 
     ``object_points_m`` 为板坐标系下 ``(N, 3)`` 米制点，
-    ``image_points_px`` 为对应的原始鱼眼 ``(N, 2)`` 像素。
+    ``image_points_px`` 为对应的原始鱼眼 ``(N, 2)`` 像素。``tag_count``
+    保留 AprilGrid 的标签计数语义；棋盘格使用 ``target_type`` 和
+    ``feature_count`` 表示完整角点观测。
     """
 
     timestamp_ns: int
     object_points_m: np.ndarray
     image_points_px: np.ndarray
     camera_from_board: np.ndarray
-    tag_count: int
+    tag_count: int | None = None
+    target_type: str = "aprilgrid"
+    feature_count: int | None = None
 
     def __post_init__(self) -> None:
         """复制并校验观测数组，防止优化期间输入被修改。"""
@@ -75,14 +79,33 @@ class CalibrationSample:
             for array in (object_points, image_points, camera_from_board)
         ):
             raise ValueError("标定样本必须只包含有限数值")
-        if self.tag_count <= 0:
-            raise ValueError("tag_count 必须为正整数")
+        if self.target_type not in {"aprilgrid", "checkerboard"}:
+            raise ValueError("target_type 必须是 aprilgrid 或 checkerboard")
+        if self.target_type == "aprilgrid":
+            if self.tag_count is None or int(self.tag_count) <= 0:
+                raise ValueError("AprilGrid tag_count 必须为正整数")
+            tag_count = int(self.tag_count)
+        else:
+            if self.tag_count not in (None, 0):
+                raise ValueError("棋盘格 tag_count 必须为空")
+            tag_count = None
+        feature_count = (
+            len(object_points)
+            if self.feature_count is None
+            else int(self.feature_count)
+        )
+        if feature_count != len(object_points) or feature_count <= 0:
+            raise ValueError("feature_count 必须等于观测点数量且为正数")
         object_points.setflags(write=False)
         image_points.setflags(write=False)
         camera_from_board.setflags(write=False)
         object.__setattr__(self, "object_points_m", object_points)
         object.__setattr__(self, "image_points_px", image_points)
         object.__setattr__(self, "camera_from_board", camera_from_board)
+        object.__setattr__(self, "timestamp_ns", int(self.timestamp_ns))
+        object.__setattr__(self, "tag_count", tag_count)
+        object.__setattr__(self, "target_type", self.target_type)
+        object.__setattr__(self, "feature_count", feature_count)
 
 
 @dataclass(frozen=True)

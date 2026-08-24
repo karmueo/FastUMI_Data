@@ -7,10 +7,15 @@ from scipy.spatial.transform import Rotation
 from fastumi_data.pose_math import pose_to_matrix
 from fastumi_data.tracker_camera_config import (
     AprilGridSpec,
+    CheckerboardSpec,
     FisheyeCameraModel,
+    checkerboard_object_points,
     tag_object_corners,
 )
-from fastumi_data.tracker_camera_detection import AprilGridObservation
+from fastumi_data.tracker_camera_detection import (
+    AprilGridObservation,
+    CheckerboardObservation,
+)
 from fastumi_data.tracker_camera_pnp import (
     PoseEstimationError,
     estimate_camera_from_board,
@@ -141,3 +146,24 @@ def test_pose_estimation_rejects_nonfinite_or_too_few_points() -> None:
     )
     with pytest.raises(PoseEstimationError, match="至少 8"):
         estimate_camera_from_board(small_observation, camera)
+
+
+def test_fisheye_ippe_accepts_checkerboard_observation() -> None:
+    """通用鱼眼 IPPE 应直接接受 11×8 棋盘格的 Nx2/Nx3 观测。"""
+    camera = make_project_camera()
+    spec = CheckerboardSpec(11, 8, 0.03, 0.03)
+    object_points = checkerboard_object_points(spec)
+    expected = pose_to_matrix(
+        np.array([-0.14, -0.12, 0.72]),
+        Rotation.from_euler("xyz", [6.0, -9.0, 3.0], degrees=True).as_quat(),
+    )
+    image_points = project_fisheye_points(object_points, expected, camera)
+    observation = CheckerboardObservation(0, image_points, object_points)
+    result = estimate_camera_from_board(observation, camera)
+    translation_mm, rotation_deg = transform_error(
+        expected, result.camera_from_board
+    )
+    assert observation.feature_count == 88
+    assert translation_mm < 0.1
+    assert rotation_deg < 0.05
+    assert result.p95_error_px < 0.05

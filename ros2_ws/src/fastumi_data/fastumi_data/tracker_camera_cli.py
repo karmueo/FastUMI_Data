@@ -1,4 +1,4 @@
-"""编排 Tracker–鱼眼相机离线 MCAP 标定流水线和检测预检。"""
+"""编排 Tracker–鱼眼相机离线 MCAP 目标板标定流水线和检测预检。"""
 
 from __future__ import annotations
 
@@ -26,13 +26,18 @@ from fastumi_data.tracker_camera_bag import (
 )
 from fastumi_data.tracker_camera_config import (
     CalibrationSettings,
+    load_calibration_target,
     load_aprilgrid,
     load_kalibr_camera,
 )
 from fastumi_data.tracker_camera_detection import (
+    CalibrationObservation,
     DetectionRejected,
     OpenCvAprilTagDetector,
+    OpenCvCheckerboardDetector,
     build_aprilgrid_observation,
+    build_checkerboard_observation,
+    validate_checkerboard_observations,
     validate_tag_family,
 )
 from fastumi_data.tracker_camera_handeye import (
@@ -256,7 +261,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     """创建标定命令行解析器并写入已确认的 bag 默认话题。"""
     defaults = CalibrationSettings()
     parser = argparse.ArgumentParser(
-        description="从 Vive Tracker 和鱼眼 AprilGrid MCAP 标定刚性外参"
+        description="从 Vive Tracker 和鱼眼目标板 MCAP 标定刚性外参"
     )
     parser.add_argument("--bag", required=True)
     parser.add_argument(
@@ -270,11 +275,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-topic", default=defaults.image_topic)
     parser.add_argument("--tracker-topic", default=defaults.tracker_topic)
     parser.add_argument("--status-topic", default=defaults.status_topic)
-    parser.add_argument("--tag-family", default=defaults.tag_family)
+    parser.add_argument(
+        "--tag-family",
+        default=defaults.tag_family,
+        help="AprilGrid-only 标签族；checkerboard 目标会忽略此参数",
+    )
     parser.add_argument(
         "--frame-stride", type=int, default=defaults.frame_stride
     )
-    parser.add_argument("--min-tags", type=int, default=defaults.min_tags)
+    parser.add_argument(
+        "--min-tags",
+        type=int,
+        default=defaults.min_tags,
+        help="AprilGrid-only 最少标签数；checkerboard 由完整角点检测门控",
+    )
     parser.add_argument(
         "--max-pose-gap-ms", type=float, default=defaults.max_pose_gap_ms
     )
@@ -429,6 +443,85 @@ def _thresholds(arguments: argparse.Namespace) -> QualityThresholds:
     )
 
 
+def _target_type(target: Any) -> str:
+    """返回配置目标类型，旧 AprilGrid 对象默认按 AprilGrid 处理。"""
+    return str(getattr(target, "target_type", "aprilgrid"))
+
+
+def _is_checkerboard(target: Any) -> bool:
+    """返回目标是否使用棋盘格检测和完整角点门控。"""
+    return _target_type(target) == "checkerboard"
+
+
+def _load_target_config(path: str, tag_family: str) -> Any:
+    """按 target_type 加载目标，并兼容旧测试对 load_aprilgrid 的替换。"""
+    if not Path(path).exists():
+        return load_aprilgrid(path, tag_family)
+    return load_calibration_target(path, tag_family)
+
+
+def _make_target_detector(target: Any, tag_family: str) -> Any:
+    """为目标规格创建对应 OpenCV 检测器。"""
+    if _is_checkerboard(target):
+        return OpenCvCheckerboardDetector(target)
+    return OpenCvAprilTagDetector(tag_family)
+
+
+def _build_target_observation(
+    timestamp_ns: int,
+    image: np.ndarray,
+    detector: Any,
+    target: Any,
+    min_tags: int,
+) -> CalibrationObservation:
+    """用统一入口构造 AprilGrid 或棋盘格观测。"""
+    if _is_checkerboard(target):
+        return build_checkerboard_observation(
+            timestamp_ns, detector.detect(image), target
+        )
+    return build_aprilgrid_observation(
+        timestamp_ns, detector.detect(image), target, min_tags
+    )
+
+
+def _validate_target_observations(
+    observations: Sequence[CalibrationObservation],
+    target: Any,
+    minimum_probe_frames: int = 5,
+) -> None:
+    """按目标类型执行预检帧数和完整特征门控。"""
+    if _is_checkerboard(target):
+        validate_checkerboard_observations(
+            observations, target, minimum_probe_frames
+        )
+    else:
+        validate_tag_family(observations, target, minimum_probe_frames)
+
+
+def _target_spec_snapshot(target: Any) -> dict[str, object]:
+    """把目标规格转换为报告和摘要中的稳定映射。"""
+    if _is_checkerboard(target):
+        return {
+            "target_type": "checkerboard",
+            "target_cols": int(target.target_cols),
+            "target_rows": int(target.target_rows),
+            "row_spacing_m": float(target.row_spacing_m),
+            "col_spacing_m": float(target.col_spacing_m),
+            "corner_count": int(target.corner_count),
+            "board_extent_m": [
+                float(value) for value in target.board_extent_m
+            ],
+        }
+    return {
+        "target_type": "aprilgrid",
+        "tag_cols": int(target.tag_cols),
+        "tag_rows": int(target.tag_rows),
+        "tag_size_m": float(target.tag_size_m),
+        "tag_spacing": float(target.tag_spacing),
+        "board_extent_m": [float(value) for value in target.board_extent_m],
+    }
+
+
 def _reservoir_add(
     reservoir: list[Any], item: Any, seen: int,
     maximum: int, generator: np.random.Generator,
@@ -442,52 +535,71 @@ def _reservoir_add(
         reservoir[replacement] = item
 
 
-def _write_detection_overlay(path: Path, frame: ImageFrame, observation: Any) -> None:
-    """把检测角点和 ID 绘制到 detect-only 抽样图像。"""
+def _write_detection_overlay(
+    path: Path, frame: ImageFrame, observation: Any, target: Any = None
+) -> None:
+    """把目标检测角点绘制到 detect-only 抽样图像。"""
     canvas = np.asarray(frame.image).copy()
-    for index, tag_id in enumerate(observation.tag_ids):
-        corners = observation.image_points_px[index * 4:(index + 1) * 4]
-        polygon = np.rint(corners).astype(np.int32)
-        cv2.polylines(canvas, [polygon], True, (0, 255, 0), 2)
-        cv2.putText(
-            canvas, str(tag_id), tuple(polygon[0]),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1,
-            cv2.LINE_AA,
+    if _is_checkerboard(target):
+        corners = np.asarray(
+            observation.image_points_px, dtype=np.float32
+        ).reshape(-1, 1, 2)
+        cv2.drawChessboardCorners(
+            canvas, (target.target_cols, target.target_rows), corners, True
         )
+    else:
+        for index, tag_id in enumerate(observation.tag_ids):
+            corners = observation.image_points_px[
+                index * 4:(index + 1) * 4
+            ]
+            polygon = np.rint(corners).astype(np.int32)
+            cv2.polylines(canvas, [polygon], True, (0, 255, 0), 2)
+            cv2.putText(
+                canvas, str(tag_id), tuple(polygon[0]),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1,
+                cv2.LINE_AA,
+            )
     if not cv2.imwrite(str(path), canvas):
         raise RuntimeError(f"无法写入检测叠加图 {path}")
 
 
 def _run_detection_only(
     arguments: argparse.Namespace,
-    detector: OpenCvAprilTagDetector,
+    detector: Any,
     target: Any,
     progress: CalibrationProgressLogger | None = None,
 ) -> PipelineOutcome:
-    """全 bag 检测并用 reservoir 输出 20 帧跨时段预检。"""
+    """全 bag 目标检测并用 reservoir 输出 20 帧跨时段预检。"""
     output_dir = Path(arguments.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     generator = np.random.default_rng(20260804)
     reservoir = []
-    observations = []
+    observations: list[CalibrationObservation] = []
     decoded = 0
     rejected = 0
+    checkerboard = _is_checkerboard(target)
+    target_name = "棋盘格" if checkerboard else "AprilGrid"
     if progress is not None:
-        progress.start_stage("detection_only", "开始全 bag AprilGrid 检测预检")
+        progress.start_stage(
+            "detection_only", f"开始全 bag {target_name} 检测预检"
+        )
     for frame in _iter_sample_frames(arguments):
         decoded += 1
         if progress is not None:
             progress.update(
-                "AprilGrid 检测预检进行中",
+                f"{target_name} 检测预检进行中",
                 extra=(
                     f"decoded={decoded} | valid={len(observations)} | "
                     f"rejected={rejected}"
                 ),
             )
         try:
-            observation = build_aprilgrid_observation(
-                frame.timestamp_ns, detector.detect(frame.image), target,
-                arguments.min_tags,
+            observation = _build_target_observation(
+                frame.timestamp_ns,
+                frame.image,
+                detector,
+                target,
+                int(getattr(arguments, "min_tags", 1)),
             )
         except DetectionRejected:
             rejected += 1
@@ -498,7 +610,7 @@ def _run_detection_only(
         )
     failures = []
     try:
-        validate_tag_family(observations, target, minimum_probe_frames=5)
+        _validate_target_observations(observations, target, 5)
     except DetectionRejected as error:
         failures.append(str(error))
     if len(reservoir) < 20:
@@ -510,13 +622,8 @@ def _run_detection_only(
         sorted(reservoir, key=lambda item: item[0].timestamp_ns)
     ):
         path = output_dir / f"detection_overlay_{index:03d}.png"
-        _write_detection_overlay(path, frame, observation)
+        _write_detection_overlay(path, frame, observation, target)
         paths[f"overlay_{index:03d}"] = path
-    tag_ids = [tag for item in observations for tag in item.tag_ids]
-    tag_count_histogram = Counter(
-        observation.tag_count for observation in observations
-    )
-    tag_id_frame_counts = Counter(tag_ids)
     summary = {
         "accepted": not failures,
         "failures": failures,
@@ -524,19 +631,41 @@ def _run_detection_only(
         "valid_frames": len(observations),
         "rejected_frames": rejected,
         "probe_frames": len(reservoir),
-        "tag_family": target.tag_family,
-        "tag_id_min": min(tag_ids) if tag_ids else None,
-        "tag_id_max": max(tag_ids) if tag_ids else None,
-        "tag_count_histogram": {
-            str(count): tag_count_histogram[count]
-            for count in sorted(tag_count_histogram)
-        },
-        "tag_id_frame_counts": {
-            str(tag_id): tag_id_frame_counts[tag_id]
-            for tag_id in sorted(tag_id_frame_counts)
-        },
+        "target_type": _target_type(target),
         "detector_settings": dict(detector.settings),
     }
+    if checkerboard:
+        corner_histogram = Counter(
+            observation.feature_count for observation in observations
+        )
+        summary.update({
+            "target_cols": int(target.target_cols),
+            "target_rows": int(target.target_rows),
+            "expected_corner_count": int(target.corner_count),
+            "corner_count_histogram": {
+                str(count): corner_histogram[count]
+                for count in sorted(corner_histogram)
+            },
+        })
+    else:
+        tag_ids = [tag for item in observations for tag in item.tag_ids]
+        tag_count_histogram = Counter(
+            observation.tag_count for observation in observations
+        )
+        tag_id_frame_counts = Counter(tag_ids)
+        summary.update({
+            "tag_family": target.tag_family,
+            "tag_id_min": min(tag_ids) if tag_ids else None,
+            "tag_id_max": max(tag_ids) if tag_ids else None,
+            "tag_count_histogram": {
+                str(count): tag_count_histogram[count]
+                for count in sorted(tag_count_histogram)
+            },
+            "tag_id_frame_counts": {
+                str(tag_id): tag_id_frame_counts[tag_id]
+                for tag_id in sorted(tag_id_frame_counts)
+            },
+        })
     summary_path = output_dir / "detection_summary.json"
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
@@ -552,7 +681,7 @@ def _run_detection_only(
                 f"rejected={rejected}"
             ),
         )
-        progress.finish_stage("全 bag AprilGrid 检测预检完成")
+        progress.finish_stage(f"全 bag {target_name} 检测预检完成")
     print(json.dumps(summary, ensure_ascii=False))
     return PipelineOutcome(not failures, paths)
 
@@ -603,7 +732,7 @@ def _collect_samples(
     timeline: Any,
     progress: CalibrationProgressLogger | None = None,
 ) -> tuple:
-    """第二遍流式执行状态过滤、AprilGrid 检测、PnP 和零偏移插值。"""
+    """第二遍流式执行状态过滤、目标检测、PnP 和零偏移插值。"""
     samples = []
     estimates = []
     tracker_poses = []
@@ -615,7 +744,7 @@ def _collect_samples(
     observations = []
     if progress is not None:
         progress.start_stage(
-            "sample_collection", "开始解码图像、检测 AprilGrid 并估计 PnP"
+            "sample_collection", "开始解码图像、检测目标并估计 PnP"
         )
     for frame in _iter_sample_frames(arguments):
         counters["decoded"] += 1
@@ -641,9 +770,9 @@ def _collect_samples(
             counters["status_rejected"] += 1
             continue
         try:
-            observation = build_aprilgrid_observation(
-                frame.timestamp_ns, detector.detect(frame.image), target,
-                arguments.min_tags,
+            observation = _build_target_observation(
+                frame.timestamp_ns, frame.image, detector, target,
+                int(getattr(arguments, "min_tags", 1)),
             )
         except DetectionRejected:
             counters["detection_rejected"] += 1
@@ -666,13 +795,17 @@ def _collect_samples(
         samples.append(CalibrationSample(
             frame.timestamp_ns, observation.object_points_m,
             observation.image_points_px, estimate.camera_from_board,
-            observation.tag_count,
+            getattr(observation, "tag_count", None),
+            target_type=_target_type(target),
+            feature_count=getattr(
+                observation, "feature_count", len(observation.object_points_m)
+            ),
         ))
         estimates.append(estimate)
         tracker_poses.append(interpolation[0])
         observations.append(observation)
         if len(observations) == 5:
-            validate_tag_family(observations, target, minimum_probe_frames=5)
+            _validate_target_observations(observations, target, 5)
         if len(overlay_frames) < 5:
             overlay_frames[index] = frame
     if progress is not None:
@@ -728,7 +861,11 @@ def _diagnostics(result: Any, samples: Sequence[Any], estimates: Sequence[Any],
             "timestamp_ns": sample.timestamp_ns,
             "partition": "train" if index in train else (
                 "validation" if index in validation else "filtered"),
-            "tag_count": sample.tag_count,
+            "target_type": getattr(sample, "target_type", "aprilgrid"),
+            "feature_count": getattr(
+                sample, "feature_count", len(sample.object_points_m)
+            ),
+            "tag_count": getattr(sample, "tag_count", None),
             "pnp_median_px": estimate.median_error_px,
             "pnp_p95_px": estimate.p95_error_px,
             "final_median_px": float(np.median(errors)),
@@ -760,10 +897,10 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            target = load_aprilgrid(
+            target = _load_target_config(
                 arguments.target_config, arguments.tag_family
             )
-            detector = OpenCvAprilTagDetector(arguments.tag_family)
+            detector = _make_target_detector(target, arguments.tag_family)
             if arguments.detect_only:
                 progress.finish_stage("配置和检测器加载完成")
                 return _attach_progress_log(
@@ -795,7 +932,11 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
             return _logged_failure(
                 progress,
                 arguments.output_dir,
-                "tag_family_validation",
+                (
+                    "target_validation"
+                    if _is_checkerboard(target)
+                    else "tag_family_validation"
+                ),
                 str(error),
             )
         except KeyboardInterrupt:
@@ -864,12 +1005,16 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
             arguments.max_pose_gap_ms,
         )
         thresholds = _thresholds(arguments)
+        target_type = _target_type(target)
+        result.metrics["target_type"] = target_type
+        if samples:
+            result.metrics["feature_count"] = int(samples[0].feature_count)
         camera_config_path = Path(arguments.camera_config)
         context = ReportContext(
             Path(arguments.bag), camera_config_path,
             Path(arguments.target_config), arguments.image_topic,
             arguments.tracker_topic, arguments.status_topic,
-            arguments.tag_family,
+            arguments.tag_family if target_type == "aprilgrid" else None,
             {
                 "frame_stride": arguments.frame_stride,
                 "min_tags": arguments.min_tags,
@@ -886,6 +1031,8 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
             camera_provenance,
             thresholds, frame_metrics, overlays,
             (f"阶段计数: {json.dumps(counters, ensure_ascii=False)}",),
+            target_type=target_type,
+            target_spec=_target_spec_snapshot(target),
         )
         paths = write_calibration_report(arguments.output_dir, result, context)
         decision = evaluate_quality(result.metrics, thresholds)
@@ -910,7 +1057,9 @@ def main(argv: list[str] | None = None) -> None:
         apply_settings_file(parser.parse_args(argv), parser), parser
     )
     outcome = run_calibration(arguments)
-    if outcome.fatal or (not outcome.accepted and not arguments.allow_high_residual):
+    if outcome.fatal or (
+        not outcome.accepted and not arguments.allow_high_residual
+    ):
         raise SystemExit(2)
 
 
