@@ -17,3 +17,4 @@ pyrealsense2
 csvkit
 apriltag
 pandas
+modelscope
