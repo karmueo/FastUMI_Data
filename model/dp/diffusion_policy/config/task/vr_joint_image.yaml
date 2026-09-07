@@ -1,0 +1,28 @@
+# RM75 遥操关节任务：腕部 RGB 与本体状态预测绝对关节及夹爪目标。
+name: vr_joint_image
+dataset_path: ../../dataset/vr_target/target.zarr
+action_layout: joint8
+shape_meta:
+  obs:
+    camera0_rgb:
+      shape: [3, 224, 224]
+      horizon: 2
+      type: rgb
+    robot0_joint_pos:
+      shape: [7]
+      horizon: 2
+      type: low_dim
+    robot0_gripper_position:
+      shape: [1]
+      horizon: 2
+      type: low_dim
+  action:
+    shape: [8]
+    horizon: 16
+env_runner: null
+dataset:
+  _target_: diffusion_policy.dataset.vr_joint_image_dataset.VrJointImageDataset
+  dataset_path: ${task.dataset_path}
+  shape_meta: ${task.shape_meta}
+  seed: 42
+  val_ratio: 0.1

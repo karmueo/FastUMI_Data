@@ -1,3 +1,5 @@
+"""提供 Timm 图像编码器及可选的训练、验证、推理一致预处理。"""
+
 import copy
 import logging
 import math
@@ -72,6 +74,7 @@ class TimmObsEncoder(ModuleAttrMixin):
         feature_aggregation: str = "spatial_embedding",
         downsample_ratio: int = 32,
         position_encording: str = "learnable",
+        consistent_preprocessing: bool = False,
     ):
         """
         Assumes rgb input: B,T,C,H,W
@@ -92,6 +95,12 @@ class TimmObsEncoder(ModuleAttrMixin):
             global_pool=global_pool,  # '' means no pooling
             num_classes=0,  # remove classification layer
         )
+
+        # 新任务显式启用模型归一化；默认保持旧 checkpoint 的图像处理行为。
+        self.consistent_preprocessing = consistent_preprocessing
+        self.image_mean = tuple(model.pretrained_cfg.get("mean", (0.485, 0.456, 0.406)))
+        self.image_std = tuple(model.pretrained_cfg.get("std", (0.229, 0.224, 0.225)))
+        self.apply_image_normalization = imagenet_norm
 
         if frozen:
             assert pretrained
@@ -266,6 +275,16 @@ class TimmObsEncoder(ModuleAttrMixin):
             assert self.feature_aggregation is None
             return feature
 
+    def _prepare_image(self, key, image, augment):
+        """按模型统计归一化图像；随机增强仅用于训练，验证和推理保持一致。"""
+        if augment:
+            image = self.key_transform_map[key](image)
+        if self.apply_image_normalization:
+            mean = image.new_tensor(self.image_mean).view(1, 3, 1, 1)
+            std = image.new_tensor(self.image_std).view(1, 3, 1, 1)
+            image = (image - mean) / std
+        return image
+
     def forward(self, obs_dict):
         features = list()
         batch_size = next(iter(obs_dict.values())).shape[0]
@@ -277,7 +296,10 @@ class TimmObsEncoder(ModuleAttrMixin):
             assert B == batch_size
             assert img.shape[2:] == self.key_shape_map[key]
             img = img.reshape(B * T, *img.shape[2:])
-            img = self.key_transform_map[key](img)
+            if self.consistent_preprocessing:
+                img = self._prepare_image(key, img, augment=self.training)
+            else:
+                img = self.key_transform_map[key](img)
             raw_feature = self.key_model_map[key](img)
             feature = self.aggregate_feature(raw_feature)
             assert len(feature.shape) == 2 and feature.shape[0] == B * T
@@ -307,7 +329,8 @@ class TimmObsEncoder(ModuleAttrMixin):
             assert B == batch_size
             # assert img.shape[2:] == self.key_shape_map[key]
             img = img.reshape(B * T, *img.shape[2:])
-            # img = self.key_transform_map[key](img) # 推理时不需要对图像做数据增强
+            if self.consistent_preprocessing:
+                img = self._prepare_image(key, img, augment=False)
             raw_feature = self.key_model_map[key](img)
             feature = self.aggregate_feature(raw_feature)
             assert len(feature.shape) == 2 and feature.shape[0] == B * T

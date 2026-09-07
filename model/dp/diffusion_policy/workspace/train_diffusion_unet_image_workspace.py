@@ -10,6 +10,8 @@ if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
 import copy
+import contextlib
+import json
 import os
 import pathlib
 import pickle
@@ -34,7 +36,7 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, default_collate
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -56,11 +58,12 @@ def _instantiate_env_runner(env_runner_cfg, output_dir) -> Optional[BaseImageRun
     return env_runner
 
 
-def _compute_action_mse_metrics(category, pred_action, gt_action):
-    """计算每个机器人 10D 动作的总、位置、旋转和夹爪 MSE。
+def _compute_action_mse_metrics(category, pred_action, gt_action, action_layout="pose10"):
+    """按显式布局计算关节 8D 或每机器人位姿 10D 的分量 MSE。
 
     Args:
         category: 指标类别前缀，例如 ``train``。
+        action_layout: ``joint8`` 为七关节加夹爪；默认 ``pose10`` 为位姿加夹爪。
         pred_action: 预测动作，最后一维按每个机器人 10D 排列。
         gt_action: 目标动作，形状须与 ``pred_action`` 相同。
 
@@ -76,6 +79,16 @@ def _compute_action_mse_metrics(category, pred_action, gt_action):
             f"{tuple(pred_action.shape)} and {tuple(gt_action.shape)}."
         )
     action_dim = pred_action.shape[-1]
+    if action_layout == "joint8":
+        if action_dim != 8:
+            raise ValueError(f"Joint action dimension must be 8, got {action_dim}")
+        return {
+            f"{category}_action_mse_error": F.mse_loss(pred_action, gt_action),
+            f"{category}_action_mse_error_joint": F.mse_loss(pred_action[..., :7], gt_action[..., :7]),
+            f"{category}_action_mse_error_gripper": F.mse_loss(pred_action[..., 7:], gt_action[..., 7:]),
+        }
+    if action_layout != "pose10":
+        raise ValueError(f"Unknown action layout: {action_layout}")
     if action_dim % 10 != 0:
         raise ValueError(
             "Action dimension must be a multiple of 10 per robot, "
@@ -99,7 +112,7 @@ def _compute_action_mse_metrics(category, pred_action, gt_action):
     }
 
 
-def _sample_training_action_metrics(policy, batch, category="train"):
+def _sample_training_action_metrics(policy, batch, category="train", action_layout="pose10"):
     """对固定训练 batch 执行一次动作采样并计算分量 MSE。
 
     Args:
@@ -119,11 +132,82 @@ def _sample_training_action_metrics(policy, batch, category="train"):
     # 每个采样事件只调用一次策略，避免重复扩散采样和指标漂移。
     pred_action = policy.predict_action(batch["obs"], None)["action_pred"]
     pred_action = pred_action * scale + offset
-    return _compute_action_mse_metrics(category, pred_action, gt_action)
+    return _compute_action_mse_metrics(category, pred_action, gt_action, action_layout)
+
+
+def _pose_physical_metrics(pred, target):
+    """计算单臂 10D 动作的米制位置误差、旋转测地角和归一化夹爪误差。"""
+    def rotation_matrix(values):
+        """按 UMI 的前两行 6D 旋转编码重建正交旋转矩阵。"""
+        first = F.normalize(values[..., :3], dim=-1)
+        second = F.normalize(values[..., 3:] - (first * values[..., 3:]).sum(-1, keepdim=True) * first, dim=-1)
+        return torch.stack((first, second, torch.linalg.cross(first, second)), dim=-2)
+
+    if pred.shape[-1] != 10 or target.shape != pred.shape:
+        raise ValueError("Physical pose metrics require matching single-arm 10D actions")
+    relative = rotation_matrix(pred[..., 3:9]) @ rotation_matrix(target[..., 3:9]).transpose(-1, -2)
+    cosine = ((relative.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2).clamp(-1, 1)
+    return {
+        "val_position_mse_m2": ((pred[..., :3] - target[..., :3]) ** 2).sum(-1).mean(),
+        "val_rotation_error_deg": torch.rad2deg(torch.acos(cosine)).mean(),
+        "val_gripper_mse": F.mse_loss(pred[..., -1], target[..., -1]),
+    }
+
+
+@torch.no_grad()
+def evaluate_policy(policy, dataloader, device, action_layout="pose10", sample=False,
+                    max_steps=None, accelerator=None):
+    """按样本数加权评估 EMA loss 和动作误差；关节额外报告原始单位 MSE。
+
+    使用局部固定随机种子，使不同 checkpoint 的采样指标可比较，且不改变训练 RNG。
+    """
+    # 累计各 batch 的样本加权指标，避免最后一个小 batch 获得过大权重。
+    totals = {}
+    count = 0
+    devices = [torch.device(device).index or 0] if torch.device(device).type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(42)
+        for batch_idx, batch in enumerate(tqdm.tqdm(dataloader, desc="Validation", leave=False)):
+            batch = dict_apply(batch, lambda value: value.to(device, non_blocking=True))
+            size = batch["action"].shape[0]
+            metrics = {"val_loss": policy(batch)}
+            if sample:
+                # 采样使用独立 RNG，不改变随后 batch 的验证噪声，保证各轮 loss 可比较。
+                with torch.random.fork_rng(devices=devices):
+                    torch.manual_seed(42000 + batch_idx)
+                    pred = policy.predict_action(batch["obs"])["action_pred"]
+                target = batch["action"]
+                normalizer = policy.normalizer["action"]
+                metrics.update(_compute_action_mse_metrics(
+                    "val", normalizer.normalize(pred), normalizer.normalize(target), action_layout))
+                if action_layout == "pose10" and pred.shape[-1] == 10:
+                    metrics.update(_pose_physical_metrics(pred, target))
+                if action_layout == "joint8":
+                    metrics["val_joint_mse_rad2"] = F.mse_loss(pred[..., :7], target[..., :7])
+                    metrics["val_gripper_mse"] = F.mse_loss(pred[..., 7:], target[..., 7:])
+            for key, value in metrics.items():
+                if not torch.isfinite(value):
+                    raise RuntimeError(f"Non-finite validation metric: {key}")
+                totals[key] = totals.get(key, 0.0) + float(value.item()) * size
+            count += size
+            if max_steps is not None and batch_idx + 1 >= max_steps:
+                break
+    if not count:
+        raise ValueError("Validation dataset contains no windows")
+    if accelerator is not None:
+        keys = sorted(totals)
+        packed = torch.tensor([totals[key] for key in keys] + [count], device=device, dtype=torch.float64)
+        packed = accelerator.reduce(packed, reduction="sum")
+        count = int(packed[-1].item())
+        totals = {key: packed[index].item() for index, key in enumerate(keys)}
+    result = {key: value / count for key, value in totals.items()}
+    if "val_position_mse_m2" in result:
+        result["val_position_rmse_m"] = float(np.sqrt(result["val_position_mse_m2"]))
+    return result
 
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
-    include_keys = ["global_step", "epoch"]
+    include_keys = ["global_step", "epoch", "best_loss"]
     exclude_keys = tuple()
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -134,6 +218,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
+
+        # 新任务显式启用 TF32 矩阵乘以利用现代 GPU；旧任务保持原精度默认值。
+        if cfg.training.get("tf32", False):
+            torch.set_float32_matmul_precision("high")
+            torch.backends.cudnn.allow_tf32 = True
 
         # configure model
         self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(cfg.policy)
@@ -168,9 +257,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         # configure training state
         self.global_step = 0
         self.epoch = 0
+        self.best_loss = float("inf")  # 随 checkpoint 持久化的历史最佳监控值。
 
         # do not save optimizer if resume=False
-        if not cfg.training.resume:
+        if not cfg.training.resume and not cfg.training.get("save_optimizer", False):
             self.exclude_keys = ["optimizer"]
 
     def run(self):
@@ -201,12 +291,27 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             accelerator.print(f"Resuming from checkpoint {lastest_ckpt_path}")
             self.load_checkpoint(path=lastest_ckpt_path)
 
-        best_loss = float("inf")
+        # 新关节任务显式启用完整验证，旧任务保持原有默认采样行为。
+        validation_enabled = cfg.training.get("enable_validation", False)
+        action_layout = cfg.task.get("action_layout", "pose10")
+        best_monitor = cfg.training.get("best_monitor", "train_action_mse_error")
         # configure dataset
         dataset: BaseImageDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset) or isinstance(dataset, BaseDataset)
+        contract = cfg.task.get("contract")
+        if contract is not None and "urdf_sha256" in contract:
+            urdf_sha256 = dataset.dataset_attrs.get("urdf_sha256")
+            if (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in urdf_sha256.lower())):
+                raise ValueError("Training dataset must contain a valid urdf_sha256 root attribute")
+            # cfg 驱动本次运行，self.cfg 是 BaseWorkspace 实际序列化到 checkpoint 的契约。
+            cfg.task.contract.urdf_sha256 = urdf_sha256.lower()
+            self.cfg.task.contract.urdf_sha256 = urdf_sha256.lower()
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
+        if hasattr(dataset, "get_split_manifest") and accelerator.is_main_process:
+            pathlib.Path(self.output_dir, "dataset_split.json").write_text(
+                json.dumps(dataset.get_split_manifest(), indent=2), encoding="utf-8")
 
         # compute normalizer on the main process and save to disk
         normalizer_path = os.path.join(self.output_dir, "normalizer.pkl")
@@ -288,6 +393,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # save batch for sampling
         train_sampling_batch = None
+        # 固定验证样本均匀覆盖验证集窗口，用于每轮比较可复现的动作预测误差。
+        fixed_validation_batch = None
+        if cfg.training.get("fixed_validation_metrics", False):
+            indices = np.linspace(0, len(val_dataset) - 1, min(32, len(val_dataset)), dtype=int)
+            fixed_validation_batch = default_collate([val_dataset[int(index)] for index in indices])
 
         if cfg.training.debug:
             cfg.training.num_epochs = 2
@@ -298,9 +408,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
+        convergence_history = []
         # training loop
         log_path = os.path.join(self.output_dir, "logs.json.txt")
-        with JsonLogger(log_path) as json_logger:
+        logger_context = JsonLogger(log_path) if accelerator.is_main_process else contextlib.nullcontext()
+        with logger_context as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 self.model.train()
 
@@ -327,6 +439,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                         # compute loss
                         raw_loss = self.model(batch)
+                        if not torch.isfinite(raw_loss):
+                            raise RuntimeError(f"Non-finite training loss at epoch {self.epoch}, batch {batch_idx}")
                         loss = raw_loss / cfg.training.gradient_accumulate_every
                         loss.backward()
 
@@ -355,7 +469,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
                             accelerator.log(step_log, step=self.global_step)
-                            json_logger.log(step_log)
+                            if json_logger is not None:
+                                json_logger.log(step_log)
                             self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) and batch_idx >= (
@@ -380,23 +495,16 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     # log all
                     step_log.update(runner_log)
 
-                # run validation
-                # if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0 and accelerator.is_main_process:
-                #     with torch.no_grad():
-                #         val_losses = list()
-                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
-                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                #             for batch_idx, batch in enumerate(tepoch):
-                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                #                 loss = self.model(batch)
-                #                 val_losses.append(loss)
-                #                 if (cfg.training.max_val_steps is not None) \
-                #                     and batch_idx >= (cfg.training.max_val_steps-1):
-                #                     break
-                #         if len(val_losses) > 0:
-                #             val_loss = torch.mean(torch.tensor(val_losses)).item()
-                #             # log epoch average validation loss
-                #             step_log['val_loss'] = val_loss
+                # 验证使用当前评估策略（默认 EMA），不累计梯度。
+                if validation_enabled and self.epoch % cfg.training.val_every == 0:
+                    step_log.update(evaluate_policy(
+                        policy, val_dataloader, device, action_layout,
+                        sample=(self.epoch % cfg.training.sample_every == 0),
+                        max_steps=cfg.training.max_val_steps, accelerator=accelerator))
+
+                if fixed_validation_batch is not None:
+                    fixed_metrics = evaluate_policy(policy, [fixed_validation_batch], device, action_layout, sample=True)
+                    step_log.update({"fixed_" + key: value for key, value in fixed_metrics.items()})
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
@@ -404,7 +512,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         raise RuntimeError("Training sampling batch is unavailable")
                     with torch.no_grad():
                         action_metrics = _sample_training_action_metrics(
-                            policy, train_sampling_batch, category="train"
+                            policy, train_sampling_batch, category="train", action_layout=action_layout
                         )
                     # 转换为 Python float，确保 W&B 和 JSON 日志可序列化。
                     action_metrics = {
@@ -413,8 +521,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     step_log.update(action_metrics)
                     pred_loss = action_metrics["train_action_mse_error"]
                     print("Test Loss: ", pred_loss)
-                    if pred_loss < best_loss:
-                        best_loss = pred_loss
+                    if best_monitor == "train_action_mse_error" and pred_loss < self.best_loss:
+                        self.best_loss = pred_loss
                         model_ddp = self.model
                         self.model = accelerator.unwrap_model(self.model)
 
@@ -423,6 +531,15 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             self.save_checkpoint(tag="best")
 
                         # recover the DDP model
+                        self.model = model_ddp
+
+                if (best_monitor == "val_loss" and "val_loss" in step_log
+                        and step_log["val_loss"] < self.best_loss):
+                    self.best_loss = step_log["val_loss"]
+                    if accelerator.is_main_process:
+                        model_ddp = self.model
+                        self.model = accelerator.unwrap_model(self.model)
+                        self.save_checkpoint(tag="best", use_thread=False)
                         self.model = model_ddp
 
                 # checkpoint
@@ -435,7 +552,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
+                        self.save_checkpoint(use_thread=not validation_enabled)
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
@@ -451,7 +568,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
+                        self.save_checkpoint(path=topk_ckpt_path, use_thread=not validation_enabled)
 
                     # recover the DDP model
                     self.model = model_ddp
@@ -459,10 +576,26 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 # end of epoch
                 # log of last step is combined with validation and rollout
                 accelerator.log(step_log, step=self.global_step)
-                json_logger.log(step_log)
+                if json_logger is not None:
+                    json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
+                if "fixed_val_action_mse_error" in step_log:
+                    convergence_history.append(step_log)
+                stop_after = cfg.training.get("convergence_stop_after")
+                if stop_after is not None and self.epoch >= stop_after and len(convergence_history) >= 6:
+                    keys = ("val_loss", "fixed_val_action_mse_error")
+                    reductions = {key: 1 - np.mean([row[key] for row in convergence_history[-3:]]) /
+                                  np.mean([row[key] for row in convergence_history[:3]]) for key in keys}
+                    if all(value >= 0.3 for value in reductions.values()):
+                        print(f"Convergence check passed at epoch {self.epoch}: {reductions}")
+                        break
 
+        if validation_enabled and accelerator.is_main_process:
+            self.model = accelerator.unwrap_model(self.model)
+            self.save_checkpoint(use_thread=False)
+        if self._saving_thread is not None:
+            self._saving_thread.join()
         accelerator.end_training()
 
 

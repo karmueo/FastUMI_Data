@@ -1,0 +1,55 @@
+# RM75 Link7 末端位姿训练：继承原 UMI 五键/10D 契约，夹爪保留归一化编码。
+defaults:
+  - train_diffusion_unet_timm_umi_workspace
+  - _self_
+name: train_diffusion_unet_timm_vr_umi
+exp_name: vr_link7_pose
+task:
+  name: vr_umi
+  dataset_path: ../../dataset/vr_target_umi/target.zarr
+  action_layout: pose10
+  env_runner: null
+  # 数据已经按 30 Hz 同步，禁用额外的传感器延迟平移。
+  dataset_frequeny: 0
+  dataset:
+    val_ratio: 0.1
+    normalizer_num_workers: 4
+    train_episode_indices: null
+    val_episode_indices: null
+    start_pose_noise_std: 0.0
+    repeat_frame_prob: 0.0
+  contract:
+    frequency_hz: 30
+    base_frame: base_link
+    end_frame: Link7
+    tool_offset: identity
+    gripper_representation: normalized_0_1
+    action_reference: current_observed_end_frame
+    # 训练启动时从 Zarr 根属性读取并写回 checkpoint，禁止手工猜测摘要。
+    urdf_sha256: null
+policy:
+  obs_encoder:
+    consistent_preprocessing: true
+training:
+  num_epochs: 120
+  enable_validation: true
+  save_optimizer: true
+  tf32: true
+  best_monitor: val_loss
+  checkpoint_every: 1
+  val_every: 1
+  sample_every: 5
+  # 固定验证 batch 指标每轮记录，完整验证动作采样仍按 sample_every 执行。
+  fixed_validation_metrics: true
+val_dataloader:
+  batch_size: 32
+  num_workers: 4
+logging:
+  project: fastumi-vr-umi
+  mode: offline
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 3
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.6f}.ckpt'

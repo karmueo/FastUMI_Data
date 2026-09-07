@@ -1,0 +1,16 @@
+# ROS2 Link7 推理配置；checkpoint 必须在启动时显式提供。
+vr_umi_inference:
+  ros__parameters:
+    device: cuda:0
+    image_topic: /camera/image_raw
+    joint_topic: /joint_states
+    gripper_topic: /fastumi/gripper/state
+    output_topic: /fastumi/policy/action_sequence
+    reset_service: /fastumi/policy/reset_episode
+    sync_slop_s: 0.05
+    input_timeout_s: 0.2
+    history_tolerance_s: 0.015
+    max_inference_hz: 10.0
+    result_timeout_s: 0.5
+    # 逗号分隔的 module:factory；工厂返回具有 process 方法的处理器。
+    postprocessors: ""

@@ -37,6 +37,9 @@ dependencies = [
 test = [
     "pytest>=8.0,<9",
 ]
+validation = [
+    "matplotlib>=3.8,<4",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

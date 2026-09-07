@@ -130,12 +130,23 @@ class UmiDataset(BaseDataset):
         val_ratio: float = 0.0,
         max_duration: Optional[float] = None,
         normalizer_num_workers: int = 32,
+        train_episode_indices=None,
+        val_episode_indices=None,
+        start_pose_noise_std: float = 0.05,
     ):
         """初始化数据集及可配置的归一化统计 DataLoader。"""
+        # 起始位姿扰动可关闭，以便末端数据验证可重复且训练/推理一致。
+        self.start_pose_noise_std = float(start_pose_noise_std)
+        if not np.isfinite(self.start_pose_noise_std) or self.start_pose_noise_std < 0:
+            raise ValueError("start_pose_noise_std must be finite and nonnegative")
         self.pose_repr = pose_repr
         # 使用相对还是绝对位姿
         self.obs_pose_repr = self.pose_repr.get("obs_pose_repr", "rel")
         self.action_pose_repr = self.pose_repr.get("action_pose_repr", "rel")
+
+        # ReplayBuffer 仅复制 data/meta 子树，单独保留源 Zarr 根属性供训练契约校验。
+        with _open_replay_store(dataset_path) as replay_store:
+            self.dataset_attrs = dict(zarr.open_group(store=replay_store, mode="r").attrs)
 
         if cache_dir is None:
             # load into memory store
@@ -222,6 +233,21 @@ class UmiDataset(BaseDataset):
         # 生成 mask，mask 的部分作为验证集
         val_mask = get_val_mask(n_episodes=replay_buffer.n_episodes, val_ratio=val_ratio, seed=seed)
         train_mask = ~val_mask
+        if train_episode_indices is not None or val_episode_indices is not None:
+            if train_episode_indices is None or val_episode_indices is None:
+                raise ValueError("Explicit train and validation episode indices must be provided together")
+            train_mask = np.zeros(replay_buffer.n_episodes, dtype=bool)
+            val_mask = np.zeros_like(train_mask)
+            for mask, indices in ((train_mask, train_episode_indices), (val_mask, val_episode_indices)):
+                values = list(indices)
+                if any(not isinstance(value, (int, np.integer)) for value in values):
+                    raise ValueError("Episode indices must be integers")
+                if len(values) != len(set(values)) or any(value < 0 or value >= len(mask) for value in values):
+                    raise ValueError("Episode indices must be unique and within dataset bounds")
+                mask[values] = True
+            if not train_mask.any() or np.any(train_mask & val_mask):
+                raise ValueError("Training split must be nonempty and disjoint from validation")
+        self.train_mask = train_mask
 
         self.sampler_lowdim_keys = list()
         for key in lowdim_keys:
@@ -281,8 +307,14 @@ class UmiDataset(BaseDataset):
             repeat_frame_prob=self.repeat_frame_prob,
             max_duration=self.max_duration,
         )
-        val_set.val_mask = ~self.val_mask
+        val_set.val_mask = self.train_mask
+        val_set.train_mask = self.val_mask
         return val_set
+
+    def get_split_manifest(self):
+        """返回当前训练/验证的原始 episode 索引，供数据来源追溯。"""
+        return {"train_episode_indices": np.flatnonzero(self.train_mask).tolist(),
+                "val_episode_indices": np.flatnonzero(self.val_mask).tolist()}
 
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         """遍历训练样本并计算观测与动作的归一化参数。"""
@@ -432,11 +464,10 @@ class UmiDataset(BaseDataset):
             )
 
             # get start pose
-            start_pose = obs_dict[f"robot{robot_id}_demo_start_pose"][0]
+            start_pose = obs_dict[f"robot{robot_id}_demo_start_pose"][0].copy()
             # HACK: add noise to episode start pose
-            start_pose += np.random.normal(
-                scale=[0.05, 0.05, 0.05, 0.05, 0.05, 0.05], size=start_pose.shape
-            )
+            if self.start_pose_noise_std:
+                start_pose += np.random.normal(scale=self.start_pose_noise_std, size=start_pose.shape)
             start_pose_mat = pose_to_mat(start_pose)
             rel_obs_pose_mat = convert_pose_mat_rep(
                 pose_mat, base_pose_mat=start_pose_mat, pose_rep="relative", backward=False

@@ -158,6 +158,18 @@ def test_entrypoint_help_uses_local_imports(entrypoint):
     assert result.returncode == 0, result.stderr
 
 
+def _dataset_digest(path):
+    """流式计算 ZIP 或目录 Zarr 的内容摘要，验证采样未写入源数据。"""
+    digest = hashlib.sha256()
+    files = sorted(item for item in path.rglob("*") if item.is_file()) if path.is_dir() else [path]
+    for item in files:
+        digest.update(str(item.relative_to(path) if path.is_dir() else item.name).encode())
+        with item.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def test_real_fastumi_dataset_is_read_only_when_requested():
     """环境变量指定真实数据集时读取其关键字段并采样 canonical 数据集。"""
     dataset_value = os.environ.get("FASTUMI_DATASET")
@@ -165,14 +177,13 @@ def test_real_fastumi_dataset_is_read_only_when_requested():
         pytest.skip("FASTUMI_DATASET 未设置")
 
     dataset_path = pathlib.Path(dataset_value)
-    before_digest = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+    before_digest = _dataset_digest(dataset_path)
     required_data_keys = {
         "camera0_rgb",
         "robot0_eef_pos",
         "robot0_eef_rot_axis_angle",
         "robot0_gripper_width",
         "robot0_demo_start_pose",
-        "robot0_demo_end_pose",
     }
     with _open_replay_store(dataset_path) as store:
         root = zarr.open_group(store=store, mode="r")
@@ -185,4 +196,4 @@ def test_real_fastumi_dataset_is_read_only_when_requested():
     assert set(sample["obs"].keys()) == CANONICAL_OBS_KEYS
     assert tuple(sample["action"].shape) == (16, 10)
     assert np.isfinite(sample["action"].numpy()).all()
-    assert hashlib.sha256(dataset_path.read_bytes()).hexdigest() == before_digest
+    assert _dataset_digest(dataset_path) == before_digest

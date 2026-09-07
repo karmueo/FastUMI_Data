@@ -1,0 +1,34 @@
+# 遥操关节完整基线训练：独立 episode 验证、EMA、离线日志和可恢复 checkpoint。
+defaults:
+  - train_diffusion_unet_timm_umi_workspace
+  - override task: vr_joint_image
+  - _self_
+name: train_diffusion_unet_timm_vr_joint
+exp_name: vr_target_baseline
+policy:
+  obs_encoder:
+    consistent_preprocessing: true
+dataloader:
+  batch_size: 32
+  num_workers: 8
+val_dataloader:
+  batch_size: 32
+  num_workers: 4
+training:
+  num_epochs: 120
+  tf32: true
+  enable_validation: true
+  save_optimizer: true
+  best_monitor: val_loss
+  checkpoint_every: 1
+  val_every: 1
+  sample_every: 5
+logging:
+  project: fastumi-vr-target
+  mode: offline
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 3
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.6f}.ckpt'
