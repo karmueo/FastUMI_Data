@@ -2,7 +2,7 @@
 
 # stereo_camera SDK 示例
 
-此目录包含一个不依赖 ROS、OpenCV 或现有驱动封装的 C++17 示例。程序直接调用上级 `sdk/` 中的公共头文件和动态库，观察 SDK 返回的帧元数据、逐路 `stereo_camera_parse_frame` 回调速率以及 IMU 样本率。可选显示窗口通过 SDL2/OpenGL 直接上传原始 payload，由 GPU shader 解释 YUYV、NV12 和后备的 iTOF 16 位单通道数据；CPU 不生成 RGB/BGR 中间图像，程序也不会保存像素 payload。
+此目录包含一个不依赖 ROS、OpenCV 或现有驱动封装的 C++17 示例。程序直接调用上级 `sdk/` 中的公共头文件和动态库，观察 SDK 返回的帧元数据、逐路 `stereo_camera_parse_frame` 回调速率以及 IMU 样本率。程序会按公共头文件定义安全复制并解析 IMU payload。可选显示窗口通过 SDL2/OpenGL 直接上传原始图像 payload，由 GPU shader 解释 YUYV、NV12 和后备的 iTOF 16 位单通道数据；CPU 不生成 RGB/BGR 中间图像，程序也不会保存像素 payload。
 
 ## 构建
 
@@ -93,9 +93,13 @@ stereo_camera_open
 
 启动后先打印实际协商的宽度、高度和 FOURCC。每个 `sourcetype + stream_id` 第一次出现时打印一行原始 `stereo_camera_frame_t` 字段，包括 `sourcetype`、`stream_id`、`frame_seqidx`、`frame_timestamp`（微秒）、`width`、`height`、`FOURCC`、`data_size`（字节）、`match_state` 和 `frame_seq_count`。
 
-每约一秒打印窗口统计。`PARSE FPS` 表示主机 `std::chrono::steady_clock` 窗口内 `stereo_camera_parse_frame` 成功返回的路由帧数除以实际窗口时长；`RGB FPS`、`ITOF DEPTH FPS` 和 `ITOF GRAY FPS` 分别表示对应路由的成功帧数除以实际窗口时长。`IMU FPS` 表示窗口内 IMU 样本数除以实际窗口时长；样本数优先采用 `frame_seq_count`，该字段为零且 `data_size` 可推导时才按 SDK 结构体大小作后备估计。这些结果是主机接收侧测得的窗口平均值，不等同于设备声明帧率。统计只读取返回结构体元数据，不访问 payload。
+新版 `stereo_camera_imu_data_t` 为 72 字节紧凑结构，字段顺序为 `timestamp`、`idx`、`ax/ay/az`、`gx/gy/gz`、`reverve`。示例在编译期检查关键字段偏移，运行时通过 `memcpy` 逐样本解码，并校验 payload 长度、`frame_seq_count`、`frame_seqidx` 和首样本 `idx`。异常批次会输出去重后的 `invalid IMU batch` 警告，结构无效的 payload 不计入样本数。
+
+首次收到非空 IMU 批次时，程序以 `[imu first]` 前缀打印所有样本。每条样本包含 `timestamp`（微秒）、`idx`、`ax/ay/az`（m/s²）和 `gx/gy/gz`（deg/s，度/秒）。
+
+每约一秒打印窗口统计。`PARSE FPS` 表示主机 `std::chrono::steady_clock` 窗口内 `stereo_camera_parse_frame` 成功返回的路由帧数除以实际窗口时长；`RGB FPS`、`ITOF DEPTH FPS` 和 `ITOF GRAY FPS` 分别表示对应路由的成功帧数除以实际窗口时长。`IMU FPS` 使用成功解码的 IMU 样本数除以实际窗口时长。这些结果是主机接收侧测得的窗口平均值，不等同于设备声明帧率。
 当 SDK 的 `stereo_camera_parse_frame` 返回空指针且程序仍在运行时，示例会将其计入当前窗口的 `null_returns`。单个偶发空返回立即重试，不等待；连续空返回阶段每次重试前退避 1ms。仅当距最近成功帧（尚无成功帧时从启动时刻计时）至少 1 秒，才按主机 `std::chrono::steady_clock` 最多约每秒输出一次 `no frame/error` 提示；成功帧会重置连续失败计数和最近成功时间。`[stats]` 头行会显示窗口内空返回数，所有 FPS 只统计成功读取的数据。
 
-使用 `--verbose` 时，每次 `stereo_camera_parse_frame` 成功返回都会打印上述原始字段。终端 I/O 会影响极限 FPS 测量，需观察最高速率时应保持默认输出或重定向输出。
+使用 `--verbose` 时，每次 `stereo_camera_parse_frame` 成功返回都会打印上述原始字段，IMU 批次还会以 `[imu]` 前缀打印全部已解码样本。终端 I/O 会影响极限 FPS 测量，需观察最高速率时应保持默认输出或重定向输出。
 
 收到 `Ctrl-C`、终止信号、Esc 或窗口关闭事件后，主线程会调用 `stereo_camera_cancel_read` 唤醒读取线程中阻塞的 `stereo_camera_parse_frame`，等待读取线程退出，再调用 `stereo_camera_stop_stream` 和 `stereo_camera_close` 完成正常清理。读取线程每次只提交一个结果，并等待主线程处理完成后再继续解析，确保 SDK 返回的 frame 指针在使用期间保持有效。

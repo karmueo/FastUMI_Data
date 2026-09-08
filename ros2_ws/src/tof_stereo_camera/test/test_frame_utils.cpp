@@ -61,7 +61,7 @@ void WriteRawImuField(std::vector<unsigned char> *payload, std::size_t offset,
 }
 
 /**
- * @brief 按设备协议固定偏移编码一条 IMU 样本。
+ * @brief 按新版 SDK 协议固定偏移编码一条 IMU 样本，独立验证结构体布局。
  * @param[in] timestamp 设备微秒时间戳。
  * @param[in] ax X 轴线加速度。
  * @param[in] ay Y 轴线加速度。
@@ -78,13 +78,13 @@ std::vector<unsigned char> EncodeRawImuSample(std::int64_t timestamp, float ax,
                                               std::int64_t idx) {
   std::vector<unsigned char> payload(72U, 0U);
   WriteRawImuField(&payload, 0U, timestamp);
-  WriteRawImuField(&payload, 8U, ax);
-  WriteRawImuField(&payload, 12U, ay);
-  WriteRawImuField(&payload, 16U, az);
-  WriteRawImuField(&payload, 20U, gx);
-  WriteRawImuField(&payload, 24U, gy);
-  WriteRawImuField(&payload, 28U, gz);
-  WriteRawImuField(&payload, 32U, idx);
+  WriteRawImuField(&payload, 8U, idx);
+  WriteRawImuField(&payload, 16U, ax);
+  WriteRawImuField(&payload, 20U, ay);
+  WriteRawImuField(&payload, 24U, az);
+  WriteRawImuField(&payload, 28U, gx);
+  WriteRawImuField(&payload, 32U, gy);
+  WriteRawImuField(&payload, 36U, gz);
   return payload;
 }
 

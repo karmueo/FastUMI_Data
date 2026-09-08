@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -70,6 +71,19 @@ namespace
 
     /// iTOF 灰度视频流 ID。
     constexpr int kItofGrayStreamId = 7;
+
+    static_assert(sizeof(stereo_camera_imu_data_t) == 72,
+                  "stereo_camera_imu_data_t must match the public SDK ABI");
+    static_assert(offsetof(stereo_camera_imu_data_t, timestamp) == 0,
+                  "stereo_camera_imu_data_t::timestamp ABI mismatch");
+    static_assert(offsetof(stereo_camera_imu_data_t, idx) == 8,
+                  "stereo_camera_imu_data_t::idx ABI mismatch");
+    static_assert(offsetof(stereo_camera_imu_data_t, ax) == 16,
+                  "stereo_camera_imu_data_t::ax ABI mismatch");
+    static_assert(offsetof(stereo_camera_imu_data_t, gx) == 28,
+                  "stereo_camera_imu_data_t::gx ABI mismatch");
+    static_assert(offsetof(stereo_camera_imu_data_t, reverve) == 40,
+                  "stereo_camera_imu_data_t::reverve ABI mismatch");
 
     /// SDK 解析循环是否继续运行；该标志由信号处理函数设置。
     volatile std::sig_atomic_t g_running = 1;
@@ -295,6 +309,117 @@ namespace
     }
 
     /**
+     * @brief 安全解析 SDK IMU payload 并校验批次元数据。
+     *
+     * @param[in] frame SDK 返回的 IMU 路由帧。
+     * @param[out] samples 成功从 payload 复制出的 IMU 样本。
+     * @param[out] diagnostic payload 或批次元数据异常的诊断文本。
+     * @return payload 结构可安全解析时返回 true；长度或指针无效时返回 false。
+     */
+    bool decode_imu_samples(const stereo_camera_frame_t &frame,
+                            std::vector<stereo_camera_imu_data_t> *samples,
+                            std::string *diagnostic)
+    {
+        samples->clear();
+        diagnostic->clear();
+        if (frame.data_size < 0)
+        {
+            *diagnostic = "negative IMU payload size";
+            return false;
+        }
+        if (frame.data_size == 0)
+        {
+            if (frame.frame_seq_count != 0U)
+            {
+                std::ostringstream message; // 空 payload 的样本数不一致诊断。
+                message << "frame_seq_count=" << frame.frame_seq_count
+                        << ", decoded_samples=0";
+                *diagnostic = message.str();
+            }
+            return true;
+        }
+        if (frame.data == nullptr)
+        {
+            *diagnostic = "null IMU payload with positive size";
+            return false;
+        }
+
+        const std::size_t payload_size =
+            static_cast<std::size_t>(frame.data_size); // IMU payload 字节数。
+        if (payload_size % sizeof(stereo_camera_imu_data_t) != 0U)
+        {
+            std::ostringstream message; // 非完整样本长度诊断。
+            message << "payload_size=" << payload_size
+                    << " is not a multiple of sample_size="
+                    << sizeof(stereo_camera_imu_data_t);
+            *diagnostic = message.str();
+            return false;
+        }
+
+        const std::size_t sample_count =
+            payload_size / sizeof(stereo_camera_imu_data_t); // 解码样本数。
+        samples->resize(sample_count);
+        for (std::size_t index = 0; index < sample_count; ++index)
+        {
+            std::memcpy(&(*samples)[index],
+                        frame.data + index * sizeof(stereo_camera_imu_data_t),
+                        sizeof(stereo_camera_imu_data_t));
+        }
+
+        std::ostringstream message; // 批次计数和序号不一致诊断。
+        bool has_diagnostic = false; // 诊断流是否已写入内容。
+        if (static_cast<std::size_t>(frame.frame_seq_count) != sample_count)
+        {
+            message << "frame_seq_count=" << frame.frame_seq_count
+                    << ", decoded_samples=" << sample_count;
+            has_diagnostic = true;
+        }
+        if (!samples->empty() && frame.frame_seqidx != 0U &&
+            samples->front().idx > 0 &&
+            frame.frame_seqidx !=
+                static_cast<std::uint64_t>(samples->front().idx))
+        {
+            if (has_diagnostic)
+            {
+                message << "; ";
+            }
+            message << "frame_seqidx=" << frame.frame_seqidx
+                    << ", first_sample_idx=" << samples->front().idx;
+            has_diagnostic = true;
+        }
+        if (has_diagnostic)
+        {
+            *diagnostic = message.str();
+        }
+        return true;
+    }
+
+    /**
+     * @brief 打印一批已解码 IMU 样本。
+     *
+     * @param output 输出流。
+     * @param samples 待打印的 IMU 样本。
+     * @param prefix 每条样本的输出行前缀。
+     */
+    void print_imu_samples(
+        std::ostream &output,
+        const std::vector<stereo_camera_imu_data_t> &samples,
+        const char *prefix)
+    {
+        for (std::size_t index = 0; index < samples.size(); ++index)
+        {
+            const stereo_camera_imu_data_t &sample =
+                samples[index]; // 当前待输出的 IMU 样本。
+            output << prefix << "sample=" << index
+                   << " timestamp=" << sample.timestamp << " us"
+                   << " idx=" << sample.idx << " accel=(" << sample.ax << ", "
+                   << sample.ay << ", " << sample.az << ") m/s²"
+                   << " gyro=(" << sample.gx << ", " << sample.gy << ", "
+                   << sample.gz << ") deg/s\n";
+        }
+    }
+
+    /**
      * @brief 打印 iTOF 首帧按两种字节序解释后的 16 位数值范围。
      *
      * @param[in] frame iTOF 深度或灰度帧。
@@ -364,7 +489,7 @@ namespace
                << "  --enable-itof BOOL  启用 iTOF Depth 和 Gray（true 或 false）；"
                   "默认 true\n"
                << "  --display       创建窗口显示当前已启用的视频流\n"
-               << "  --verbose       每次 parse_frame 成功返回都打印原始字段\n"
+               << "  --verbose       打印每帧元数据和全部 IMU 样本\n"
                << "  --help          显示此帮助并退出\n";
     }
 
@@ -601,7 +726,7 @@ namespace
             {
                 const double imu_fps =
                     static_cast<double>(stats.imu_sample_count) / window_seconds;
-                output << "  IMU FPS=" << imu_fps << " (frame_seq_count 优先)";
+                output << "  IMU FPS=" << imu_fps << " (成功解码样本)";
             }
             else
             {
@@ -738,7 +863,10 @@ int main(int argc, char *argv[])
     Clock::time_point last_null_warning_time =
         window_start;                                     // 最近空返回提示时间。
     bool has_null_warning = false;                        // 是否已经输出过空返回提示。
-    std::map<RouteKey, std::string> display_route_errors; // 各显示路最近错误。
+    std::map<RouteKey, std::string> display_route_errors;  // 各显示路最近错误。
+    std::map<RouteKey, std::string> imu_route_diagnostics; // 各 IMU 路最近诊断。
+    std::map<RouteKey, bool>
+        imu_first_batch_printed; // 各 IMU 路是否已打印首批样本。
     Clock::time_point last_display_time =
         window_start - kDisplayRefreshInterval; // 最近一次窗口刷新时间。
 
@@ -830,14 +958,51 @@ int main(int argc, char *argv[])
                     ++stats.frame_count;
                     if (frame.sourcetype == STEREO_SENSOR_IMU)
                     {
-                        std::uint64_t sample_count =
-                            frame.frame_seq_count; // 当前 IMU 回调包含的样本数。
-                        if (sample_count == 0 && frame.data_size > 0)
+                        std::vector<stereo_camera_imu_data_t>
+                            imu_samples; // 当前 payload 安全解码后的 IMU 样本。
+                        std::string imu_diagnostic; // 当前 IMU 批次的校验诊断。
+                        const bool decoded = decode_imu_samples(
+                            frame, &imu_samples,
+                            &imu_diagnostic); // payload 是否可安全解析。
+                        if (!imu_diagnostic.empty())
                         {
-                            sample_count = static_cast<std::uint64_t>(frame.data_size) /
-                                           sizeof(stereo_camera_imu_data_t);
+                            const auto diagnostic_insertion =
+                                imu_route_diagnostics.emplace(
+                                    route_key,
+                                    imu_diagnostic); // 该路异常阶段的首条诊断。
+                            if (diagnostic_insertion.second)
+                            {
+                                std::cerr << "Warning: invalid IMU batch sourcetype="
+                                          << frame.sourcetype
+                                          << " stream_id=" << frame.stream_id << ": "
+                                          << imu_diagnostic << '\n';
+                            }
                         }
-                        stats.imu_sample_count += sample_count;
+                        else
+                        {
+                            imu_route_diagnostics.erase(route_key);
+                        }
+                        if (decoded)
+                        {
+                            stats.imu_sample_count +=
+                                static_cast<std::uint64_t>(imu_samples.size());
+                            bool &first_batch_printed =
+                                imu_first_batch_printed[route_key]; // 该路是否已打印首个非空批次。
+                            const bool print_first_batch =
+                                !first_batch_printed &&
+                                !imu_samples.empty(); // 当前批次是否作为首批输出。
+                            if (print_first_batch || options.verbose)
+                            {
+                                print_imu_samples(std::cout, imu_samples,
+                                                  print_first_batch
+                                                      ? "[imu first] "
+                                                      : "[imu] ");
+                            }
+                            if (print_first_batch)
+                            {
+                                first_batch_printed = true;
+                            }
+                        }
                     }
 
                     if (options.display)
