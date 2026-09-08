@@ -233,19 +233,54 @@ uv run --no-sync python validate_vr_umi.py \
 30%。学习率按 40 轮预算调度，第 20 轮起达到条件即停止。验证阶段不会启动全量训练。
 每阶段保存 `result.json`；未通过指标要求时脚本以非零状态退出。
 
-**全量训练由用户启动：**
+**全量训练由用户启动：** 默认使用两个 Accelerate DDP 进程、BF16，以及每张 GPU
+32 个样本（全局 batch 64）。Hydra 的 `dataloader.batch_size` 和
+`val_dataloader.batch_size` 都是每进程、即每张 GPU 的 batch，不是全局 batch。
+离线训练前须确保预训练 ViT 已在 Hugging Face Hub 缓存中；缓存不在默认位置时通过
+`HF_HUB_CACHE` 指向 Hub 根目录（该目录下应直接包含 `models--timm--...`）。
 
 ```bash
 # 从 FastUMI 仓库根目录执行。
+HF_HUB_CACHE=/path/to/huggingface/hub \
+CUDA_VISIBLE_DEVICES=0,1 \
 bash model/dp/train_vr_umi.sh
 ```
 
 也可传入一个尚不存在的输出目录：`bash model/dp/train_vr_umi.sh /path/to/new_run`。
-脚本从头运行 120 轮，batch 32，使用全部 180/20 episode 划分，采用原 UMI 预训练视觉
+进程数、每卡训练 batch、每卡验证 batch 和混合精度可以分别通过
+`NUM_PROCESSES`、`TRAIN_BATCH_SIZE`、`VAL_BATCH_SIZE`、`MIXED_PRECISION` 覆盖；
+例如单卡兼容模式使用 `NUM_PROCESSES=1`。支持的混合精度值为 `no`、`fp16` 和
+`bf16`。脚本启动时会打印解析后的进程数、每卡/global batch、可见 GPU、精度、缓存
+及输出目录。
+
+脚本从头运行 120 轮，每卡 batch 32，使用全部 180/20 episode 划分，采用原 UMI 预训练视觉
 编码器和 Diffusion UNet、AdamW、EMA、2000 步 warmup、cosine 学习率、TF32 加速。
 默认使用本机缓存的预训练权重、离线 W&B 日志，不加载小规模模型或其归一化统计。
 结果位于 `dataset/vr_target_umi/runs/full_<时间戳>/`，每轮保存 `latest.ckpt`，
 按验证 loss 保存 `best.ckpt` 和最佳 3 个 checkpoint。
+
+### 训练结束后查看 W&B 曲线
+
+训练默认使用离线 W&B。训练完成后，将启动时打印的 `run directory` 赋给
+`RUN_DIR`，登录 W&B 并同步该次训练的离线 run：
+
+```bash
+# 从 FastUMI 仓库根目录执行；替换为训练启动时打印的实际目录。
+RUN_DIR=/absolute/path/to/dataset/vr_target_umi/runs/full_<时间戳>
+cd model/dp
+uv run --no-sync wandb login
+find "$RUN_DIR/wandb" -maxdepth 1 -type d -name 'offline-run-*'
+uv run --no-sync wandb sync "$RUN_DIR/wandb/offline-run-<时间戳>-<run-id>"
+```
+
+`wandb sync` 成功后会在终端打印该 run 的网页地址；也可登录 W&B 后进入
+`fastumi-vr-umi` project，在 Runs 中打开对应 run。Workspace 中重点查看
+`train_loss`、`val_loss` 和 `lr`；`fixed_val_action_mse_error` 及其
+`_pos`、`_rot`、`_width` 分量每轮记录，适合观察动作预测是否持续收敛。
+`val_action_mse_error`、`val_position_rmse_m`、`val_rotation_error_deg` 和
+`val_gripper_mse` 默认每 5 轮记录一次，因此曲线点数少于 loss 曲线属于正常现象。
+若目录中存在多个 `offline-run-*`，应根据目录时间选择本次训练的 run，并逐个同步
+需要保留的其他 run。无法上传时，仍可从 `$RUN_DIR/logs.json.txt` 查看相同的本地指标。
 
 ```bash
 cd model/dp
