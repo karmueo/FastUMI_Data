@@ -29,7 +29,7 @@ def generate_launch_description():
     # IMU 开关、主机轮询频率及原始轴向坐标系。
     imu_arguments = [
         DeclareLaunchArgument("enable_imu", default_value="true"),
-        DeclareLaunchArgument("imu_poll_rate_hz", default_value="400.0"),
+        DeclareLaunchArgument("imu_poll_rate_hz", default_value="200.0"),
         DeclareLaunchArgument(
             "imu_frame_id", default_value="stereo_camera_imu_frame"
         ),

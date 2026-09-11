@@ -60,7 +60,7 @@ constexpr std::int64_t kNanosecondsPerSecond =
  */
 struct CameraConfiguration {
   bool enable_imu = true; ///< 是否启动 IMU 发布。
-  double imu_poll_rate_hz = 400.0; ///< 主机 IMU 轮询频率，单位 Hz。
+  double imu_poll_rate_hz = 200.0; ///< 主机 IMU 轮询频率，单位 Hz。
   std::string imu_frame_id; ///< 原始 IMU 轴向的坐标系名称。
   std::string device_path; ///< V4L2 图像设备路径。
   int capture_width = 0;   ///< 双目拼接帧宽度，单位为像素。
@@ -203,7 +203,7 @@ CameraConfiguration ReadConfiguration(rclcpp::Node *node) {
   configuration.enable_imu = node->declare_parameter<bool>(
       "enable_imu", true, ReadOnlyParameter("是否启动 IMU 发布"));
   configuration.imu_poll_rate_hz = node->declare_parameter<double>(
-      "imu_poll_rate_hz", 400.0, ReadOnlyParameter("IMU 主机轮询频率，单位 Hz"));
+      "imu_poll_rate_hz", 200.0, ReadOnlyParameter("IMU 主机轮询频率，单位 Hz"));
   configuration.imu_frame_id = node->declare_parameter<std::string>(
       "imu_frame_id", "stereo_camera_imu_frame",
       ReadOnlyParameter("原始 IMU 坐标系名称"));

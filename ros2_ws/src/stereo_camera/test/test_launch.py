@@ -88,12 +88,12 @@ def test_imu_launch_defaults_and_overrides() -> None:
         if isinstance(entity, DeclareLaunchArgument)
     }
     assert _argument_default(arguments["enable_imu"]) == "true"
-    assert _argument_default(arguments["imu_poll_rate_hz"]) == "400.0"
+    assert _argument_default(arguments["imu_poll_rate_hz"]) == "200.0"
     assert _argument_default(arguments["imu_frame_id"]) == "stereo_camera_imu_frame"
     # 自定义值用于验证转发，不启动硬件节点。
     context = LaunchContext()
     context.launch_configurations.update({
-        "enable_imu": "false", "imu_poll_rate_hz": "200.0",
+        "enable_imu": "false", "imu_poll_rate_hz": "125.0",
         "imu_frame_id": "custom_imu",
     })
     # 读取规范化参数并执行类型转换。
@@ -103,5 +103,5 @@ def test_imu_launch_defaults_and_overrides() -> None:
         for name, value in node._Node__parameters[0].items()
     }
     assert parameters["enable_imu"].evaluate(context) is False
-    assert parameters["imu_poll_rate_hz"].evaluate(context) == 200.0
+    assert parameters["imu_poll_rate_hz"].evaluate(context) == 125.0
     assert parameters["imu_frame_id"].evaluate(context) == "custom_imu"

@@ -59,7 +59,7 @@ fisheye 内参和 `T_cam1_cam0` 双目外参；节点将 fisheye 模型映射为
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enable_imu` | `true` | 视频流启动后独立轮询 IMU；可通过 launch 关闭 |
-| `imu_poll_rate_hz` | `400.0` | IMU 主机轮询频率，必须为有限正数 |
+| `imu_poll_rate_hz` | `200.0` | IMU 主机轮询频率，必须为有限正数 |
 | `imu_frame_id` | `stereo_camera_imu_frame` | 原始 IMU 坐标系，不能为空 |
 | `device_path` | `/dev/video0` | V4L2 图像设备 |
 | `capture_width` / `capture_height` | `3840` / `1080` | 双目拼接帧尺寸 |
@@ -146,7 +146,7 @@ cmake --build build/stereo_camera_example --parallel
 ## IMU 采集
 
 节点在视频流启动后，通过同一设备的独立 UVC 控制描述符读取 IMU，默认
-400 Hz 轮询。协议为扩展单元 3、selector 1，优先查询响应长度，查询失败时
+200 Hz 轮询。协议为扩展单元 3、selector 1，优先查询响应长度，查询失败时
 使用 64 字节；至少需要 27 字节。仅使用普通 ACC/GYRO，不发布 EXT 数据。
 64 字节回退需要固件支持；对仅接受 27 字节控制响应的设备，长度查询失败后
 可能出现 `No buffer space available`，此时跳过 IMU 数据并继续发布图像。
@@ -175,7 +175,7 @@ ros2 launch stereo_camera stereo_camera.launch.py enable_imu:=false
 
 # 指定主机轮询频率和原始传感器坐标系
 ros2 launch stereo_camera stereo_camera.launch.py \
-  imu_poll_rate_hz:=400.0 imu_frame_id:=stereo_camera_imu_frame
+  imu_poll_rate_hz:=200.0 imu_frame_id:=stereo_camera_imu_frame
 
 ros2 topic hz /stereo_camera/imu/data_raw
 ros2 topic echo /stereo_camera/imu/data_raw --once
