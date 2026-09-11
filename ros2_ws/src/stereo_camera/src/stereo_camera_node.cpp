@@ -1,8 +1,8 @@
 /**
  * @file stereo_camera_node.cpp
- * @brief 实现基于 V4L2 的 ROS 2 双目相机图像发布节点。
+ * @brief 实现基于 V4L2 的 ROS 2 双目相机图像与 IMU 发布节点。
  * @details 采集横向拼接的 MJPEG 帧，拆分左右目图像并发布同步的 Image 与
- * CameraInfo。
+ * CameraInfo，并独立读取 UVC IMU 数据。
  * @author 待确认
  * @date 创建：2026-09-07
  * @date 修改：2026-09-08
@@ -12,6 +12,10 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <mutex>
+#include <system_error>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -38,6 +42,7 @@
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
 #include "stereo_camera/stereo_calibration.hpp"
+#include "stereo_camera/imu.hpp"
 #include "tf2_ros/static_transform_broadcaster.h"
 
 namespace stereo_camera {
@@ -54,6 +59,9 @@ constexpr std::int64_t kNanosecondsPerSecond =
  * @brief 保存节点启动时固定的相机采集与 ROS 发布配置。
  */
 struct CameraConfiguration {
+  bool enable_imu = true; ///< 是否启动 IMU 发布。
+  double imu_poll_rate_hz = 400.0; ///< 主机 IMU 轮询频率，单位 Hz。
+  std::string imu_frame_id; ///< 原始 IMU 轴向的坐标系名称。
   std::string device_path; ///< V4L2 图像设备路径。
   int capture_width = 0;   ///< 双目拼接帧宽度，单位为像素。
   int capture_height = 0;  ///< 双目拼接帧高度，单位为像素。
@@ -191,6 +199,21 @@ CameraConfiguration ReadConfiguration(rclcpp::Node *node) {
   configuration.sensor_qos_reliability = node->declare_parameter<std::string>(
       "sensor_qos_reliability", "best_effort",
       ReadOnlyParameter("传感器 QoS 可靠性，可选 best_effort 或 reliable"));
+
+  configuration.enable_imu = node->declare_parameter<bool>(
+      "enable_imu", true, ReadOnlyParameter("是否启动 IMU 发布"));
+  configuration.imu_poll_rate_hz = node->declare_parameter<double>(
+      "imu_poll_rate_hz", 400.0, ReadOnlyParameter("IMU 主机轮询频率，单位 Hz"));
+  configuration.imu_frame_id = node->declare_parameter<std::string>(
+      "imu_frame_id", "stereo_camera_imu_frame",
+      ReadOnlyParameter("原始 IMU 坐标系名称"));
+  if (!std::isfinite(configuration.imu_poll_rate_hz) ||
+      configuration.imu_poll_rate_hz <= 0.0) {
+    throw std::invalid_argument("imu_poll_rate_hz 必须为有限正数");
+  }
+  if (configuration.imu_frame_id.empty()) {
+    throw std::invalid_argument("imu_frame_id 不能为空");
+  }
 
   if (configuration.device_path.empty()) {
     throw std::invalid_argument("device_path 不能为空");
@@ -589,7 +612,7 @@ bool BuildCompressedImageMessage(const cv::Mat &stereo_frame, bool right_eye,
 
 /**
  * @class StereoCameraNode
- * @brief 采集 UVC 双目拼接帧并发布左右目 ROS 图像和标定信息。
+ * @brief 采集 UVC 双目拼接帧及 IMU，发布图像、标定信息和惯性测量。
  * @details 节点独占 V4L2 设备与采集线程；发布器可由采集线程安全调用。
  */
 class StereoCameraNode final : public rclcpp::Node {
@@ -614,7 +637,7 @@ public:
     left_camera_info_ = std::move(camera_info.first);
     right_camera_info_ = std::move(camera_info.second);
 
-    /** 保存四个传感器发布器共用的 QoS 配置。 */
+    /** 保存图像、CameraInfo 和 IMU 发布器共用的 QoS 配置。 */
     const rclcpp::SensorDataQoS sensor_qos = CreateSensorQos(configuration_);
     left_image_publisher_ =
         this->create_publisher<sensor_msgs::msg::CompressedImage>(
@@ -641,7 +664,22 @@ public:
     monotonic_anchor_ns_ = MonotonicNowNs();
     system_anchor_ns_ = rclcpp::Clock(RCL_SYSTEM_TIME).now().nanoseconds();
     running_.store(true);
-    capture_thread_ = std::thread(&StereoCameraNode::CaptureLoop, this);
+    try {
+      capture_thread_ = std::thread(&StereoCameraNode::CaptureLoop, this);
+      if (configuration_.enable_imu) {
+        try {
+          imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
+              "imu/data_raw", sensor_qos);
+          imu_thread_ = std::thread(&StereoCameraNode::ImuLoop, this);
+        } catch (const std::exception &error) {
+          RCLCPP_ERROR(this->get_logger(), "IMU 启动失败，继续发布图像：%s",
+                       error.what());
+        }
+      }
+    } catch (...) {
+      StopCapture();
+      throw;
+    }
 
     RCLCPP_INFO(this->get_logger(),
                 "双目相机已启动：device=%s format=%dx%d MJPG fps=%d eye=%ux%u "
@@ -654,14 +692,85 @@ public:
 
   /** @brief 请求采集线程退出并等待相机资源安全释放。 */
   ~StereoCameraNode() override {
-    running_.store(false);
+    StopCapture();
+  }
+
+private:
+  /** @brief 唤醒并回收 IMU 线程，然后停止图像线程及视频流。 */
+  void StopCapture() noexcept {
+    {
+      /** 与等待线程同步停止条件，避免丢失唤醒。 */
+      std::lock_guard<std::mutex> lock(imu_wait_mutex_);
+      running_.store(false);
+    }
+    imu_wait_condition_.notify_all();
+    if (imu_thread_.joinable()) {
+      imu_thread_.join();
+    }
     if (capture_thread_.joinable()) {
       capture_thread_.join();
     }
     camera_.reset();
   }
 
-private:
+  /**
+   * @brief 视频流启动后独立读取 IMU；错误仅影响 IMU 发布。
+   * @note 时间戳为主机读取完成时间，不代表硬件同步采样时间。
+   */
+  void ImuLoop() noexcept {
+    try {
+      /** 在线程内独占控制描述符，线程结束时先于视频流释放。 */
+      UvcImu imu(configuration_.device_path);
+      /** 使用浮点秒保存周期，避免极小正频率导致整数时长溢出。 */
+      const double period_seconds = 1.0 / configuration_.imu_poll_rate_hz;
+      /** 独立稳态时钟用于限频日志，不受系统时间跳变影响。 */
+      rclcpp::Clock log_clock(RCL_STEADY_TIME);
+      RCLCPP_INFO(this->get_logger(), "IMU 已启动：poll=%.3f Hz frame=%s",
+                  configuration_.imu_poll_rate_hz,
+                  configuration_.imu_frame_id.c_str());
+      while (running_.load() && rclcpp::ok()) {
+        /** 当前轮询的单调起点，超时后不进行追赶式忙循环。 */
+        const auto started = std::chrono::steady_clock::now();
+        try {
+          /** 当前成功读取的普通 IMU 原始测量。 */
+          const ImuSample sample = imu.Read();
+          /** 读取完成后立即获取与图像同域的系统时间。 */
+          const auto stamp = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+          imu_publisher_->publish(
+              BuildImuMessage(sample, stamp, configuration_.imu_frame_id));
+        } catch (const std::system_error &error) {
+          if (error.code().value() == ENODEV || error.code().value() == ENXIO ||
+              error.code().value() == EBADF) {
+            RCLCPP_ERROR(this->get_logger(), "IMU 设备已断开，停止读取：%s",
+                         error.what());
+            return;
+          }
+          RCLCPP_WARN_THROTTLE(this->get_logger(), log_clock, 2000,
+                              "跳过 IMU 读取失败的数据：%s", error.what());
+        }
+        /** 剩余周期采用短分段等待，支持任意有限正频率和及时退出。 */
+        std::unique_lock<std::mutex> lock(imu_wait_mutex_);
+        do {
+          /** 已用的单调时钟秒数。 */
+          const double elapsed = std::chrono::duration<double>(
+              std::chrono::steady_clock::now() - started).count();
+          /** 至少等待一个微秒，避免超出时钟精度的频率变成忙循环。 */
+          const double wait_seconds =
+              std::max(0.000001, std::min(0.1, period_seconds - elapsed));
+          imu_wait_condition_.wait_for(
+              lock, std::chrono::duration<double>(wait_seconds),
+              [this] { return !running_.load(); });
+        } while (running_.load() && rclcpp::ok() &&
+                 std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - started).count() <
+                     period_seconds);
+      }
+    } catch (const std::exception &error) {
+      RCLCPP_ERROR(this->get_logger(), "IMU 已禁用，继续发布图像：%s",
+                   error.what());
+    }
+  }
+
   /**
    * @brief 将 V4L2 单调时钟时间映射为 ROS 系统时间。
    * @param[in] frame 待转换时间戳的已采集帧。
@@ -765,6 +874,11 @@ private:
     }
   }
 
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr
+      imu_publisher_; ///< 普通 IMU 的 SI 单位消息发布器。
+  std::thread imu_thread_; ///< 独立 IMU 控制读取线程。
+  std::mutex imu_wait_mutex_; ///< 保护 IMU 停止等待条件。
+  std::condition_variable imu_wait_condition_; ///< 支持即时唤醒的轮询等待。
   CameraConfiguration
       configuration_; ///< 节点生命周期内不可变的采集和发布配置。
   sensor_msgs::msg::CameraInfo left_camera_info_; ///< 左目标定信息模板。

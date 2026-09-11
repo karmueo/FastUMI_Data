@@ -30,9 +30,15 @@ ament_target_dependencies(stereo_calibration
   sensor_msgs
   tf2)
 
+add_library(stereo_imu src/imu.cpp)
+target_include_directories(stereo_imu PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(stereo_imu sensor_msgs)
+
 add_executable(stereo_camera_node src/stereo_camera_node.cpp)
 target_include_directories(stereo_camera_node PRIVATE include)
-target_link_libraries(stereo_camera_node stereo_calibration ${OpenCV_LIBS})
+target_link_libraries(stereo_camera_node stereo_calibration stereo_imu ${OpenCV_LIBS})
 ament_target_dependencies(stereo_camera_node
   geometry_msgs
   rcl_interfaces
@@ -41,11 +47,12 @@ ament_target_dependencies(stereo_camera_node
   tf2_ros)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(stereo_imu PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(stereo_calibration PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(stereo_camera_node PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-install(TARGETS stereo_calibration stereo_camera_node
+install(TARGETS stereo_calibration stereo_imu stereo_camera_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
@@ -61,6 +68,8 @@ install(FILES README.md
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_gtest(test_imu test/test_imu.cpp)
+  target_link_libraries(test_imu stereo_imu)
   ament_add_gtest(test_stereo_calibration test/test_stereo_calibration.cpp)
   target_compile_definitions(test_stereo_calibration PRIVATE
     STEREO_CALIBRATION_PATH="${CMAKE_CURRENT_SOURCE_DIR}/config/calib.yaml")
@@ -71,6 +80,6 @@ endif()
 
 ament_export_include_directories(include)
 ament_export_dependencies(geometry_msgs sensor_msgs tf2)
-ament_export_libraries(stereo_calibration)
+ament_export_libraries(stereo_calibration stereo_imu)
 
 ament_package()

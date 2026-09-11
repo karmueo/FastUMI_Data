@@ -4,7 +4,7 @@
 <package format="3">
   <name>stereo_camera</name>
   <version>0.1.0</version>
-  <description>基于 Linux V4L2 的 ROS 2 MJPEG 双目相机驱动。</description>
+  <description>基于 Linux V4L2 的 ROS 2 MJPEG 双目相机及 UVC IMU 驱动。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 

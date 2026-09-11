@@ -34,6 +34,7 @@ ros2 launch stereo_camera stereo_camera.launch.py \
 | `/stereo_camera/right/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | 右目 `1920×1080` JPEG 图像 |
 | `/stereo_camera/left/camera_info` | `sensor_msgs/msg/CameraInfo` | 左目标定信息 |
 | `/stereo_camera/right/camera_info` | `sensor_msgs/msg/CameraInfo` | 右目标定信息 |
+| `/stereo_camera/imu/data_raw` | `sensor_msgs/msg/Imu` | 普通 IMU 原始轴向数据，已换算为 SI 单位 |
 | `/tf_static` | `tf2_msgs/msg/TFMessage` | 左目父坐标系到右目子坐标系的静态外参 |
 
 节点默认加载安装包内的 `config/calib.yaml`。该文件同时提供左右目的 OpenCV
@@ -53,10 +54,13 @@ fisheye 内参和 `T_cam1_cam0` 双目外参；节点将 fisheye 模型映射为
 
 ## 参数
 
-采集和发布默认参数由节点代码声明；启动文件只覆盖设备路径和统一标定路径：
+采集和发布默认参数由节点代码声明；启动文件支持覆盖设备路径、统一标定路径及 IMU 参数：
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
+| `enable_imu` | `true` | 视频流启动后独立轮询 IMU；可通过 launch 关闭 |
+| `imu_poll_rate_hz` | `400.0` | IMU 主机轮询频率，必须为有限正数 |
+| `imu_frame_id` | `stereo_camera_imu_frame` | 原始 IMU 坐标系，不能为空 |
 | `device_path` | `/dev/video0` | V4L2 图像设备 |
 | `capture_width` / `capture_height` | `3840` / `1080` | 双目拼接帧尺寸 |
 | `frame_rate` | `50` | 采集帧率，单位为 FPS |
@@ -109,7 +113,8 @@ ros2 bag record \
   /stereo_camera/left/image_raw/compressed \
   /stereo_camera/right/image_raw/compressed \
   /stereo_camera/left/camera_info \
-  /stereo_camera/right/camera_info
+  /stereo_camera/right/camera_info \
+  /stereo_camera/imu/data_raw
 ```
 
 按 `Ctrl+C` 完成录制。输出目录必须尚不存在；再次录制时应更换
@@ -136,3 +141,59 @@ cmake --build build/stereo_camera_example --parallel
 
 预览窗口顶部显示最近约 1 秒内成功解码并显示的平均 FPS；按 `q`、`Esc` 或
 `Ctrl+C` 退出。
+
+
+## IMU 采集
+
+节点在视频流启动后，通过同一设备的独立 UVC 控制描述符读取 IMU，默认
+400 Hz 轮询。协议为扩展单元 3、selector 1，优先查询响应长度，查询失败时
+使用 64 字节；至少需要 27 字节。仅使用普通 ACC/GYRO，不发布 EXT 数据。
+64 字节回退需要固件支持；对仅接受 27 字节控制响应的设备，长度查询失败后
+可能出现 `No buffer space available`，此时跳过 IMU 数据并继续发布图像。
+按设备说明书，16 位大端有符号 ADC 的换算为：
+
+- 加速度：`raw × (8 / 32768) × 9.80665`，单位 m/s²。
+- 角速度：`raw × (2000 / 32768) × (π / 180)`，单位 rad/s。
+
+保留传感器原始轴向和偏置，不读取 IMU 标定、不发布 IMU TF，也不估计姿态。
+`orientation_covariance[0] = -1` 表示姿态不可用；其余两组协方差全零表示未知。
+这里 `data_raw` 表示未经偏置校正，消息数值已经转换为标准物理单位。
+
+时间戳取主机读取完成时的系统时间，与图像使用同一时间域。数据包 index 是
+视频帧序号，同一视频帧内可包含多条 IMU 数据，因此不按它去重或推算采样时间。
+设备 IMU 采样率为 400 Hz；主机轮询与硬件采样异步，协议没有独立样本序号或
+硬件时间戳，成功读取不保证取得新样本，也不保证无丢样或与图像硬件同步。
+实际发布频率还取决于 USB 控制传输耗时及系统负载。
+
+IMU 初始化失败时记录错误并停用本次 IMU 采集，图像继续发布；单次读取失败
+跳过并限频报告，设备断开时停止 IMU 线程。暂不自动重连。IMU 控制传输由
+内核执行，退出时等待正在进行的 ioctl 返回，再释放控制描述符及视频流。
+
+```bash
+# 仅采集图像
+ros2 launch stereo_camera stereo_camera.launch.py enable_imu:=false
+
+# 指定主机轮询频率和原始传感器坐标系
+ros2 launch stereo_camera stereo_camera.launch.py \
+  imu_poll_rate_hz:=400.0 imu_frame_id:=stereo_camera_imu_frame
+
+ros2 topic hz /stereo_camera/imu/data_raw
+ros2 topic echo /stereo_camera/imu/data_raw --once
+```
+
+静止验收时检查加速度模长接近 9.80665 m/s²，角速度接近零（允许未校正偏置），
+并确认图像继续输出、关闭 IMU 后图像正常，以及 Ctrl+C 后设备可以重新打开。
+
+## 测试
+
+在 `ros2_ws` 下加载 Jazzy 环境，运行：
+
+```bash
+colcon build --symlink-install --packages-select stereo_camera
+source install/setup.bash
+colcon test --packages-select stereo_camera
+colcon test-result --verbose
+```
+
+自动测试覆盖包解析、单位换算、消息标记和 launch 参数转发；设备并行采集、
+实际频率和退出行为需在配套 Ego 相机上验证。

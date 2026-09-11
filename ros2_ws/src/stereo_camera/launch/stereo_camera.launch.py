@@ -1,4 +1,4 @@
-"""启动 V4L2 双目相机 ROS 2 节点并加载统一双目标定。"""
+"""启动 V4L2 双目相机 ROS 2 节点及 IMU 并加载统一双目标定。"""
 
 from pathlib import Path
 
@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -25,6 +26,15 @@ def generate_launch_description():
         "calibration_file", default_value=str(default_calibration)
     )
 
+    # IMU 开关、主机轮询频率及原始轴向坐标系。
+    imu_arguments = [
+        DeclareLaunchArgument("enable_imu", default_value="true"),
+        DeclareLaunchArgument("imu_poll_rate_hz", default_value="400.0"),
+        DeclareLaunchArgument(
+            "imu_frame_id", default_value="stereo_camera_imu_frame"
+        ),
+    ]
+
     # 负责采集拼接帧并发布左右目消息的驱动节点。
     camera_node = Node(
         package="stereo_camera",
@@ -35,6 +45,15 @@ def generate_launch_description():
         parameters=[
             {
                 "device_path": LaunchConfiguration("device_path"),
+                "enable_imu": ParameterValue(
+                    LaunchConfiguration("enable_imu"), value_type=bool
+                ),
+                "imu_poll_rate_hz": ParameterValue(
+                    LaunchConfiguration("imu_poll_rate_hz"), value_type=float
+                ),
+                "imu_frame_id": ParameterValue(
+                    LaunchConfiguration("imu_frame_id"), value_type=str
+                ),
                 "calibration_file": LaunchConfiguration("calibration_file"),
             },
         ],
@@ -44,6 +63,7 @@ def generate_launch_description():
         [
             device_argument,
             calibration_argument,
+            *imu_arguments,
             camera_node,
         ]
     )

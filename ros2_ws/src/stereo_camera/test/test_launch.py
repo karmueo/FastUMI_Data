@@ -70,7 +70,38 @@ def test_launch_defaults_and_node_interface() -> None:
     assert parameter_names == {
         "device_path",
         "calibration_file",
+        "enable_imu",
+        "imu_poll_rate_hz",
+        "imu_frame_id",
     }
 
     # 启动文件不能再加载旧参数文件。
     assert "stereo_camera.yaml" not in LAUNCH_FILE.read_text(encoding="utf-8")
+
+
+def test_imu_launch_defaults_and_overrides() -> None:
+    """验证 IMU 默认配置及布尔、浮点、字符串覆盖类型。"""
+    # 从启动描述提取声明参数及节点。
+    description = _load_launch_module().generate_launch_description()
+    arguments = {
+        entity.name: entity for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument)
+    }
+    assert _argument_default(arguments["enable_imu"]) == "true"
+    assert _argument_default(arguments["imu_poll_rate_hz"]) == "400.0"
+    assert _argument_default(arguments["imu_frame_id"]) == "stereo_camera_imu_frame"
+    # 自定义值用于验证转发，不启动硬件节点。
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "enable_imu": "false", "imu_poll_rate_hz": "200.0",
+        "imu_frame_id": "custom_imu",
+    })
+    # 读取规范化参数并执行类型转换。
+    node = next(entity for entity in description.entities if isinstance(entity, Node))
+    parameters = {
+        perform_substitutions(context, name): value
+        for name, value in node._Node__parameters[0].items()
+    }
+    assert parameters["enable_imu"].evaluate(context) is False
+    assert parameters["imu_poll_rate_hz"].evaluate(context) == 200.0
+    assert parameters["imu_frame_id"].evaluate(context) == "custom_imu"
