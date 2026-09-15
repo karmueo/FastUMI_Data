@@ -8,19 +8,20 @@
 
 ## 构建和启动
 
-以下命令从仓库根目录执行，使用现有 ROS2 Jazzy 和 `model/dp/.venv`（Python 3.12）。
+以下命令从仓库根目录执行，使用 ROS 2 Humble 和 `model/dp/.venv`（Python 3.10）。
 ROS 消息依赖由工作区生成，无需在推理虚拟环境中安装 ROS 的 PyPI 替代包。
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 (cd ros2_ws && colcon build --packages-select fastumi_interfaces)
 
 bash model/dp/run_vr_umi_ros2.sh --ros-args \
   --params-file model/dp/config/vr_umi_ros2.yaml \
   -p checkpoint:="$(realpath dataset/vr_target_umi/runs/full_20260904_174806/checkpoints/best.ckpt)" \
-  -p image_topic:=/camera/image_raw \
+  -p image_topic:=/camera/image_raw/compressed \
+  -p image_type:=compressed \
   -p joint_topic:=/joint_states \
-  -p gripper_topic:=/fastumi/gripper/state
+  -p gripper_topic:=/motion_control/gripper_state
 ```
 
 `checkpoint` 必须显式提供；示例模型为现有训练产物，其他符合相同契约的 checkpoint
@@ -36,12 +37,13 @@ bash model/dp/run_vr_umi_ros2.sh --ros-args \
 
 | 话题参数 | 默认话题 | 消息与单位 |
 |---|---|---|
-| `image_topic` | `/camera/image_raw` | `sensor_msgs/Image`，`rgb8` 或 `bgr8` |
+| `image_topic` | `/camera/image_raw/compressed` | `sensor_msgs/CompressedImage`，JPEG/PNG |
+| `image_type` | `compressed` | 压缩消息；兼容旧入口时可设为 `raw` |
 | `joint_topic` | `/joint_states` | `sensor_msgs/JointState`，`joint1`～`joint7`，弧度 |
-| `gripper_topic` | `/fastumi/gripper/state` | `std_msgs/Float32`，归一化 `[0,1]` 实测开度 |
+| `gripper_topic` | `/motion_control/gripper_state` | `std_msgs/Float32`，归一化 `[0,1]` 实测开度 |
 
 关节按名称重排，消息允许包含其他关节；名称缺失/重复、长度不匹配或非有限值会被拒绝。
-图像正确处理 `step` 行填充，使用训练转换器相同的等比例缩放和居中黑边填充至
+压缩图像由 OpenCV 解码并执行 BGR→RGB；raw 模式正确处理 `step` 行填充。两种模式均使用训练转换器相同的等比例缩放和居中黑边填充至
 `224×224`，再转为 CHW RGB `[0,1]`。相机视角、标定和输入内容应与训练数据对应。
 夹爪不额外反转开合方向，非法输入跳过，输出端统一裁剪到 `[0,1]`。
 
@@ -84,7 +86,7 @@ ROS 时钟域；Float32 不含采集时间，因此夹爪网络延迟会影响�
 日志记录有效序列编号、episode、推理完成耗时（含最多一次定时器轮询延迟）及观测年龄。
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source ros2_ws/install/local_setup.bash
 ros2 topic echo /fastumi/policy/action_sequence
 ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
@@ -93,6 +95,31 @@ ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
 重置清空所有订阅缓存、历史和待推理窗口；正在运行的旧任务完成后按 episode 编号丢弃。
 下一有效同步观测定义新的起始姿态。节点不发布机械臂控制或夹爪命令；下游接收这些
 基座坐标系目标时，应保留上述末端参考点与时间语义。
+
+## RM75 + Unitree 实机部署
+
+`infer_real.py` 只运行上述推理节点。默认 checkpoint 为
+`~/data/model/DP/checkpoints/best.ckpt`，它持续发布最新预测，不创建机器人命令发布器：
+
+```bash
+bash model/dp/run_infer_real.sh
+```
+
+在安装 Placo 的独立 Python 3.10 环境中启动
+`fastumi_rm75.rm75_placo_controller`。该节点按预测绝对时间连续跟随最新序列，使用
+Placo 将 `base_link -> Link7` 目标转换成七轴低跟随命令，同时发布预测夹爪开度。
+它默认 `dry_run=false`，反馈和预测齐备后会直接控制实机；首次联调必须覆盖
+`dry_run:=true`。具体命令、话题和故障恢复行为见
+`ros2_ws/src/fastumi_rm75/README.md`。
+
+所有硬件、相机和推理终端必须使用同一个 `ROS_DOMAIN_ID`。可分别运行
+`echo $ROS_DOMAIN_ID` 核对；例如当前部署统一使用 63 时，相机终端需在启动前执行
+`export ROS_DOMAIN_ID=63`。进程存在但图中 `/camera/image_raw/compressed` 的 publisher
+数量为零，通常就是 ROS domain 不一致。
+
+本部署还统一使用 `FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA`。实机启动脚本会显式设置该值；
+手工启动 RM75、夹爪和相机时也应保持一致，避免 `sequence size exceeds remaining buffer`
+或同一 domain 内端点无法互相发现。
 
 ## 自定义后处理
 
@@ -137,7 +164,7 @@ def create():
 核心测试可独立于 ROS 运行。ROS 层测试需先构建和 source 消息工作区：
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source ros2_ws/install/local_setup.bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 model/dp/.venv/bin/python -m pytest \
   model/dp/tests/test_vr_umi_ros_core.py \
@@ -152,7 +179,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 model/dp/.venv/bin/python -m pytest \
 使用私有 ROS domain 和回放话题，运行真实模型验收：
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 source ros2_ws/install/local_setup.bash
 ROS_DOMAIN_ID=173 model/dp/.venv/bin/python model/dp/smoke_vr_umi_ros2.py \
   --checkpoint dataset/vr_target_umi/runs/full_20260904_174806/checkpoints/best.ckpt \

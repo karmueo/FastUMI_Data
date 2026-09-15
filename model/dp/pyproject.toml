@@ -3,7 +3,7 @@ name = "fastumi-diffusion-policy"
 version = "0.1.0"
 description = "FastUMI 本地 Diffusion Policy 训练与推理项目"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "accelerate==0.24.1",
     "diffusers==0.18.2",
@@ -25,11 +25,11 @@ dependencies = [
     "scipy==1.13.1",
     "threadpoolctl>=3.2,<4",
     "timm==0.9.7",
-    "torch==2.12.1",
-    "torchvision==0.27.1",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
     "tqdm>=4.66,<5",
     "wandb>=0.16,<0.29",
-    "zarr==2.18.7",
+    "zarr==2.18.3",
     "numcodecs==0.12.1",
 ]
 
@@ -42,16 +42,22 @@ validation = [
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "jetson-jp6-cu126"
+url = "https://pypi.jetson-ai-lab.io/jp6/cu126/+simple"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
+torch = { index = "jetson-jp6-cu126" }
+torchvision = { index = "jetson-jp6-cu126" }
 
 [tool.uv]
 package = false
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

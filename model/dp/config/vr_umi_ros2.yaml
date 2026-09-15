@@ -2,9 +2,10 @@
 vr_umi_inference:
   ros__parameters:
     device: cuda:0
-    image_topic: /camera/image_raw
+    image_topic: /camera/image_raw/compressed
+    image_type: compressed
     joint_topic: /joint_states
-    gripper_topic: /fastumi/gripper/state
+    gripper_topic: /motion_control/gripper_state
     output_topic: /fastumi/policy/action_sequence
     reset_service: /fastumi/policy/reset_episode
     sync_slop_s: 0.05

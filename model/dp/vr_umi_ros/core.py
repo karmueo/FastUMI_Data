@@ -23,6 +23,32 @@ OBS_SHAPES = {
     "robot0_eef_rot_axis_angle_wrt_start": (6,),
 }
 
+# 该训练产物生成于 URDF 摘要写入 checkpoint 之前。只允许这一份已核验文件
+# 使用实机启动时的 FK/驱动在线一致性检查代替缺失的训练摘要。
+TRUSTED_LEGACY_CHECKPOINT_SHA256 = (
+    "4ce3ee9e9516d180a447f75ec48647f868749aa1b9ba4dad31ef948982376482"
+)
+TRUSTED_LEGACY_URDF_SHA256 = (
+    "1f5b0a109ef5e8b25e090447cc4f69824754029fa1d9c7f12a3278f35161c1c3"
+)
+
+
+def file_sha256(path):
+    """流式计算大 checkpoint 摘要，避免一次读入数 GB 数据。"""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_legacy_checkpoint_digest(digest, trusted_digest):
+    """只为精确白名单中的旧 checkpoint 放行缺失 URDF 摘要。"""
+    if trusted_digest is None or digest != trusted_digest:
+        raise ValueError(
+            "Checkpoint lacks a training URDF hash and is not the trusted legacy checkpoint"
+        )
+
 
 def ordered_joints(names, positions):
     """按训练关节顺序提取弧度位置；缺失、重名或非有限值时抛出 ValueError。"""
@@ -45,6 +71,17 @@ def image_to_rgb(data, height, width, step, encoding):
         raise ValueError("Image data size does not match height * step")
     rgb = values.reshape(height, step)[:, :width * 3].reshape(height, width, 3)
     return (rgb[..., ::-1] if encoding == "bgr8" else rgb).copy()
+
+
+def compressed_image_to_rgb(data):
+    """解码 JPEG/PNG 压缩图像并从 OpenCV BGR 转为独立的 HWC RGB。"""
+    encoded = np.frombuffer(data, dtype=np.uint8)
+    if encoded.size == 0:
+        raise ValueError("Compressed image payload is empty")
+    bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if bgr is None or bgr.ndim != 3 or bgr.shape[2] != 3:
+        raise ValueError("Compressed image cannot be decoded as three-channel color")
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
 def letterbox_rgb(rgb, size=224):
@@ -159,7 +196,7 @@ def load_processors(specifications):
     return processors
 
 
-def validate_contract(cfg):
+def validate_contract(cfg, allow_missing_urdf_hash=False):
     """限制为当前 RM75 五键/10D/30Hz 训练契约，防止误用其他 checkpoint。"""
     contract = cfg.task.get("contract", {})
     expected = {"base_frame": "base_link", "end_frame": "Link7", "tool_offset": "identity",
@@ -169,8 +206,11 @@ def validate_contract(cfg):
         raise ValueError("Checkpoint does not match the RM75 Link7 deployment contract")
     shape_meta = cfg.shape_meta
     urdf_sha256 = contract.get("urdf_sha256")
-    if (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in urdf_sha256.lower())):
+    missing_hash = urdf_sha256 in (None, "")
+    if missing_hash and allow_missing_urdf_hash:
+        pass
+    elif (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64
+          or any(character not in "0123456789abcdef" for character in urdf_sha256.lower())):
         raise ValueError("Checkpoint does not contain a valid training URDF SHA-256")
     if set(shape_meta.obs) != set(OBS_SHAPES):
         raise ValueError("Checkpoint must contain exactly the five UMI observations")
@@ -203,12 +243,22 @@ def validate_urdf(urdf_path, cfg):
 class PolicyEngine:
     """单线程使用的策略实例；ROS 层负责调度，模型依赖仅在创建时导入。"""
 
-    def __init__(self, checkpoint, device="cuda:0", processors=()):
+    def __init__(self, checkpoint, device="cuda:0", processors=(),
+                 trusted_legacy_sha256=None, checkpoint_sha256=None):
         """加载现有评估入口使用的 EMA/model 权重并验证契约；异常阻止节点启动。"""
         from evaluate_vr_umi import load_policy
 
+        checkpoint = Path(checkpoint)
         self.policy, self.cfg = load_policy(checkpoint, device)
-        validate_contract(self.cfg)
+        contract_hash = self.cfg.task.get("contract", {}).get("urdf_sha256")
+        self.legacy_missing_urdf_hash = contract_hash in (None, "")
+        if self.legacy_missing_urdf_hash:
+            digest = checkpoint_sha256 or file_sha256(checkpoint)
+            validate_legacy_checkpoint_digest(digest, trusted_legacy_sha256)
+            self.checkpoint_sha256 = digest
+        else:
+            self.checkpoint_sha256 = None
+        validate_contract(self.cfg, allow_missing_urdf_hash=self.legacy_missing_urdf_hash)
         self.device = device  # 推理张量所在设备。
         self.processors = list(processors)  # 已构造的后处理扩展。
 

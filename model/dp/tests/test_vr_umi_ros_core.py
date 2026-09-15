@@ -12,9 +12,10 @@ from hydra import compose, initialize_config_dir
 
 from convert_vr_target import letterbox_rgb as training_letterbox
 from vr_umi_ros.core import (ActionSequence, InferenceContext, JOINT_NAMES, Observation, PolicyEngine,
-                             build_observations, decode_actions, image_to_rgb, letterbox_rgb,
+                             build_observations, compressed_image_to_rgb, decode_actions,
+                             image_to_rgb, letterbox_rgb,
                              load_processors, ordered_joints, validate_contract, validate_sequence,
-                             validate_urdf)
+                             validate_legacy_checkpoint_digest, validate_urdf)
 from vr_umi_ros.synchronizer import ObservationBuffer
 from umi.common.pose_util import mat_to_pose10d, pose_to_mat
 
@@ -52,6 +53,21 @@ def test_image_stride_color_and_training_letterbox():
         image_to_rgb(b"", 1, 1, 3, "mono8")
     with pytest.raises(ValueError):
         image_to_rgb(b"", 1, 1, 3, "rgb8")
+
+
+def test_compressed_image_decode_color_and_rejection():
+    """压缩相机解码保持 RGB 语义，并拒绝空或损坏载荷。"""
+    import cv2
+
+    bgr = np.zeros((12, 18, 3), dtype=np.uint8)
+    bgr[..., 0], bgr[..., 1], bgr[..., 2] = 17, 83, 201
+    success, encoded = cv2.imencode(".png", bgr)
+    assert success
+    rgb = compressed_image_to_rgb(encoded.tobytes())
+    np.testing.assert_array_equal(rgb, bgr[..., ::-1])
+    for payload in (b"", b"not-an-image"):
+        with pytest.raises(ValueError):
+            compressed_image_to_rgb(payload)
 
 
 def test_actual_dataset_observation_parity(tmp_path):
@@ -152,6 +168,16 @@ def test_contract_rejects_incompatible_checkpoints():
     cfg.task.contract.urdf_sha256 = None
     with pytest.raises(ValueError, match="URDF SHA-256"):
         validate_contract(cfg)
+    validate_contract(cfg, allow_missing_urdf_hash=True)
+
+
+def test_legacy_checkpoint_requires_exact_digest():
+    """缺少 URDF 元数据时只接受完全相同的白名单摘要。"""
+    validate_legacy_checkpoint_digest("trusted", "trusted")
+    with pytest.raises(ValueError, match="trusted legacy"):
+        validate_legacy_checkpoint_digest("changed", "trusted")
+    with pytest.raises(ValueError, match="trusted legacy"):
+        validate_legacy_checkpoint_digest("trusted", None)
 
 
 def test_deployment_urdf_must_match_checkpoint(tmp_path):

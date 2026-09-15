@@ -1,30 +1,78 @@
-<!-- 本文档说明 FastUMI 策略在 RM75 上的安全桥接接口。 -->
+<!-- 本文档说明 FastUMI 策略在 RM75 上的 Placo 关节控制接口。 -->
 
 # fastumi_rm75
 
-该包把 episode 起始 TCP 坐标系中的 20 Hz 策略目标映射到 RM75 基座，
-以 100 Hz 插值，并在显式关闭 `dry_run` 后调用官方连续笛卡尔透传接口。
+`rm75_placo_controller` 订阅推理端发布的绝对 Link7 目标序列，以 50 Hz 使用
+Placo 求解七轴关节，并通过睿尔曼低跟随 CANFD 接口控制 RM75。它同时把序列中的
+归一化开度发布给 Unitree 夹爪。
+
+## 接口
+
+- `/joint_states`：RM75 七轴反馈，`sensor_msgs/JointState`，单位弧度。
+- `/fastumi/policy/action_sequence`：`base_link -> Link7` 绝对目标、执行时间和夹爪开度。
+- `/rm_driver/movej_canfd_cmd`：`rm_ros_interfaces/Jointpos` 七轴低跟随命令。
+- `/motion_control/gripper_command`：`std_msgs/Float32`，`0` 全闭、`1` 全开。
+- `/fastumi/rm75/placo/joint_command`：每次成功 IK 的调试关节目标，dry-run 时也发布。
+- `/rm_driver/move_stop_cmd`：轨迹结束、反馈超时或 IK 故障时发布一次停止命令。
+
+夹爪实测开度不参与机械臂 IK，因此本节点不订阅夹爪状态。推理节点仍应订阅
+`/motion_control/gripper_state`，作为模型观测的一部分。
+
+## 环境、构建与启动
+
+ROS 2 Humble 的系统 Python 未安装 Placo。请使用包含系统 site-packages 的独立
+Python 3.10 环境安装 `placo>=0.9.23`、NumPy 和 SciPy，再在该环境中构建或运行：
 
 ```bash
-ros2 launch fastumi_rm75 rm75_deployment.launch.py
-ros2 service call /fastumi/rm75/enable std_srvs/srv/Trigger {}
+source /opt/ros/humble/setup.bash
+source /path/to/placo-venv/bin/activate
+python -m pip install 'placo>=0.9.23'
+cd ros2_ws
+colcon build --packages-select fastumi_interfaces fastumi_rm75 --symlink-install
+source install/local_setup.bash
 ```
 
-主要输入：
+配置默认 `dry_run=false`，一旦收到新鲜关节反馈和有效预测就会直接向实机发送命令。
+首次联调应显式启用 dry-run：
 
-- `/fastumi/policy/relative_target`：相对目标 `PoseStamped`。
-- `/fastumi/gripper/command`：归一化 `[0,1]` 夹爪目标。
-- 带时间戳 `/joint_states`、鱼眼图像和 `/rm_driver/udp_rm_err`。
+```bash
+python -m fastumi_rm75.rm75_placo_controller --ros-args \
+  --params-file src/fastumi_rm75/config/rm75_placo_controller.yaml \
+  -p dry_run:=true
+```
 
-安全输出和控制：
+确认 `/fastumi/rm75/placo/joint_command` 后再使用实机默认配置：
 
-- `/fastumi/rm75/commanded_pose`：基座坐标系调试目标。
-- `/fastumi/rm75/relative_tcp_at_image`：原图时刻的真实相对 TCP。
-- `/fastumi/gripper/state`：标准夹爪 Action 的实际归一化开度反馈。
-- `/fastumi/gripper/commanded_state`：最近发送的归一化开度目标。
-- `/fastumi/rm75/emergency_stop`：人工轨迹停止服务。
-- `/fastumi/rm75/operator_estop`：人工急停布尔话题。
+```bash
+python -m fastumi_rm75.rm75_placo_controller --ros-args \
+  --params-file src/fastumi_rm75/config/rm75_placo_controller.yaml
+```
 
-默认关节限位对应 RM75 七轴规格。真实运行前必须根据安装环境缩小
-`config/rm75_deployment.yaml` 的工作空间，并依次完成 dry-run、仿真和低速
-实机验证。完整说明见仓库 `docs/ros2_fastumi_pipeline.md`。
+激活 Placo 环境后也可使用单节点 launch。launch 会调用当前 `PATH` 中的 `python3`，
+也可通过 `python_executable` 指定解释器：
+
+```bash
+ros2 launch fastumi_rm75 rm75_placo_controller.launch.py
+ros2 launch fastumi_rm75 rm75_placo_controller.launch.py \
+  python_executable:=/path/to/placo-venv/bin/python
+```
+
+`urdf_path` 留空时使用随包安装、且与推理端字节一致的精简 RM75 URDF。控制频率、
+URDF 速度比例、反馈超时及全部话题均可在 `config/rm75_placo_controller.yaml` 覆盖。
+
+节点按消息中的观测时间和预测偏移执行，跳过过期点。更新的预测会替换旧序列余段；
+反馈丢失、序列结束或求解失败后，必须收到新鲜反馈和一条新的预测才会恢复。
+
+原有 `rm75_policy_bridge` 和 `gripper_bridge` 仍保留，供旧笛卡尔透传部署使用；不得与
+Placo 控制节点同时向同一台机械臂或夹爪发布命令。
+
+## 验证
+
+```bash
+PYTHONPATH=src/fastumi_rm75 python -m pytest \
+  src/fastumi_rm75/test/test_placo_control.py \
+  src/fastumi_rm75/test/test_placo_ik.py -q
+```
+
+实机测试前检查只有一个 `/rm_driver/movej_canfd_cmd` 和
+`/motion_control/gripper_command` 发布者，并确认关节反馈频率、时间戳及急停可用。

@@ -4,16 +4,51 @@
 
 ## 环境
 
-项目固定使用 Python `>=3.12,<3.13` 和目标目录的 uv 环境。以下带
-`cd model/dp` 的命令均从 FastUMI 仓库根目录执行：
+`jetson_dev` 分支面向 Jetson AGX Orin 原生部署，验证基线为 JetPack 6.2.1、
+Ubuntu 22.04、CUDA 12.6、ROS 2 Humble 和系统 Python 3.10。项目的 uv 锁文件仅解析
+Linux/aarch64；不支持 x86_64、Python 3.12 或 CUDA 13。
+
+先确认 JetPack 与 Humble 已安装，并准备 PyTorch 所需的系统库：
+
+```bash
+test -f /etc/nv_tegra_release
+test -f /opt/ros/humble/setup.bash
+sudo apt-get update
+sudo apt-get install -y python3-dev libopenblas-dev
+```
+
+以下命令从 FastUMI 仓库根目录执行。`--clear` 会重建项目本地的 `.venv`；
+`--system-site-packages` 使 Python 3.10 环境能够使用 Humble 的系统依赖：
 
 ```bash
 cd model/dp
-uv sync --all-groups
+uv venv --clear --python /usr/bin/python3 --system-site-packages .venv
+uv sync --all-groups --locked
+source /opt/ros/humble/setup.bash
 uv lock --check
 ```
 
-`torch==2.12.1` 与 `torchvision==0.27.1` 从官方 PyTorch CUDA 13.0 索引解析。请始终通过 `uv run` 或 `.venv/bin/python` 运行，项目不依赖原 UMI 仓库或其环境。
+`torch==2.8.0` 与 `torchvision==0.23.0` 从 Jetson JP6/CUDA 12.6 索引解析，
+wheel URL 和哈希由 `uv.lock` 固定。首次同步需要下载较大的 Jetson PyTorch wheel。
+非 ROS 命令通过 `uv run --no-sync` 或 `.venv/bin/python` 运行；ROS 命令还须在同一
+终端先 source Humble。可用下面的命令验证 Python、CUDA 和 ROS Python 接口：
+
+```bash
+uv run --no-sync python - <<'PY'
+import rclpy
+import torch
+import torchvision
+
+assert torch.__version__.split("+")[0] == "2.8.0"
+assert torchvision.__version__.split("+")[0] == "0.23.0"
+assert torch.cuda.is_available()
+value = (torch.ones(1, device="cuda") * 2).item()
+print(f"torch={torch.__version__}, torchvision={torchvision.__version__}, cuda={torch.version.cuda}, value={value}")
+PY
+```
+
+该 AGX 环境用于 CUDA 推理和 ROS 2 部署；下文训练命令保留为工作流参考，不属于 AGX
+性能验收范围。项目不依赖原 UMI 仓库或其环境。
 
 ## FastUMI canonical 训练路径
 
@@ -83,28 +118,26 @@ uv run python infer_sim.py --help
 uv run python infer_fastumi_sim.py --help
 ```
 
-真实机器人入口 `infer_real.py` 属于硬件系统集成。控制器实现由外部硬件适配包提供，
-并通过 `--controller-factory 模块:属性` 显式指定；工厂对象必须提供
-`create_controller(name)` 接口。例如：
+真实机器人入口 `infer_real.py` 是 RM75 + Unitree 的纯推理 ROS 2 入口。默认加载
+`~/data/model/DP/checkpoints/best.ckpt`，读取相机、关节与夹爪状态并持续发布
+`/fastumi/policy/action_sequence`：
 
 ```bash
-uv run python infer_real.py \
-  --ckpt_path /path/to/canonical.ckpt \
-  --controller-factory my_robot.controller:ArmControllerFactory
+bash model/dp/run_infer_real.sh
 ```
 
-硬件适配包需要预先安装到当前 uv 环境，或通过受控的 `PYTHONPATH` 提供。本迁移不把
-帮助命令、模块导入或工厂解析成功等同于硬件验证。
+该入口不创建机器人执行器，也不发布关节或夹爪命令。实机控制由 ROS 工作区的
+`fastumi_rm75/rm75_placo_controller` 独立承担。
 
 ROS 2 依赖不通过 PyPI 安装。运行 ROS 节点前先执行：
 
 ```bash
-source /opt/ros/jazzy/setup.bash
+source /opt/ros/humble/setup.bash
 cd model/dp
 uv run --no-sync python infer_fastumi_sim.py --ckpt_path /path/to/legacy.ckpt
 ```
 
-`rclpy`、`geometry_msgs`、`sensor_msgs` 和 `std_msgs` 由 Jazzy 提供。
+`rclpy`、`geometry_msgs`、`sensor_msgs` 和 `std_msgs` 由 Humble 提供。
 
 ## 测试
 
@@ -305,3 +338,13 @@ uv run --no-sync python plot_vr_umi_validation.py \
 使用 VR UMI 五键/10D 模型，发布带观测时间的完整 16 步绝对 Link7 位姿和夹爪目标。
 支持可扩展后处理、episode 重置与过期结果丢弃。
 构建、启动、消息契约和真实模型回放验证见 [ROS2 推理说明](vr_umi_ros/README.md)。
+
+RM75 与 Unitree 部署时，先启动纯推理入口，再在安装 Placo 的独立 Python 环境中启动
+`rm75_placo_controller`。推理入口只发布绝对 Link7 与夹爪目标：
+
+```bash
+bash model/dp/run_infer_real.sh
+```
+
+控制节点默认连接实机；首次联调使用 `dry_run:=true`。完整接口、环境和验收顺序见
+[ROS2 推理说明](vr_umi_ros/README.md) 与 `ros2_ws/src/fastumi_rm75/README.md`。

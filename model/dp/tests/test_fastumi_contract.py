@@ -5,7 +5,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import hydra
 import numpy as np
@@ -20,7 +20,8 @@ from infer_fastumi_sim import (
     FASTUMI_RGB_KEY,
     validate_fastumi_shape_meta,
 )
-from infer_real import load_controller_factory
+from infer_real import DEFAULT_CHECKPOINT, DEFAULT_URDF, parse_args
+from vr_umi_ros.core import TRUSTED_LEGACY_URDF_SHA256, file_sha256
 
 
 PROJECT_ROOT = pathlib.Path(__file__).parents[1]
@@ -75,37 +76,24 @@ def test_supported_entrypoints_are_target_local():
         assert "/home/" not in content
 
 
-def test_real_controller_factory_is_loaded_from_explicit_module(monkeypatch):
-    """真实机器人控制器工厂应从调用方指定的模块加载。"""
-
-    class TestControllerFactory:
-        """提供测试使用的最小控制器工厂接口。"""
-
-        @staticmethod
-        def create_controller(name):
-            """返回控制器名称，证明工厂接口可调用。"""
-            return name
-
-    module = ModuleType("fastumi_test_controller")
-    module.ControllerFactory = TestControllerFactory
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-
-    factory = load_controller_factory(
-        "fastumi_test_controller:ControllerFactory"
-    )
-
-    assert factory is TestControllerFactory
-    assert factory.create_controller("realman_gen72") == "realman_gen72"
+def test_real_entrypoint_uses_operator_checkpoint_default():
+    """实机入口默认使用当前操作员目录下的 DP 最佳模型。"""
+    assert DEFAULT_CHECKPOINT == pathlib.Path.home() / "data/model/DP/checkpoints/best.ckpt"
+    assert parse_args([]).checkpoint == DEFAULT_CHECKPOINT
+    assert parse_args(["--ckpt_path", "/tmp/model.ckpt"]).checkpoint == pathlib.Path(
+        "/tmp/model.ckpt")
+    assert file_sha256(DEFAULT_URDF) == TRUSTED_LEGACY_URDF_SHA256
 
 
-@pytest.mark.parametrize(
-    "factory_spec",
-    ["missing_separator", ":ControllerFactory", "module:"],
-)
-def test_real_controller_factory_rejects_invalid_spec(factory_spec):
-    """控制器工厂路径格式错误时应在硬件启动前给出明确错误。"""
-    with pytest.raises(ValueError, match="模块:属性"):
-        load_controller_factory(factory_spec)
+def test_real_entrypoint_is_inference_only():
+    """实机推理入口不再创建或导入硬件执行器。"""
+    source = (PROJECT_ROOT / "infer_real.py").read_text(encoding="utf-8")
+    arguments = parse_args([])
+    assert "RealRobotExecutor" not in source
+    assert "--enable-motion" not in source
+    assert "--report-root" not in source
+    assert not hasattr(arguments, "enable_motion")
+    assert not hasattr(arguments, "report_root")
 
 
 def test_canonical_hydra_contract_is_five_key_ten_dimensional():

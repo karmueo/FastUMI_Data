@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RM75 deployment kinematic chain. Visual/inertial data is intentionally omitted. -->
+<robot name="rm_75_kinematic">
+  <link name="base_link"/>
+  <link name="Link1"/>
+  <link name="Link2"/>
+  <link name="Link3"/>
+  <link name="Link4"/>
+  <link name="Link5"/>
+  <link name="Link6"/>
+  <link name="Link7"/>
+  <joint name="joint1" type="revolute">
+    <origin xyz="0 0 0.2405" rpy="-1.5708 0 0"/>
+    <parent link="base_link"/><child link="Link1"/><axis xyz="0 -1 0"/>
+    <limit lower="-3.1" upper="3.1" effort="60" velocity="3.14"/>
+  </joint>
+  <joint name="joint2" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+    <parent link="Link1"/><child link="Link2"/><axis xyz="0 1 0"/>
+    <limit lower="-2.268" upper="2.268" effort="60" velocity="3.14"/>
+  </joint>
+  <joint name="joint3" type="revolute">
+    <origin xyz="0 0 0.256" rpy="-1.5708 0 0"/>
+    <parent link="Link2"/><child link="Link3"/><axis xyz="0 -1 0"/>
+    <limit lower="-3.1" upper="3.1" effort="30" velocity="3.92"/>
+  </joint>
+  <joint name="joint4" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+    <parent link="Link3"/><child link="Link4"/><axis xyz="0 1 0"/>
+    <limit lower="-2.355" upper="2.355" effort="30" velocity="3.92"/>
+  </joint>
+  <joint name="joint5" type="revolute">
+    <origin xyz="0 0 0.21" rpy="-1.5708 0 0"/>
+    <parent link="Link4"/><child link="Link5"/><axis xyz="0 -1 0"/>
+    <limit lower="-3.1" upper="3.1" effort="10" velocity="3.92"/>
+  </joint>
+  <joint name="joint6" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+    <parent link="Link5"/><child link="Link6"/><axis xyz="0 1 0"/>
+    <limit lower="-2.233" upper="2.233" effort="10" velocity="3.92"/>
+  </joint>
+  <joint name="joint7" type="revolute">
+    <origin xyz="0 0 0.144" rpy="0 0 0"/>
+    <parent link="Link6"/><child link="Link7"/><axis xyz="0 0 1"/>
+    <limit lower="-6.28" upper="6.28" effort="10" velocity="3.92"/>
+  </joint>
+</robot>

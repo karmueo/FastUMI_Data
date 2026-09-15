@@ -55,7 +55,7 @@ def _ensure_ros2_available():
         error_detail = f" Original import error: {_ROS_IMPORT_ERROR}" if _ROS_IMPORT_ERROR else ""
         raise RuntimeError(
             "ROS 2 Python packages are not available. Please run "
-            "`source /opt/ros/jazzy/setup.bash` before launching DP inference."
+            "`source /opt/ros/humble/setup.bash` before launching DP inference."
             f"{error_detail}"
         )
 

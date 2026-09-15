@@ -21,18 +21,20 @@ setup(
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),
         (f"share/{PACKAGE_NAME}/config", glob("config/*.yaml")),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
+        (f"share/{PACKAGE_NAME}/assets", glob("assets/*")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["placo>=0.9.23", "setuptools"],
     zip_safe=True,
     maintainer="FastUMI Maintainer",
     maintainer_email="maintainer@example.com",
-    description="FastUMI RM75 笛卡尔透传与平行夹爪安全适配。",
+    description="FastUMI RM75 Placo 关节控制与夹爪适配。",
     license="Apache-2.0",
-    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "rm75_policy_bridge = "
             "fastumi_rm75.rm75_policy_bridge:main",
+            "rm75_placo_controller = "
+            "fastumi_rm75.rm75_placo_controller:main",
             "gripper_bridge = fastumi_rm75.gripper_bridge_node:main",
         ],
     },

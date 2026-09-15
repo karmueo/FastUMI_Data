@@ -1,0 +1,16 @@
+# Placo 关节控制器默认直接连接实机；首次联调请覆盖 dry_run:=true。
+rm75_placo_controller:
+  ros__parameters:
+    dry_run: false
+    urdf_path: ""
+    control_rate_hz: 50.0
+    velocity_scale: 0.25
+    joint_state_timeout_s: 0.25
+    base_frame: base_link
+    end_frame: Link7
+    joint_state_topic: /joint_states
+    policy_topic: /fastumi/policy/action_sequence
+    joint_command_topic: /rm_driver/movej_canfd_cmd
+    gripper_command_topic: /motion_control/gripper_command
+    debug_joint_topic: /fastumi/rm75/placo/joint_command
+    stop_topic: /rm_driver/move_stop_cmd
