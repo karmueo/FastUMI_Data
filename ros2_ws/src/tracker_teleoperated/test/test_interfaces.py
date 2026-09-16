@@ -68,7 +68,6 @@ class ReferenceState:
             make_pose(rpy_deg=(5.0, 40.0, -20.0))
         )
         self._axis_mapping = np.eye(3)
-        self._auto_mapping_enabled = False
         self._mapping_mode = "reference_eef"
         self._mapping_basis = None
         self._reference_tracker_pose = None
@@ -109,11 +108,10 @@ class FakePublisher:
 
 
 class CommandPublishingState:
-    """承载 dry-run 指令发布测试所需的最小节点状态。"""
+    """承载指令发布测试所需的最小节点状态。"""
 
-    def __init__(self, dry_run):
+    def __init__(self):
         """创建可记录调试目标和驱动命令的发布状态。"""
-        self._dry_run = dry_run
         self._command_publisher = FakePublisher()
         self.joint_targets = []
 
@@ -135,7 +133,6 @@ class WorkspaceCalibrationState:
         """创建暂停、输入健康且尚未标定的节点状态。"""
         self._mapping_mode = "workspace"
         self._workspace_minimum_angle_deg = 60.0
-        self._auto_mapping_enabled = False
         self._enabled = False
         self._homing = False
         self._latest_tracker_pose = make_pose()
@@ -180,9 +177,8 @@ class HomeState:
     _stop_homing = TrackerTeleopNode._stop_homing
     _publish_status = TrackerTeleopNode._publish_status
 
-    def __init__(self, dry_run=False):
+    def __init__(self):
         """创建具有新鲜反馈和已记录初始位姿的暂停状态。"""
-        self._dry_run = dry_run
         self._enabled = False
         self._homing = False
         self._home_started_monotonic = 0.0
@@ -410,26 +406,18 @@ def test_keyboard_home_key_mapping(key, expected):
     assert is_home_key(key) is expected
 
 
-def test_auto_mapping_keyboard_instructions_hide_calibration_key():
-    """验证自动映射提示隐藏 c 键并给出坐标对齐和启用步骤。"""
-    instructions = keyboard_instructions(auto_mapping_enabled=True)
-
-    assert "[c]" not in instructions
-    assert "[i]" not in instructions
-    assert "+X/+Y/+Z" in instructions
-    assert "[空格]" in instructions
-
-
-def test_workspace_keyboard_instructions_keep_calibration_key():
-    """验证工作空间模式显示大致方向和等权拟合操作。"""
-    instructions = keyboard_instructions(auto_mapping_enabled=False)
+def test_keyboard_instructions_cover_both_mapping_modes():
+    """验证键盘提示工作空间标定和参考末端模式的启用步骤。"""
+    instructions = keyboard_instructions()
 
     assert "[c]" in instructions
     assert "[i]" not in instructions
+    assert "mapping_mode=workspace" in instructions
+    assert "mapping_mode=reference_eef" in instructions
     assert "起点" in instructions
     assert "大致向上" in instructions
     assert "大致向前" in instructions
-    assert "平均" in instructions
+    assert "[空格]" in instructions
 
 
 def test_keyboard_displays_async_pause_and_mapping_preservation(capsys):
@@ -448,6 +436,18 @@ def test_keyboard_displays_async_pause_and_mapping_preservation(capsys):
     assert output.count("Tracker 位姿发生跳变") == 1
     assert "标定方向已保留" in output
     assert requested_state_for_key(" ", keyboard.enabled) is True
+
+
+def test_shutdown_request_marks_control_node_for_exit():
+    """验证键盘退出请求会让控制节点结束主循环。"""
+    state = SimpleNamespace(_shutdown_requested=False)
+
+    response = TrackerTeleopNode._shutdown_callback(
+        state, Trigger.Request(), Trigger.Response()
+    )
+
+    assert response.success
+    assert state._shutdown_requested
 
 
 def make_joint_state(positions):
@@ -521,7 +521,7 @@ def test_default_yaml_uses_configured_home_target():
         ]
     )
     assert parameters["workspace_minimum_angle_deg"] == pytest.approx(60.0)
-    assert parameters["auto_mapping_enabled"] is False
+    assert parameters["mapping_mode"] == "workspace"
     assert parameters["translation_scale"] == pytest.approx(1.0)
 
 
@@ -554,18 +554,6 @@ def test_return_home_pauses_teleop_and_publishes_movej():
     assert state._reference_tracker_pose is None
     assert state._reference_eef_pose is None
     assert state._mapping_basis == pytest.approx(original_mapping)
-
-
-def test_return_home_dry_run_only_publishes_debug_target():
-    """验证 dry-run 回位不会向机械臂驱动发布 MoveJ。"""
-    state = HomeState(dry_run=True)
-
-    response = call_return_home(state)
-
-    assert response.success and "dry-run" in response.message
-    assert not state._homing
-    assert len(state.joint_targets) == 1
-    assert state._home_publisher.messages == []
 
 
 def test_return_home_rejects_missing_or_stale_joint_feedback():
@@ -704,8 +692,8 @@ def test_workspace_calibration_rejects_near_collinear_samples():
     assert state.saved_mapping is None
 
 
-def test_dry_run_accepts_approximate_calibration_without_driver_command():
-    """验证粗略方向可完成标定，且 dry-run 只发布调试关节目标。"""
+def test_approximate_calibration_is_accepted():
+    """验证粗略方向可完成工作空间标定。"""
     calibration_state = WorkspaceCalibrationState()
     calibration_state._workspace_minimum_angle_deg = 45.0
     call_workspace_calibration(calibration_state)
@@ -718,14 +706,22 @@ def test_dry_run_accepts_approximate_calibration_without_driver_command():
     )
 
     response = call_workspace_calibration(calibration_state)
-    publishing_state = CommandPublishingState(dry_run=True)
-    target_positions = np.linspace(-0.2, 0.2, 7)
-    TrackerTeleopNode._publish_command(publishing_state, target_positions)
-
     assert response.success and "标定完成" in response.message
     assert calibration_state._mapping_basis is not None
+
+
+def test_publish_command_sends_debug_target_and_driver_command():
+    """验证关节目标同时发布到调试和 RM75 CANFD 话题。"""
+    publishing_state = CommandPublishingState()
+    target_positions = np.linspace(-0.2, 0.2, 7)
+
+    TrackerTeleopNode._publish_command(publishing_state, target_positions)
+
     assert publishing_state.joint_targets[0] == pytest.approx(target_positions)
-    assert publishing_state._command_publisher.messages == []
+    assert len(publishing_state._command_publisher.messages) == 1
+    assert publishing_state._command_publisher.messages[0].joint == pytest.approx(
+        target_positions
+    )
 
 
 def test_failed_workspace_calibration_keeps_last_successful_basis():
@@ -814,30 +810,17 @@ def test_pause_cancels_pending_workspace_calibration():
     assert state._mapping_basis == pytest.approx(old_basis)
 
 
-def test_auto_mapping_rejects_workspace_calibration():
-    """验证自动映射模式不采集工作空间标定点。"""
+def test_reference_eef_rejects_workspace_calibration():
+    """验证参考末端模式不采集工作空间标定点。"""
     state = WorkspaceCalibrationState()
-    state._auto_mapping_enabled = True
+    state._mapping_mode = "reference_eef"
     state._mapping_basis = np.eye(3)
 
     response = call_workspace_calibration(state)
 
     assert not response.success
-    assert "自动映射" in response.message
+    assert "reference_eef" in response.message
     assert state._workspace_calibration_samples == []
-    assert state._mapping_basis == pytest.approx(np.eye(3))
-
-
-def test_auto_mapping_capture_forces_identity_basis():
-    """验证自动映射忽略参考末端姿态和安装轴向。"""
-    state = ReferenceState()
-    state._auto_mapping_enabled = True
-    state._axis_mapping = Rotation.from_euler(
-        "z", 90.0, degrees=True
-    ).as_matrix()
-
-    assert TrackerTeleopNode._capture_reference(state, True) is None
-
     assert state._mapping_basis == pytest.approx(np.eye(3))
 
 

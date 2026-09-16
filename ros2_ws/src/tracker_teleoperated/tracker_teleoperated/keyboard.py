@@ -17,6 +17,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool, Empty, String
 from std_srvs.srv import SetBool, Trigger
 
@@ -87,26 +88,19 @@ def is_home_key(key: Optional[str]) -> bool:
     return key in ("h", "H")
 
 
-def keyboard_instructions(auto_mapping_enabled: bool) -> str:
-    """按实际映射模式生成键盘快捷键和下一步操作提示。"""
+def keyboard_instructions() -> str:
+    """说明两种映射模式的启用步骤和键盘快捷键。"""
     common_keys = (
         "[h] 回到配置的关节位姿，"
         "[空格] 启用/暂停，[s] 暂停并取消当前操作，"
         "[q] 暂停并退出"
     )
-    if auto_mapping_enabled:
-        return (
-            "当前为自动映射模式，无需执行三点工作空间标定。\n"
-            "请确认 Tracker odom 的 +X/+Y/+Z 与机械臂 Base "
-            "+X/+Y/+Z 对齐，待跟踪稳定后将 UMI 移到操作起点，"
-            "然后按 [空格] 启用遥操。\n"
-            f"快捷键: {common_keys}"
-        )
     return (
-        "当前为工作空间标定模式。\n"
-        "请依次在起点、大致向上移动后、从当前位置大致向前移动后按 [c]；"
-        "标定会平均修正两段方向偏差并保存；后续启停和回位会保留标定方向。"
-        "完成后按 [空格] 启用遥操。\n"
+        "mapping_mode=workspace：请依次在起点、大致向上移动后、"
+        "从当前位置大致向前移动后按 [c]；"
+        "标定方向会保存，完成后按 [空格] 启用遥操。\n"
+        "mapping_mode=reference_eef：跟踪稳定后将 UMI 移到操作起点，"
+        "直接按 [空格] 启用遥操。\n"
         f"快捷键: [c] 记录工作空间标定点，{common_keys}"
     )
 
@@ -118,7 +112,6 @@ class TrackerTeleopKeyboard(Node):
         """创建心跳、状态订阅和启停服务客户端。"""
         super().__init__("tracker_teleop_keyboard")
         self.enabled = False
-        self.auto_mapping_enabled: Optional[bool] = None
         # 最近显示的状态说明，用于避免相同提示重复刷屏。
         self._last_status = ""
         state_qos = QoSProfile(
@@ -142,12 +135,6 @@ class TrackerTeleopKeyboard(Node):
             self._status_callback,
             state_qos,
         )
-        self.create_subscription(
-            Bool,
-            "/tracker_teleoperated/auto_mapping_enabled",
-            self._auto_mapping_callback,
-            state_qos,
-        )
         self._service_client = self.create_client(
             SetBool, "/tracker_teleoperated/set_enabled"
         )
@@ -156,6 +143,9 @@ class TrackerTeleopKeyboard(Node):
         )
         self._home_client = self.create_client(
             Trigger, "/tracker_teleoperated/return_home"
+        )
+        self._shutdown_client = self.create_client(
+            Trigger, "/tracker_teleoperated/shutdown"
         )
         self.create_timer(0.1, self._publish_heartbeat)
 
@@ -168,19 +158,6 @@ class TrackerTeleopKeyboard(Node):
         if message.data and message.data != self._last_status:
             self._last_status = message.data
             print(f"\n[控制状态] {message.data}", flush=True)
-
-    def _auto_mapping_callback(self, message: Bool) -> None:
-        """同步控制节点实际生效的自动映射状态。"""
-        self.auto_mapping_enabled = bool(message.data)
-
-    def wait_for_configuration(self, timeout_s: float = 3.0) -> None:
-        """等待控制节点的映射状态，避免显示错误操作提示。"""
-        deadline = time.monotonic() + timeout_s
-        while rclpy.ok() and self.auto_mapping_enabled is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                raise RuntimeError("未收到控制节点的映射模式状态")
-            rclpy.spin_once(self, timeout_sec=min(0.1, remaining))
 
     def _publish_heartbeat(self) -> None:
         """以 10 Hz 告知控制节点键盘进程仍然存活。"""
@@ -229,15 +206,27 @@ class TrackerTeleopKeyboard(Node):
             raise RuntimeError(response.message)
         return str(response.message)
 
+    def request_shutdown(self, timeout_s: float = 1.0) -> str:
+        """请求控制节点退出，使独立运行的键盘也能关闭遥操 launch。"""
+        if not self._shutdown_client.wait_for_service(timeout_sec=timeout_s):
+            raise RuntimeError("控制节点退出服务未就绪")
+        future = self._shutdown_client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_s)
+        response = future.result()
+        if response is None:
+            raise RuntimeError("控制节点退出服务调用超时")
+        if not response.success:
+            raise RuntimeError(response.message)
+        return str(response.message)
+
 
 def main(args=None) -> None:
     """运行键盘循环；退出前始终请求暂停机械臂。"""
-    rclpy.init(args=args)
+    # 保留 ROS 上下文到退出请求完成，确保 Ctrl+C 也能通知控制节点。
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = TrackerTeleopKeyboard()
     try:
-        node.wait_for_configuration()
-        assert node.auto_mapping_enabled is not None
-        print(keyboard_instructions(node.auto_mapping_enabled))
+        print(keyboard_instructions())
         with TerminalKeyReader() as reader:
             if not reader.enabled:
                 raise RuntimeError("键盘节点需要交互式终端")
@@ -247,12 +236,6 @@ def main(args=None) -> None:
                 if key in ("q", "Q"):
                     break
                 if is_calibrate_key(key):
-                    if node.auto_mapping_enabled:
-                        print(
-                            "自动映射已启用，无需标定；请对齐坐标轴，"
-                            "将 UMI 移到操作起点后按空格启用。"
-                        )
-                        continue
                     try:
                         print(node.request_workspace_calibration())
                     except RuntimeError as error:
@@ -280,6 +263,10 @@ def main(args=None) -> None:
             print(node.request_enabled(False, timeout_s=1.0))
         except RuntimeError as error:
             print(f"退出时暂停请求失败: {error}")
+        try:
+            print(node.request_shutdown(timeout_s=1.0))
+        except RuntimeError as error:
+            print(f"退出时控制节点关闭请求失败: {error}")
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

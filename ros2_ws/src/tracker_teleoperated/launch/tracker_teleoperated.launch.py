@@ -69,12 +69,24 @@ def generate_launch_description() -> LaunchDescription:
             ],
         )
     )
+    # 手动启动的键盘可请求控制节点退出，由此关闭整个 launch。
+    control_exit_handler = RegisterEventHandler(
+        OnProcessExit(
+            target_action=control_node,
+            on_exit=[
+                EmitEvent(
+                    event=Shutdown(reason="Tracker 遥操控制节点已退出")
+                )
+            ],
+        )
+    )
     return LaunchDescription(
         [
             config_argument,
             keyboard_argument,
             keyboard_prefix_argument,
             keyboard_exit_handler,
+            control_exit_handler,
             control_node,
             keyboard_node,
         ]

@@ -136,7 +136,6 @@ class TrackerTeleopNode(Node):
         """加载参数、创建 ROS 接口并保持初始暂停状态。"""
         super().__init__("tracker_teleop")
         self._declare_parameters()
-        self._dry_run = bool(self.get_parameter("dry_run").value)
         self._base_frame = str(self.get_parameter("base_frame").value)
         self._odom_frame = str(self.get_parameter("odom_frame").value)
         self._home_speed_percent = int(
@@ -169,9 +168,6 @@ class TrackerTeleopNode(Node):
             self.get_parameter("rotation_scale").value,
             "rotation_scale",
         )
-        self._auto_mapping_enabled = bool(
-            self.get_parameter("auto_mapping_enabled").value
-        )
         self._mapping_mode = str(self.get_parameter("mapping_mode").value)
         if self._mapping_mode not in ("workspace", "reference_eef"):
             raise ValueError(
@@ -192,7 +188,7 @@ class TrackerTeleopNode(Node):
         )
         loaded_workspace_mapping: Optional[np.ndarray] = None
         workspace_load_message = ""
-        if not self._auto_mapping_enabled and self._mapping_mode == "workspace":
+        if self._mapping_mode == "workspace":
             try:
                 loaded_workspace_mapping = load_workspace_calibration(
                     self._workspace_calibration_path,
@@ -316,11 +312,6 @@ class TrackerTeleopNode(Node):
         self._status_publisher = self.create_publisher(
             String, "/tracker_teleoperated/status", state_qos
         )
-        self._auto_mapping_publisher = self.create_publisher(
-            Bool,
-            "/tracker_teleoperated/auto_mapping_enabled",
-            state_qos,
-        )
         self.create_subscription(
             Odometry,
             str(self.get_parameter("tracker_odom_topic").value),
@@ -371,8 +362,15 @@ class TrackerTeleopNode(Node):
             "/tracker_teleoperated/return_home",
             self._return_home_callback,
         )
+        self.create_service(
+            Trigger,
+            "/tracker_teleoperated/shutdown",
+            self._shutdown_callback,
+        )
 
         self._enabled = False
+        # 键盘请求退出后，由主循环完成安全收尾并结束控制进程。
+        self._shutdown_requested = False
         self._latest_status_valid = False
         self._latest_status_stamp_ns: Optional[int] = None
         self._pending_tracker_sample: Optional[tuple[int, np.ndarray]] = None
@@ -384,11 +382,7 @@ class TrackerTeleopNode(Node):
         self._homing = False
         self._home_started_monotonic = 0.0
         self._latest_heartbeat_monotonic = 0.0
-        self._mapping_basis: Optional[np.ndarray] = (
-            np.eye(3, dtype=np.float64)
-            if self._auto_mapping_enabled
-            else loaded_workspace_mapping
-        )
+        self._mapping_basis: Optional[np.ndarray] = loaded_workspace_mapping
         self._workspace_calibration_samples: list[np.ndarray] = []
         self._reference_tracker_pose: Optional[np.ndarray] = None
         self._reference_eef_pose: Optional[np.ndarray] = None
@@ -404,12 +398,8 @@ class TrackerTeleopNode(Node):
             workspace_load_message
             or "遥操已暂停，等待标定或人工启用"
         )
-        self._auto_mapping_publisher.publish(
-            Bool(data=self._auto_mapping_enabled)
-        )
         self.get_logger().info(
-            f"Tracker 遥操节点已启动，dry_run={self._dry_run}，默认暂停，"
-            f"auto_mapping_enabled={self._auto_mapping_enabled}，"
+            "Tracker 遥操节点已启动，默认暂停，"
             f"mapping_mode={self._mapping_mode}，"
             f"控制频率={self._control_rate_hz:g} Hz"
         )
@@ -429,7 +419,6 @@ class TrackerTeleopNode(Node):
 
     def _declare_parameters(self) -> None:
         """声明遥操接口、坐标映射、平滑和安全参数。"""
-        self.declare_parameter("dry_run", True)
         self.declare_parameter("tracker_odom_topic", "/vive_tracker/odom")
         self.declare_parameter("tracker_status_topic", "/vive_tracker/status")
         self.declare_parameter("joint_state_topic", "/joint_states")
@@ -457,7 +446,6 @@ class TrackerTeleopNode(Node):
         self.declare_parameter("control_rate_hz", 50.0)
         self.declare_parameter("translation_scale", 0.5)
         self.declare_parameter("rotation_scale", 1.0)
-        self.declare_parameter("auto_mapping_enabled", False)
         self.declare_parameter("mapping_mode", "workspace")
         self.declare_parameter("workspace_minimum_angle_deg", 60.0)
         self.declare_parameter("workspace_calibration_file", "")
@@ -672,7 +660,7 @@ class TrackerTeleopNode(Node):
         """退出回位状态，并按需请求 RM75 停止当前规划轨迹。"""
         if not self._homing:
             return False
-        if publish_stop and not self._dry_run:
+        if publish_stop:
             self._move_stop_publisher.publish(Empty())
         self._homing = False
         self._home_started_monotonic = 0.0
@@ -715,10 +703,6 @@ class TrackerTeleopNode(Node):
         if self._homing:
             response.success = False
             response.message = "机械臂正在回位，不能采集工作空间标定点"
-            return response
-        if self._auto_mapping_enabled:
-            response.success = False
-            response.message = "已启用自动映射，不使用工作空间标定"
             return response
         if self._mapping_mode != "workspace":
             response.success = False
@@ -814,9 +798,7 @@ class TrackerTeleopNode(Node):
                 self._kinematics.end_effector_pose(joint_reference),
                 "末端参考位姿",
             )
-            if self._auto_mapping_enabled:
-                mapping_basis = np.eye(3, dtype=np.float64)
-            elif initialize_mapping and self._mapping_mode == "reference_eef":
+            if initialize_mapping and self._mapping_mode == "reference_eef":
                 mapping_basis = mapping_basis_from_reference(
                     tracker_reference,
                     eef_reference,
@@ -850,10 +832,7 @@ class TrackerTeleopNode(Node):
             response.success = False
             response.message = "工作空间标定尚未完成，请完成标定或按 s 取消"
             return response
-        initialize_mapping = bool(
-            not self._auto_mapping_enabled
-            and self._mapping_mode == "reference_eef"
-        )
+        initialize_mapping = self._mapping_mode == "reference_eef"
         error = self._capture_reference(initialize_mapping=initialize_mapping)
         if error is not None:
             response.success = False
@@ -892,12 +871,6 @@ class TrackerTeleopNode(Node):
         self._clear_control_reference()
         home_positions = self._home_joint_positions.copy()
         self._publish_joint_target(home_positions)
-        if self._dry_run:
-            response.success = True
-            response.message = "dry-run：已发布回位关节目标，未发送 MoveJ"
-            self._publish_status(f"遥操已暂停；{response.message}")
-            return response
-
         command = build_home_command(
             home_positions, self._home_speed_percent
         )
@@ -911,6 +884,15 @@ class TrackerTeleopNode(Node):
         )
         self.get_logger().warning(response.message)
         self._publish_status(response.message)
+        return response
+
+    def _shutdown_callback(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        """确认键盘退出请求，让主循环安全停止控制节点。"""
+        self._shutdown_requested = True
+        response.success = True
+        response.message = "控制节点已收到退出请求"
         return response
 
     def _set_enabled_callback(
@@ -943,17 +925,12 @@ class TrackerTeleopNode(Node):
             response.success = False
             response.message = "工作空间标定尚未完成，请继续按 c 或按 s 取消"
             return response
-        if (
-            not self._auto_mapping_enabled
-            and self._mapping_mode == "workspace"
-            and self._mapping_basis is None
-        ):
+        if self._mapping_mode == "workspace" and self._mapping_basis is None:
             response.success = False
             response.message = "尚未标定工作空间，请暂停状态下按 c 完成三点标定"
             return response
-        initialize_mapping = bool(
-            not self._auto_mapping_enabled
-            and self._mapping_mode == "reference_eef"
+        initialize_mapping = (
+            self._mapping_mode == "reference_eef"
             and self._mapping_basis is None
         )
         reference_error = self._capture_reference(initialize_mapping)
@@ -981,10 +958,9 @@ class TrackerTeleopNode(Node):
         self._joint_target_publisher.publish(joint_message)
 
     def _publish_command(self, positions: np.ndarray) -> None:
-        """发布调试关节目标，并按 dry-run 设置决定是否发送 CANFD。"""
+        """发布调试关节目标和 RM75 CANFD 指令。"""
         self._publish_joint_target(positions)
-        if not self._dry_run:
-            self._command_publisher.publish(build_joint_command(positions))
+        self._command_publisher.publish(build_joint_command(positions))
 
     def _disable(self, reason: str, publish_hold: bool) -> None:
         """停止当前跟随、按条件发送一次保持点并清除控制参考。"""
@@ -1101,7 +1077,8 @@ def main(args=None) -> None:
     node: Optional[TrackerTeleopNode] = None
     try:
         node = TrackerTeleopNode()
-        rclpy.spin(node)
+        while rclpy.ok() and not node._shutdown_requested:
+            rclpy.spin_once(node)
     except KeyboardInterrupt:
         pass
     finally:

@@ -1,9 +1,6 @@
 # 该文件定义 VIVE Tracker 遥操 RM75 的默认接口、坐标映射和平滑安全参数。
 tracker_teleop:
   ros__parameters:
-    # 默认发送实机指令；首次联调时在配置副本中改为 true。
-    dry_run: false
-
     # 输入与 RM75 CANFD 输出话题，均可通过参数或 ROS remap 覆盖。
     tracker_odom_topic: /vive_tracker/odom
     tracker_status_topic: /vive_tracker/status
@@ -33,9 +30,6 @@ tracker_teleop:
 
     # workspace 通过三点平移标定固定的 Base 前/左/上方向；reference_eef
     # 保留按初始化末端姿态和安装旋转建立轴向的兼容模式。
-    # 启用自动映射时固定使用 odom XYZ 到 Base XYZ 的单位映射，
-    # mapping_mode 和 axis_mapping_rpy_deg 不参与映射计算。
-    auto_mapping_enabled: false
     mapping_mode: workspace
     # 向上和向前位移夹角须位于 [此值, 180°-此值]，避免近乎共线的标定。
     workspace_minimum_angle_deg: 60.0
