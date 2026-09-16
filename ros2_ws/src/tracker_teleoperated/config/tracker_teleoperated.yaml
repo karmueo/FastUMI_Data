@@ -1,0 +1,67 @@
+# 该文件定义 VIVE Tracker 遥操 RM75 的默认接口、坐标映射和平滑安全参数。
+tracker_teleop:
+  ros__parameters:
+    # 默认发送实机指令；首次联调时在配置副本中改为 true。
+    dry_run: false
+
+    # 输入与 RM75 CANFD 输出话题，均可通过参数或 ROS remap 覆盖。
+    tracker_odom_topic: /vive_tracker/odom
+    tracker_status_topic: /vive_tracker/status
+    joint_state_topic: /joint_states
+    command_topic: /rm_driver/movej_canfd_cmd
+    home_command_topic: /rm_driver/movej_cmd
+    home_result_topic: /rm_driver/movej_result
+    move_stop_topic: /rm_driver/move_stop_cmd
+
+    # 按 h 的默认回位目标，按 joint1 至 joint7 排列，单位为弧度；修改后重启节点。
+    home_joint_positions_rad:
+      - 0.0
+      - 0.3490658503988659
+      - 0.0
+      - 1.2217304763960306
+      - 0.0
+      - 1.5707963267948966
+      - 1.5707963267948966
+    home_speed_percent: 20
+    home_timeout_s: 30.0
+
+    # RM75 模型坐标系；空 urdf_path 表示从 rm_description 包查找模型。
+    base_frame: base_link
+    eef_frame: Link7
+    odom_frame: vive_tracker_odom
+    urdf_path: ""
+
+    # workspace 通过三点平移标定固定的 Base 前/左/上方向；reference_eef
+    # 保留按初始化末端姿态和安装旋转建立轴向的兼容模式。
+    # 启用自动映射时固定使用 odom XYZ 到 Base XYZ 的单位映射，
+    # mapping_mode 和 axis_mapping_rpy_deg 不参与映射计算。
+    auto_mapping_enabled: false
+    mapping_mode: workspace
+    # 向上和向前位移夹角须位于 [此值, 180°-此值]，避免近乎共线的标定。
+    workspace_minimum_angle_deg: 60.0
+    # 空值使用 ${ROS_HOME:-~/.ros}/tracker_teleoperated/workspace_calibration.yaml。
+    # 成功完成三点标定后会原子保存，节点重启时自动加载。
+    workspace_calibration_file: ""
+
+    # Tracker 相对运动的控制频率、灵敏度和兼容模式安装旋转。
+    control_rate_hz: 50.0
+    translation_scale: 1.0
+    rotation_scale: 1.0
+    axis_mapping_rpy_deg: [0.0, 0.0, 0.0]
+
+    # 位姿与关节平滑默认关闭；启用后采用下列限制。
+    pose_smoothing_enabled: false
+    joint_smoothing_enabled: false
+    pose_filter_cutoff_hz: 8.0
+    joint_velocity_ratio: 0.25
+    joint_acceleration_limit_rad_s2: 2.0
+
+    # 输入冻结、停用、同步和重定位恢复门限。
+    pose_freeze_timeout_s: 0.10
+    pose_timeout_s: 0.25
+    feedback_timeout_s: 0.25
+    heartbeat_timeout_s: 0.50
+    status_sync_tolerance_s: 0.05
+    position_jump_threshold_m: 0.30
+    rotation_jump_threshold_deg: 45.0
+    recovery_samples: 3

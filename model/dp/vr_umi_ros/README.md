@@ -27,6 +27,9 @@ bash model/dp/run_vr_umi_ros2.sh --ros-args \
 可以替换。节点复用评估入口的 EMA/model 权重加载逻辑，不下载预训练视觉权重。
 `urdf_path` 默认指向仓库内 `dataset/vr_target_umi/rm_75.urdf`，可以通过 `-p urdf_path:=...`
 覆盖。URDF 必须与转换训练数据时使用的版本一致，末端固定为 `Link7`、工具偏移为零。
+示例旧 checkpoint 未内嵌训练 URDF 摘要，因此 YAML 的 `expected_urdf_sha256` 显式绑定
+当前训练 URDF；新 checkpoint 若已内嵌摘要，则以内嵌值为准。替换 URDF 或 checkpoint 时
+应同步核对该参数，摘要不一致会阻止节点启动。
 
 输入消息使用 sensor-data QoS（best-effort、volatile），兼容常见的可靠或 best-effort
 传感器发布端；输出使用 reliable、volatile，队列深度 10。首轮自动以第一个有效同步
@@ -172,3 +175,49 @@ ROS_DOMAIN_ID=173 model/dp/.venv/bin/python model/dp/smoke_vr_umi_ros2.py \
 停止生成新结果。段尾固定最后一个样本，避免循环跨 episode；URDF 哈希和源时间轴
 须与训练数据一致。JSON 报告写入 `dataset/`，记录 checkpoint、输出形状、序列数量、
 预热耗时和验收结果。该验证覆盖软件推理链路，实机控制性能需单独评估。
+
+## 跨机器参考输入与输出
+
+扩散策略采样使用随机噪声。跨机器验证工具在每次推理前固定随机种子，并直接复用在线节点的
+图像预处理、正运动学、五键观测构造、模型前向和绝对动作解码。这样可以区分输入预处理差异、
+模型原始输出差异和动作解码差异。参考流程不经过 DDS，ROS 话题与调度由上一节 smoke test 覆盖。
+
+在基准机器生成参考文件：
+
+```bash
+model/dp/.venv/bin/python model/dp/reference_vr_umi_inference.py create \
+  --checkpoint dataset/vr_target_umi/runs/full_20260904_174806/checkpoints/best.ckpt \
+  --dataset dataset/vr_target_umi/target.zarr \
+  --joint-dataset dataset/vr_target/target.zarr \
+  --urdf dataset/vr_target_umi/rm_75.urdf \
+  --output-dir dataset/vr_target_umi/reference_inference \
+  --device cuda:0
+```
+
+目录中会生成以下三个需要一起复制的文件：
+
+| 文件 | 内容 |
+|---|---|
+| `reference_input.npz` | 固定两帧 RGB、关节、夹爪、相对时间和 episode 起始关节 |
+| `reference_output.npz` | 五键模型输入、原始 `[1,16,10]` 动作和解码后的绝对目标 |
+| `manifest.json` | 随机种子、checkpoint/URDF/输入输出 SHA-256 和基准环境版本 |
+
+`reference_input.npz` 和 `reference_output.npz` 不使用 pickle，可直接检查和归档。默认选择第一段
+episode 的第 30 帧及其前一帧；可用 `--sample-index` 选择另一段内具有前序帧的样本。
+
+将上述目录、完全相同的 checkpoint 和 URDF 复制到待验证机器，然后执行：
+
+```bash
+model/dp/.venv/bin/python model/dp/reference_vr_umi_inference.py verify \
+  --checkpoint dataset/vr_target_umi/runs/full_20260904_174806/checkpoints/best.ckpt \
+  --urdf dataset/vr_target_umi/rm_75.urdf \
+  --reference-dir dataset/vr_target_umi/reference_inference \
+  --report dataset/vr_target_umi/reference_inference/verify_report.json \
+  --device cuda:0
+```
+
+通过时命令退出码为 0，报告中的 `passed`、`observation_inputs_exact` 和四项 `integrity` 均为
+`true`。五键输入要求逐元素完全一致；模型和解码输出默认使用 `atol=1e-4, rtol=1e-4`，可通过
+`--atol`、`--rtol` 收紧或放宽。相同软件栈和 GPU 上通常可以达到零误差；不同 GPU 架构、CUDA、
+PyTorch 或算子实现可能产生小幅数值差异。摘要不匹配会直接失败，输出超差会写报告并以退出码 1
+结束。参考目录属于生成数据，应保留在 `dataset/` 下且不要提交到 Git。

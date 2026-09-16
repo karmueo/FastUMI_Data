@@ -131,9 +131,11 @@ def main():
     parser.add_argument("--timeout", type=float, default=45)
     args, ros_args = parser.parse_known_args()
     torch.set_num_threads(4)
-    engine = PolicyEngine(args.checkpoint, args.device)
+    dataset_root = zarr.open_group(str(args.dataset), mode="r")  # 含训练 URDF 摘要的数据集根组。
+    engine = PolicyEngine(args.checkpoint, args.device,
+                          expected_urdf_sha256=dataset_root.attrs["urdf_sha256"])
     # 预热不消耗在线观测有效期，并直接记录一次真实模型端到端耗时。
-    data = zarr.open_group(str(args.dataset), mode="r")["data"]
+    data = dataset_root["data"]
     joint_data = zarr.open_group(str(args.joint_dataset), mode="r")["data"]
     fk = UrdfKinematics(args.dataset.parent / "rm_75.urdf", JOINT_NAMES)
     poses = fk.forward(joint_data["robot0_joint_pos"][:2])

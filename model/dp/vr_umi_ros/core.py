@@ -159,8 +159,8 @@ def load_processors(specifications):
     return processors
 
 
-def validate_contract(cfg):
-    """限制为当前 RM75 五键/10D/30Hz 训练契约，防止误用其他 checkpoint。"""
+def validate_contract(cfg, expected_urdf_sha256=None):
+    """限制为当前 RM75 五键/10D/30Hz 契约，并返回可信的训练 URDF 摘要。"""
     contract = cfg.task.get("contract", {})
     expected = {"base_frame": "base_link", "end_frame": "Link7", "tool_offset": "identity",
                 "gripper_representation": "normalized_0_1",
@@ -168,7 +168,7 @@ def validate_contract(cfg):
     if any(contract.get(key) != value for key, value in expected.items()):
         raise ValueError("Checkpoint does not match the RM75 Link7 deployment contract")
     shape_meta = cfg.shape_meta
-    urdf_sha256 = contract.get("urdf_sha256")
+    urdf_sha256 = contract.get("urdf_sha256") or expected_urdf_sha256
     if (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64
             or any(character not in "0123456789abcdef" for character in urdf_sha256.lower())):
         raise ValueError("Checkpoint does not contain a valid training URDF SHA-256")
@@ -185,14 +185,19 @@ def validate_contract(cfg):
         raise ValueError("Checkpoint must predict 16 consecutive 10D actions")
     if any(cfg.task.pose_repr[key] != "relative" for key in ("obs_pose_repr", "action_pose_repr")):
         raise ValueError("Both pose representations must be relative")
+    return urdf_sha256.lower()
 
 
-def validate_urdf(urdf_path, cfg):
-    """校验部署 URDF 的原始文件摘要与 checkpoint 中的训练摘要完全一致。"""
+def validate_urdf(urdf_path, cfg, expected_urdf_sha256=None):
+    """校验部署 URDF 与 checkpoint 内嵌或显式训练摘要完全一致。"""
     path = Path(urdf_path)
     if not path.is_file():
         raise ValueError(f"URDF must name an existing file: {path}")
-    expected = cfg.task.contract.urdf_sha256.lower()
+    configured = getattr(cfg.task.contract, "urdf_sha256", None)  # 新 checkpoint 内嵌的训练摘要。
+    expected = (configured or expected_urdf_sha256 or "").lower()
+    if (len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)):
+        raise ValueError("A valid training URDF SHA-256 is required")
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != expected:
         raise ValueError(
@@ -203,17 +208,17 @@ def validate_urdf(urdf_path, cfg):
 class PolicyEngine:
     """单线程使用的策略实例；ROS 层负责调度，模型依赖仅在创建时导入。"""
 
-    def __init__(self, checkpoint, device="cuda:0", processors=()):
+    def __init__(self, checkpoint, device="cuda:0", processors=(), expected_urdf_sha256=None):
         """加载现有评估入口使用的 EMA/model 权重并验证契约；异常阻止节点启动。"""
         from evaluate_vr_umi import load_policy
 
         self.policy, self.cfg = load_policy(checkpoint, device)
-        validate_contract(self.cfg)
+        self.urdf_sha256 = validate_contract(self.cfg, expected_urdf_sha256)
         self.device = device  # 推理张量所在设备。
         self.processors = list(processors)  # 已构造的后处理扩展。
 
-    def predict(self, observations, context):
-        """执行一次推理与后处理，返回绝对动作序列；异常由 ROS 层记录并丢弃。"""
+    def predict_raw(self, observations):
+        """执行一次模型前向推理，返回 CPU 上的 ``[1,16,10]`` 原始动作。"""
         import torch
 
         inputs = {key: torch.from_numpy(value).to(self.device) for key, value in observations.items()}
@@ -221,6 +226,13 @@ class PolicyEngine:
             prediction = self.policy.predict_action(inputs)["action_pred"].cpu().numpy()
         if prediction.shape != (1, 16, 10):
             raise ValueError(f"Unexpected policy shape: {prediction.shape}")
+        if not np.isfinite(prediction).all():
+            raise ValueError("Policy returned non-finite actions")
+        return prediction
+
+    def predict(self, observations, context):
+        """执行一次推理与后处理，返回绝对动作序列；异常由 ROS 层记录并丢弃。"""
+        prediction = self.predict_raw(observations)
         sequence = decode_actions(prediction[0], context)
         for processor in self.processors:
             sequence = validate_sequence(processor.process(sequence, context))

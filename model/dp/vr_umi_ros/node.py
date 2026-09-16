@@ -56,6 +56,7 @@ class VrUmiInferenceNode(Node):
         default_urdf = Path(__file__).resolve().parents[3] / "dataset/vr_target_umi/rm_75.urdf"
         defaults = {
             "checkpoint": "", "device": "cuda:0", "urdf_path": str(default_urdf),
+            "expected_urdf_sha256": "",
             "image_topic": "/camera/image_raw", "joint_topic": "/joint_states",
             "gripper_topic": "/fastumi/gripper/state", "output_topic": "/fastumi/policy/action_sequence",
             "reset_service": "/fastumi/policy/reset_episode", "sync_slop_s": 0.05,
@@ -78,8 +79,11 @@ class VrUmiInferenceNode(Node):
                 raise ValueError("checkpoint must explicitly name an existing file")
             processors = load_processors([item.strip() for item in self.parameter("postprocessors").split(",")
                                           if item.strip()])
-            engine = PolicyEngine(checkpoint, self.parameter("device"), processors)
-        validate_urdf(urdf_path, engine.cfg)
+            engine = PolicyEngine(checkpoint, self.parameter("device"), processors,
+                                  self.parameter("expected_urdf_sha256"))
+        expected_urdf_sha256 = getattr(engine, "urdf_sha256",  # 注入引擎已完成契约校验时复用其摘要。
+                                       self.parameter("expected_urdf_sha256"))
+        validate_urdf(urdf_path, engine.cfg, expected_urdf_sha256)
         self.fk = UrdfKinematics(urdf_path, JOINT_NAMES)
         self.engine = engine  # 只由工作线程调用的策略实例。
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vr_umi_policy")

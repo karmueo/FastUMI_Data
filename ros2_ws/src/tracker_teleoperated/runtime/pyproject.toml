@@ -1,0 +1,18 @@
+# 该文件定义 Tracker 遥操节点的 uv 运行环境和可复现 Python 依赖。
+[project]
+name = "tracker-teleoperated-runtime"
+version = "0.1.0"
+description = "VIVE Tracker 到 RM75 遥操节点的 Python 运行环境"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    "placo==0.9.23",
+    "pyyaml>=6.0",
+    "scipy>=1.14",
+]
+
+[dependency-groups]
+dev = ["pytest>=7.4,<9"]
+
+[tool.uv]
+package = false

@@ -1,0 +1,12 @@
+# uv 在本包 runtime 目录创建的 Python 虚拟环境。
+.venv/
+
+# Python 测试和解释器缓存。
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# 防止从包目录误运行 colcon 时提交生成物。
+/build/
+/install/
+/log/

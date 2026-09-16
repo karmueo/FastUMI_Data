@@ -17,6 +17,8 @@ from vr_umi_ros.core import (ActionSequence, InferenceContext, JOINT_NAMES, Obse
                              validate_urdf)
 from vr_umi_ros.synchronizer import ObservationBuffer
 from umi.common.pose_util import mat_to_pose10d, pose_to_mat
+from reference_vr_umi_inference import (build_reference_observations, compare_arrays, load_input,
+                                        seed_inference)
 
 
 def config():
@@ -133,6 +135,46 @@ def test_custom_processor_engine(monkeypatch):
         engine.predict({}, InferenceContext(np.eye(4), 0, 8, 1))
 
 
+def test_reference_input_rebuild_and_comparison(tmp_path):
+    """固定输入可重建五键观测，随机种子可复现，误差报告能拒绝超差结果。"""
+    from test_vr_umi import minimal_urdf
+    import torch
+
+    input_path = tmp_path / "reference_input.npz"
+    images = np.random.default_rng(9).integers(0, 256, (2, 224, 224, 3), dtype=np.uint8)
+    joints = np.zeros((2, 7), dtype=np.float64)
+    joints[1] = np.linspace(0.01, 0.07, 7)
+    np.savez_compressed(
+        input_path, schema_version=np.array(1), sample_index=np.array(8),
+        episode_start_index=np.array(0), episode_end_index=np.array(20),
+        stamps_ns=np.array([0, 33_333_333]), images_rgb=images, joint_positions=joints,
+        gripper_openness=np.array([0.2, 0.3]), start_joint_positions=np.zeros(7),
+    )
+    values = load_input(input_path)
+    observations, reference_pose = build_reference_observations(
+        values, minimal_urdf(tmp_path / "arm.urdf", 7))
+    assert set(observations) == {
+        "camera0_rgb", "robot0_eef_pos", "robot0_eef_rot_axis_angle",
+        "robot0_gripper_width", "robot0_eef_rot_axis_angle_wrt_start",
+    }
+    assert observations["camera0_rgb"].shape == (1, 2, 3, 224, 224)
+    assert reference_pose.shape == (4, 4)
+    seed_inference(17)
+    first = torch.randn(5)
+    seed_inference(17)
+    torch.testing.assert_close(first, torch.randn(5), rtol=0, atol=0)
+    assert compare_arrays(np.array([1.0]), np.array([1.00001]), 1e-4, 0)["passed"]
+    assert not compare_arrays(np.array([1.0]), np.array([1.1]), 1e-4, 0)["passed"]
+
+
+def test_reference_input_rejects_wrong_schema(tmp_path):
+    """缺字段或错误版本的参考输入必须在推理前拒绝。"""
+    input_path = tmp_path / "bad.npz"
+    np.savez_compressed(input_path, schema_version=np.array(99))
+    with pytest.raises(ValueError, match="Unsupported"):
+        load_input(input_path)
+
+
 def test_contract_rejects_incompatible_checkpoints():
     """真实配置通过，错误末端、参考系或观测历史被拒绝。"""
     cfg = config()
@@ -152,6 +194,7 @@ def test_contract_rejects_incompatible_checkpoints():
     cfg.task.contract.urdf_sha256 = None
     with pytest.raises(ValueError, match="URDF SHA-256"):
         validate_contract(cfg)
+    assert validate_contract(cfg, "a" * 64) == "a" * 64
 
 
 def test_deployment_urdf_must_match_checkpoint(tmp_path):
