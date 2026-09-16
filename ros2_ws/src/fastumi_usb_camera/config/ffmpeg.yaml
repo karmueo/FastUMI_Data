@@ -1,0 +1,25 @@
+# C++ FFmpeg nodes use absolute base image topics. The transport parameter
+# prefix is the base topic without its leading slash, with '/' changed to '.'.
+usb_camera_ffmpeg:
+  ros__parameters:
+    vendor_id: 7119       # 0x1bcf
+    product_id: 10436     # 0x28c4
+    serial_number: ""
+    width: 1280
+    height: 960
+    fps: 30
+    frame_id: usb_camera_optical_frame
+    topic: /usb_camera/image_raw
+    frame_timeout_seconds: 5.0
+
+    usb_camera.image_raw.ffmpeg.encoder: libx264
+    usb_camera.image_raw.ffmpeg.encoder_av_options: "preset:ultrafast,tune:zerolatency,profile:baseline"
+    usb_camera.image_raw.ffmpeg.pixel_format: yuv420p
+    usb_camera.image_raw.ffmpeg.bit_rate: 4000000
+    usb_camera.image_raw.ffmpeg.gop_size: 10
+    usb_camera.image_raw.ffmpeg.max_b_frames: 0
+
+usb_camera_receiver:
+  ros__parameters:
+    input_topic: /usb_camera/image_raw
+    output_topic: /usb_camera/image_decoded
