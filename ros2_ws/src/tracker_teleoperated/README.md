@@ -49,7 +49,7 @@ cd /path/to/FastUMI_Data/ros2_ws
 source /opt/ros/jazzy/setup.bash
 source .venv-numpy1/bin/activate
 source install/setup.bash
-ros2 launch rm_driver rm_75_driver.launch.py
+ros2 launch rm_bringup rm_75_bringup.launch.py move_to_initial_pose:=true 
 ```
 
 在遥操主机确认七轴反馈和驱动订阅端已就绪：
