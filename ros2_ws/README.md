@@ -200,6 +200,26 @@ XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆�
 `rm_ros_interfaces`。部署前应根据现场环境收紧工作空间限制。详细接口见
 [`src/fastumi_rm75/README.md`](src/fastumi_rm75/README.md)。
 
+## `ros2_rm_robot` 子模块
+
+`src/ros2_rm_robot` 使用 `karmueo/ros2_rm_robot` 的 `scl_dev_jazzy` 分支。
+首次克隆主仓库时，使用 `git clone --recurse-submodules`；已有主仓库则在仓库根目录执行：
+
+```bash
+git submodule update --init --recursive
+```
+
+需要同步该分支的最新提交时，在主仓库根目录执行：
+
+```bash
+git submodule update --remote --checkout ros2_ws/src/ros2_rm_robot
+git add ros2_ws/src/ros2_rm_robot
+git commit -m "chore: 更新 ros2_rm_robot 子模块"
+```
+
+主仓库通过子模块指针固定版本。普通的 `git submodule update` 会检出主仓库记录的提交；
+使用 `--remote` 获取分支最新提交后，需要提交新的子模块指针，其他人才能同步到该版本。
+
 ## 构建与验证
 
 ### 两套共享 Python 环境
