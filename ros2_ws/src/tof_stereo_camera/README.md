@@ -5,16 +5,20 @@ UVC 设备，或打开参数指定的设备，并在 `/tof_stereo_camera` 命名
 
 ## 构建与运行
 
+本 C++ 包归属共享的 NumPy 1 构建组；环境创建见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
 安装 IMU 滤波器、RViz 插件和 OpenCV 开发包：
 
 ```bash
-sudo apt install ros-${ROS_DISTRO}-imu-tools libopencv-dev
+sudo apt install ros-jazzy-imu-tools libopencv-dev
 ```
 
 ```bash
-source /opt/ros/${ROS_DISTRO}/setup.bash
+source /opt/ros/jazzy/setup.bash
 cd /path/to/FastUMI_Data/ros2_ws
-colcon build --symlink-install --packages-select tof_stereo_camera
+source .venv-numpy1/bin/activate
+python -m colcon build --build-base build --symlink-install --packages-select tof_stereo_camera
 source install/setup.bash
 ros2 launch tof_stereo_camera tof_stereo_camera.launch.py
 ```

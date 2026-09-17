@@ -6,45 +6,49 @@
 
 ## 1. 准备环境
 
-使用 Ubuntu 24.04、ROS 2 Jazzy、系统 Python 3.12，并准备好 RM75 官方 `ros2_rm_robot` 工作区。需要安装 `uv`；只有使用图形桌面的默认键盘窗口时才需要 `xterm`。
+使用 Ubuntu 24.04、ROS 2 Jazzy 和系统 Python 3.12。Placo 0.9.23 的
+依赖链使用 NumPy 2，本包单独归属工作区共享的 `.venv-numpy2`；其所需的
+`fastumi_interfaces`、`vive_tracker`、`rm_description`、`rm_ros_interfaces`
+先在共享的 `.venv-numpy1` 下构建。两套环境的创建与完整构建顺序见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。需要使用图形
+桌面的默认键盘窗口时安装 `xterm`。
 
-首次在遥操主机上执行：
+首次完成工作区 NumPy 1 阶段后，在 NumPy 2 终端构建本包：
 
 ```bash
-cd /home/scl/work/UMI/FastUMI_Data/ros2_ws
+cd /path/to/FastUMI_Data/ros2_ws
 source /opt/ros/jazzy/setup.bash
-source /home/scl/work/ros2_rm_robot/install/setup.bash
-uv venv \
-  --project src/tracker_teleoperated/runtime \
-  --python /usr/bin/python3 \
-  --system-site-packages \
-  src/tracker_teleoperated/runtime/.venv
-uv sync --project src/tracker_teleoperated/runtime --locked
-source src/tracker_teleoperated/runtime/.venv/bin/activate
-python -m colcon build --symlink-install \
-  --packages-select fastumi_interfaces vive_tracker tracker_teleoperated
+source .venv-numpy2/bin/activate
+source install/setup.bash
+python -m colcon build --build-base build --symlink-install \
+  --packages-select tracker_teleoperated \
+  --allow-overriding tracker_teleoperated
+source install/setup.bash
+head -1 install/tracker_teleoperated/lib/tracker_teleoperated/tracker_teleop_node
+```
+
+入口首行应指向 `.venv-numpy2/bin/python`。不要使用 `--packages-up-to` 在
+NumPy 2 环境重建公共依赖。每次新开遥操终端执行：
+
+```bash
+cd /path/to/FastUMI_Data/ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy2/bin/activate
 source install/setup.bash
 ```
 
-每次新开遥操终端，先执行：
-
-```bash
-cd /home/scl/work/UMI/FastUMI_Data/ros2_ws
-source /opt/ros/jazzy/setup.bash
-source /home/scl/work/ros2_rm_robot/install/setup.bash
-source src/tracker_teleoperated/runtime/.venv/bin/activate
-source install/setup.bash
-```
-
-重新构建后也要重新执行 `source install/setup.bash`。
+机械臂驱动和相机等其他包使用 `.venv-numpy1`。重新构建后也应重新加载
+`install/setup.bash`。
 
 ## 2. 启动机械臂、Tracker 和遥操
 
 机械臂驱动可以运行在另一台主机。两台主机需要网络互通，并使用相同的 `ROS_DOMAIN_ID`。在机械臂主机启动驱动：
 
 ```bash
+cd /path/to/FastUMI_Data/ros2_ws
 source /opt/ros/jazzy/setup.bash
-source /home/scl/work/ros2_rm_robot/install/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
 ros2 launch rm_driver rm_75_driver.launch.py
 ```
 
@@ -57,7 +61,8 @@ ros2 topic info /rm_driver/movej_canfd_cmd --verbose
 
 `/joint_states` 应包含 `joint1` 至 `joint7`；CANFD 话题的 `Subscription count` 至少为 1。若看不到远端话题，检查两台主机的 ROS 网络配置。
 
-在已加载环境的终端启动 Tracker：
+在另一个按 Jazzy → `.venv-numpy1` → `install/setup.bash` 加载的终端启动
+Tracker：
 
 ```bash
 ros2 launch vive_tracker vive_tracker.launch.py use_rviz:=false

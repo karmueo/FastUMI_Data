@@ -6,11 +6,15 @@
 
 ## ROS 2 构建与启动
 
+本 C++ 包归属共享的 NumPy 1 构建组；环境创建见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
 在 `ros2_ws` 目录执行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install --packages-select stereo_camera
+source .venv-numpy1/bin/activate
+python -m colcon build --build-base build --symlink-install --packages-select stereo_camera
 source install/setup.bash
 ros2 launch stereo_camera stereo_camera.launch.py
 ```
@@ -189,10 +193,10 @@ ros2 topic echo /stereo_camera/imu/data_raw --once
 在 `ros2_ws` 下加载 Jazzy 环境，运行：
 
 ```bash
-colcon build --symlink-install --packages-select stereo_camera
+python -m colcon build --build-base build --symlink-install --packages-select stereo_camera
 source install/setup.bash
-colcon test --packages-select stereo_camera
-colcon test-result --verbose
+python -m colcon test --build-base build --packages-select stereo_camera
+python -m colcon test-result --verbose
 ```
 
 自动测试覆盖包解析、单位换算、消息标记和 launch 参数转发；设备并行采集、

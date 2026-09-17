@@ -8,7 +8,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 
 ## `src` 目录总览
 
-`src` 下的每个顶层文件夹都是一个独立 ROS 2 包：
+`src` 下多数顶层文件夹是独立 ROS 2 包；`ros2_rm_robot` 包含多个机械臂包：
 
 | 文件夹 | 类型 | 主要作用 |
 | --- | --- | --- |
@@ -22,6 +22,10 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
+| [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
+| [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
+| [`tracker_teleoperated`](src/tracker_teleoperated/) | Python 遥操包 | 使用 Placo 将 Tracker 目标转换为 RM75 关节指令。 |
+| [`ros2_rm_robot`](src/ros2_rm_robot/) | 多包机械臂项目 | 提供 RM75 驱动、接口、MoveIt2、仿真及示例。 |
 
 ## 包之间的数据关系
 
@@ -198,29 +202,121 @@ XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆�
 
 ## 构建与验证
 
-在工作空间根目录执行：
+### 两套共享 Python 环境
+
+以下命令针对 Ubuntu 24.04、ROS 2 Jazzy 和系统 Python 3.12。ROS 的 `rclpy`、
+`cv_bridge` 等二进制模块通过 `--system-site-packages` 从系统安装中读取。
+`cv_bridge` 与 NumPy 1 配合使用；`tracker_teleoperated` 的 Placo 锁文件需要
+NumPy 2。两套环境分别放在工作空间根目录，不在包内创建虚拟环境。
 
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
+uv venv --python /usr/bin/python3 --system-site-packages .venv-numpy1
+uv pip install --python .venv-numpy1/bin/python -r requirements-numpy1.txt
+uv venv --python /usr/bin/python3 --system-site-packages .venv-numpy2
+source .venv-numpy2/bin/activate
+uv sync --project src/tracker_teleoperated/runtime --active --locked
+deactivate
+```
+
+`uv sync` 必须带 `--active`，以便把现有遥操锁文件安装到工作空间的
+`.venv-numpy2`。系统 ROS 及 `rosdep` 负责其余系统和硬件依赖；不要在
+NumPy 2 环境中导入 `cv_bridge`。
+
+| 环境 | ROS 包 | 原因 |
+| --- | --- | --- |
+| NumPy 2 | `tracker_teleoperated` | Placo 0.9.23 与锁文件中的 NumPy 2.3.5。 |
+| NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`fastumi_rm75`、`fastumi_usb_camera` | 图像转换、数据处理及系统 SciPy/Kalibr 依赖。 |
+| NumPy 1 | `fastumi_interfaces`、`fastumi_rviz_plugins`、`stereo_camera`、`tof_stereo_camera`、`vive_tracker`、`xv_ros2_msgs`、`xv_sdk_ros2` | 消息、C++ 驱动和 RViz 插件跟随 ROS 工作区基础构建环境。 |
+| NumPy 1 | `control_arm_move`、`force_position_control`、`get_arm_state`、`rm_bringup`、`rm_control`、`rm_description`、`rm_doc`、`rm_driver`、`rm_example`、`rm_gazebo`、`rm_install`、`rm_moveit2`、`rm_ros_interfaces` | `ros2_rm_robot` 的示例、驱动、模型、文档和 MoveIt2 包。 |
+| NumPy 1 | `rm_63_config`、`rm_65_config`、`rm_75_config`、`rm_eco62_config`、`rm_eco63_config`、`rm_eco65_config`、`rm_gen72_config`、`rm_rx75_config` | 八个 MoveIt2 配置包。 |
+
+### 分阶段构建
+
+两阶段共用工作区的 `build` 和 `install` 目录，各包只在所属环境中构建。
+迁移旧构建目录时，先将含旧解释器缓存的 `build` 移走，再执行以下命令。
+先在干净终端加载 ROS 和 NumPy 1 环境，安装系统依赖并构建其余 33 个包。
+本机的 `Boost_DIR` 用于避免 `/usr/local` 中另一版本的 Boost 干扰 RM75
+MoveIt2；其他主机应改成对应的系统 Boost 配置目录。
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
 rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
+PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
+  python -m colcon build --build-base build \
+  --symlink-install --packages-skip tracker_teleoperated \
+  --cmake-clean-cache --cmake-args \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python" \
+  -DBoost_DIR=/usr/lib/x86_64-linux-gnu/cmake/Boost-1.83.0
 source install/setup.bash
 ```
+
+然后在新终端用 NumPy 2 环境只构建遥操包；它依赖的接口、Tracker 和 RM75
+包已由上一阶段构建。这里使用 `--packages-select`，防止依赖包的入口被
+NumPy 2 环境重写。
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy2/bin/activate
+source install/setup.bash
+python -m colcon build --build-base build \
+  --symlink-install --packages-select tracker_teleoperated \
+  --allow-overriding tracker_teleoperated
+source install/setup.bash
+head -1 install/tracker_teleoperated/lib/tracker_teleoperated/tracker_teleop_node
+head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
+```
+
+两条入口首行应分别指向 `.venv-numpy2/bin/python` 和
+`.venv-numpy1/bin/python`。若入口仍指向旧解释器，请重新构建所属包并再次
+检查首行；不要仅靠切换终端中的 `python`。
 
 `vive_tracker` 构建时需要提供 OpenVR SDK 根目录，`xv_sdk_ros2` 需要预先安装
 匹配版本的 XV SDK；`tof_stereo_camera` 仅支持随包提供的 Linux x86-64 SDK 二进制；
 RM75 实机部署还需要官方驱动及接口包。只使用部分功能时，
-可通过 `colcon build --packages-up-to <包名>` 构建目标包及其工作空间内依赖。
+可在 NumPy 1 环境通过 `python -m colcon build --build-base build --packages-up-to <包名>`
+构建目标包及其工作空间内依赖；遥操包仍按上面的 NumPy 2 命令单独构建。
+
+### 分终端运行
+
+每个新终端按 ROS、对应虚拟环境、工作空间的顺序加载。相机、数据处理和
+RM75 驱动使用 NumPy 1；遥操节点使用 NumPy 2。同一台或不同主机上的
+节点通过 ROS 话题通信，按需设置相同的 `ROS_DOMAIN_ID`。
+
+```bash
+# NumPy 1 终端
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+ros2 launch fastumi_usb_camera usb_camera.launch.py
+```
+
+```bash
+# NumPy 2 终端
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy2/bin/activate
+source install/setup.bash
+ros2 launch tracker_teleoperated tracker_teleoperated.launch.py
+```
 
 运行测试：
 
 ```bash
-colcon test
-colcon test-result --all --verbose
+python -m colcon test --build-base build \
+  --packages-select fastumi_usb_camera fastumi_data \
+  fastumi_gripper_estimator fastumi_rm75 fastumi_camera_calibration
+python -m colcon test-result --test-result-base build --all --verbose
 ```
 
-构建、测试和运行节点前都应先加载 ROS 2 环境；构建完成后还需加载
+遥操测试在 NumPy 2 终端使用 `python -m colcon test --build-base
+build --packages-select tracker_teleoperated`。构建、测试和运行节点前均需加载 ROS、对应虚拟环境与
 `install/setup.bash`。
 
 ## 独立 Kalibr 相机内参标定
@@ -254,12 +350,14 @@ git apply "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches
 # 需要重建时，仅清理 checkout 自身的构建产物。
 rm -rf "${KALIBR_OVERLAY}/src/kalibr_ros2/build" "${KALIBR_OVERLAY}/src/kalibr_ros2/install" "${KALIBR_OVERLAY}/src/kalibr_ros2/log"
 source /opt/ros/jazzy/setup.bash
+source "${FASTUMI_ROOT}/ros2_ws/.venv-numpy1/bin/activate"
 # 脚本会自行 cd 到 Kalibr checkout，并使用其中的 build/install/log。
 ./build_workspace.sh
 source /opt/ros/jazzy/setup.bash
+source "${FASTUMI_ROOT}/ros2_ws/.venv-numpy1/bin/activate"
 source "${KALIBR_OVERLAY}/src/kalibr_ros2/install/setup.bash"
 source "${FASTUMI_ROOT}/ros2_ws/install/setup.bash"
-python3 -c "import sm, aslam_cv, aslam_backend"
+python -c "import sm, aslam_cv, aslam_backend"
 ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help
 ```
 

@@ -5,6 +5,11 @@
 该包负责 ROS2 FastUMI 的 episode 事件、连续 MCAP 会话、Tracker 到 TCP
 标定、20 Hz 离线同步、FastUMI HDF5 写入和质量报告。
 
+本包使用工作区共享的 `.venv-numpy1`，因为 MCAP 图像转换依赖系统
+`cv_bridge`。每个运行终端先加载 Jazzy、`.venv-numpy1` 和工作区
+`install/setup.bash`；环境创建与分阶段构建见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
 最短流程：
 
 ```bash
@@ -68,6 +73,7 @@ ros2 run fastumi_data convert_mcap \
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
 source ros2_ws/install/setup.bash
 ```
 
@@ -101,15 +107,17 @@ git rev-parse HEAD  # 应为 c79d1b0cf012fed63dcff5ab8c76778e8343190f
 git apply --check "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
 git apply "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
 source /opt/ros/jazzy/setup.bash
+source "${FASTUMI_ROOT}/ros2_ws/.venv-numpy1/bin/activate"
 ./build_workspace.sh
 source /opt/ros/jazzy/setup.bash
+source "${FASTUMI_ROOT}/ros2_ws/.venv-numpy1/bin/activate"
 source "${KALIBR_OVERLAY}/src/kalibr_ros2/install/setup.bash"
 source "${FASTUMI_ROOT}/ros2_ws/install/setup.bash"
-python3 -c "import sm, aslam_cv, aslam_backend"
+python -c "import sm, aslam_cv, aslam_backend"
 ros2 run kalibr_imu_camera kalibr_calibrate_cameras --help
 ```
 
-每次使用均按 Jazzy -> Kalibr overlay -> FastUMI 的顺序 source。独立内参命令通过 `--frequency-hz` 覆盖默认 4 Hz；本包 settings 不再接受 `intrinsics` 分组。
+每次使用均按 Jazzy -> NumPy 1 -> Kalibr overlay -> FastUMI 的顺序 source。独立内参命令通过 `--frequency-hz` 覆盖默认 4 Hz；本包 settings 不再接受 `intrinsics` 分组。
 Jazzy 兼容补丁同时处理 SuiteSparse 7 的长索引枚举：`IntType<long>` 使用 `CHOLMOD_LONG`，替代已移除的 `CHOLMOD_INTLONG`。
 补丁还为 SPQR 的 `SuiteSparseQR` 显式绑定 `SuiteSparse_long` 索引模板参数并转换列数，解决 SuiteSparse 7 的 `size_t` 模板推导冲突。
 增量标定头文件改为包含 `SuiteSparseQR.hpp`，删除与 SuiteSparse 7 双模板参数定义冲突的旧 SPQR 前置声明。

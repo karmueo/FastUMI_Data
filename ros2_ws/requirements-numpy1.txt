@@ -1,0 +1,6 @@
+# 本文件固定 ROS 2 Jazzy 的 NumPy 1 运行环境中由 uv 安装的依赖。
+# rclpy、cv_bridge、SciPy、h5py 等 ROS/系统包由 apt 和 rosdep 提供。
+numpy==1.26.4
+opencv-python==4.11.0.86
+pupil-labs-uvc==1.0.4
+pytest>=7.4,<8

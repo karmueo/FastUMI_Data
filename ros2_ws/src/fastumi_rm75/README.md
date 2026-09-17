@@ -5,6 +5,18 @@
 该包把 episode 起始 TCP 坐标系中的 20 Hz 策略目标映射到 RM75 基座，
 以 100 Hz 插值，并在显式关闭 `dry_run` 后调用官方连续笛卡尔透传接口。
 
+## 共享环境
+
+本包的 NumPy/SciPy 依赖使用工作区的 `.venv-numpy1`。先按
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境) 构建，再在
+`ros2_ws` 目录加载环境后启动：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+```
+
 ```bash
 ros2 launch fastumi_rm75 rm75_deployment.launch.py
 ros2 service call /fastumi/rm75/enable std_srvs/srv/Trigger {}

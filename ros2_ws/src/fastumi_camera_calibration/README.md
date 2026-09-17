@@ -1,8 +1,14 @@
+<!-- 本文档说明相机内参标定包与共享 NumPy 1 环境、Kalibr overlay 的使用方式。 -->
+
 # fastumi_camera_calibration
 
 该包从 FastUMI MCAP 中抽取单个 sensor_msgs/msg/Image 话题，调用独立
 Kalibr ROS 2 overlay 执行 pinhole-equi AprilGrid 内参标定，并严格校验和
 发布结果。该包不依赖 fastumi_data。
+
+本包使用工作区共享的 `.venv-numpy1`。先按
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境) 创建环境并构建
+`fastumi_camera_calibration`；Kalibr 保持独立 ROS overlay。
 
 ## 构建 Kalibr overlay
 
@@ -21,13 +27,16 @@ git apply --check \
   "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
 git apply \
   "${FASTUMI_ROOT}/ros2_ws/src/fastumi_camera_calibration/vendor/patches/kalibr_ros2-jazzy.patch"
+source /opt/ros/jazzy/setup.bash
+source "${FASTUMI_ROOT}/ros2_ws/.venv-numpy1/bin/activate"
 ./build_workspace.sh
 ```
 
-每次运行按 Jazzy、Kalibr overlay、FastUMI 工作空间的顺序 source：
+每次运行按 Jazzy、NumPy 1、Kalibr overlay、FastUMI 工作空间的顺序 source：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source "${FASTUMI_ROOT}/ros2_ws/.venv-numpy1/bin/activate"
 source "${KALIBR_OVERLAY}/src/kalibr_ros2/install/setup.bash"
 source "${FASTUMI_ROOT}/ros2_ws/install/setup.bash"
 ```

@@ -85,10 +85,16 @@ distortion_model: fisheye
 
 ## 构建
 
+本包使用工作区共享的 `.venv-numpy1`，用于加载 ROS 的 `cv_bridge` 与
+兼容的 NumPy/OpenCV；环境创建见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install --packages-select fastumi_gripper_estimator
+source .venv-numpy1/bin/activate
+python -m colcon build --build-base build --symlink-install \
+  --packages-select fastumi_gripper_estimator
 source install/setup.bash
 ```
 
@@ -98,6 +104,7 @@ source install/setup.bash
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
 source ros2_ws/install/setup.bash
 ros2 launch fastumi_gripper_estimator gripper_openness.launch.py
 ```
@@ -106,6 +113,7 @@ ros2 launch fastumi_gripper_estimator gripper_openness.launch.py
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
 ros2 bag play <bag_path> \
   --topics /tof_stereo_camera/rgb/image_raw
 ```
@@ -114,6 +122,7 @@ ros2 bag play <bag_path> \
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
 ros2 topic echo /gripper/openness
 ros2 topic echo /gripper/state
 ```
@@ -154,6 +163,7 @@ RPY 使用 XYZ roll-pitch-yaw 约定：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
 source ros2_ws/install/setup.bash
 ros2 run fastumi_gripper_estimator gripper_openness_calibrate bag \
   /path/to/bag --output /tmp/gripper_openness_calibrated.yaml

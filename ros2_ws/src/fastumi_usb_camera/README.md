@@ -2,7 +2,7 @@
 
 # fastumi_usb_camera
 
-这个 ROS 2 Humble/Jazzy 包通过 `pupil-labs-uvc` 按 USB VID/PID 打开单目 UVC 相机，
+这个 ROS 2 包通过 `pupil-labs-uvc` 按 USB VID/PID 打开单目 UVC 相机，
 采集原生 MJPEG。默认解码并发布 `sensor_msgs/msg/Image`；设置
 `publish_compressed:=true` 时只发布原始 JPEG 字节组成的
 `sensor_msgs/msg/CompressedImage`，不创建 raw 话题，也不执行 JPEG 解码。
@@ -14,126 +14,37 @@
 解码并发布原始图像。两种采集节点会争用同一 USB 相机，因此每次只启动一种。
 FFmpeg 链路仍只缓存最新待处理帧，避免编码或网络变慢时积压旧画面。
 
-## 安装与构建
+## 安装与构建（ROS 2 Jazzy）
 
-先安装对应发行版的 ROS 2：Humble 对应 Ubuntu 22.04 / Python 3.10，Jazzy
-对应 Ubuntu 24.04 / Python 3.12。节点使用**构建时 CMake 选择的 Python**，
-该解释器必须能导入 `uvc`。以下两套命令分别在对应系统的新终端中执行，
-从仓库的 `ros2_ws` 目录构建。ROS 2 本体的安装步骤见
-[Humble 安装文档](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-和 [Jazzy 安装文档](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)。
-
-### ROS 2 Humble
+本包的 Python 相机节点使用工作区共享的 NumPy 1 环境
+`ros2_ws/.venv-numpy1`。Ubuntu 24.04 / ROS 2 Jazzy 使用系统 Python 3.12；
+工作区的环境创建和依赖版本见 [`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+`cv_bridge` 依赖系统 ROS 安装，`pupil-labs-uvc` 和匹配版本的 NumPy、
+OpenCV 由工作区的 `requirements-numpy1.txt` 统一安装。
 
 ```bash
-# 加载 Humble 环境，使构建工具找到该发行版的 ROS 包。
-source /opt/ros/humble/setup.bash
-
-# 更新软件包索引，以便安装编译和 FFmpeg 传输依赖。
-sudo apt update
-
-# 安装虚拟环境、UVC/OpenCV 开发库及 Humble 的传输、Python 和测试依赖。
-sudo apt install python3-venv libuvc-dev libopencv-dev \
-  ros-humble-ffmpeg-image-transport ros-humble-cv-bridge \
-  ros-humble-ament-cmake-python ros-humble-ament-cmake-gtest \
-  ros-humble-ament-cmake-pytest
-
-# 用 Humble 对应的系统 Python 创建可读取 ROS Python 包的虚拟环境。
-/usr/bin/python3 -m venv --system-site-packages ~/.local/share/fastumi_usb_camera_humble_venv
-
-# 激活构建和运行此包所用的虚拟环境。
-source ~/.local/share/fastumi_usb_camera_humble_venv/bin/activate
-
-# 安装匹配 cv_bridge 的 NumPy/OpenCV、UVC 采集库及 colcon。
-python -m pip install 'numpy<2' 'opencv-python==4.11.0.86' 'pytest<8' \
-  pupil-labs-uvc==1.0.4 colcon-common-extensions
-
-# 进入本仓库的 ROS 2 工作空间；把路径换成实际检出位置。
 cd /path/to/FastUMI_Data/ros2_ws
-
-# 用当前虚拟环境的 Python 构建 Python 入口和 C++ FFmpeg 节点。
-colcon build --symlink-install --packages-select fastumi_usb_camera \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$(command -v python)"
-
-# 加载刚构建的包，供 ros2 launch 和 ros2 run 查找。
-source install/setup.bash
-
-# 检查入口脚本首行是否指向 Humble 虚拟环境的 Python。
-head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
-```
-
-### ROS 2 Jazzy
-
-```bash
-# 加载 Jazzy 环境，使构建工具找到该发行版的 ROS 包。
 source /opt/ros/jazzy/setup.bash
-
-# 更新软件包索引，以便安装编译和 FFmpeg 传输依赖。
+source .venv-numpy1/bin/activate
 sudo apt update
-
-# 安装虚拟环境、UVC/OpenCV 开发库及 Jazzy 的传输、Python 和测试依赖。
-sudo apt install python3-venv libuvc-dev libopencv-dev \
+sudo apt install libuvc-dev libopencv-dev \
   ros-jazzy-ffmpeg-image-transport ros-jazzy-cv-bridge \
   ros-jazzy-ament-cmake-python ros-jazzy-ament-cmake-gtest \
   ros-jazzy-ament-cmake-pytest
-
-# 用 Jazzy 对应的系统 Python 创建可读取 ROS Python 包的虚拟环境。
-/usr/bin/python3 -m venv --system-site-packages ~/.local/share/fastumi_usb_camera_jazzy_venv
-
-# 激活构建和运行此包所用的虚拟环境。
-source ~/.local/share/fastumi_usb_camera_jazzy_venv/bin/activate
-
-# 安装匹配 cv_bridge 的 NumPy/OpenCV、UVC 采集库及 colcon。
-python -m pip install 'numpy<2' 'opencv-python==4.11.0.86' 'pytest<8' \
-  pupil-labs-uvc==1.0.4 colcon-common-extensions
-
-# 进入本仓库的 ROS 2 工作空间；把路径换成实际检出位置。
-cd /path/to/FastUMI_Data/ros2_ws
-
-# 用当前虚拟环境的 Python 构建 Python 入口和 C++ FFmpeg 节点。
-colcon build --symlink-install --packages-select fastumi_usb_camera \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$(command -v python)"
-
-# 加载刚构建的包，供 ros2 launch 和 ros2 run 查找。
+python -m colcon build --build-base build --symlink-install \
+  --packages-select fastumi_usb_camera --cmake-clean-cache \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
-
-# 检查入口脚本首行是否指向 Jazzy 虚拟环境的 Python。
 head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
 
-使用激活的虚拟环境构建；`--system-site-packages` 让它读取对应发行版提供的
-`rclpy`、`cv_bridge` 等系统依赖。NumPy 需低于 2，以匹配当前 ROS 的
-`cv_bridge` 二进制扩展；固定的 OpenCV 4 Python 轮包可避免 OpenCV 5
-覆盖 ROS 兼容版本。以后打开新终端运行 Python 相机节点时，重新加载对应的
-ROS 环境、上述虚拟环境和 `ros2_ws/install/setup.bash`；仅运行 C++ 发送端或
-接收端时，加载 ROS 环境及工作空间即可。
-
-从旧 `ament_python` 构建迁移时，先清理这个包的旧构建缓存和安装目录，再按上面
-的 CMake 命令重建：
-
-```bash
-# 仅删除 fastumi_usb_camera 的旧构建缓存和安装产物，避免沿用 ament_python 布局。
-rm -rf build/fastumi_usb_camera install/fastumi_usb_camera
-```
-
-清理后执行上方对应发行版的构建命令。
-
-如果使用系统 Python 构建，入口首行会指向系统解释器，例如
-`#!/usr/bin/python3.10`。
-可将 UVC 依赖安装到该解释器的用户级包目录（不修改系统 Python 文件）：
-
-```bash
-# 将 UVC Python 包安装到系统解释器的用户包目录，不改动系统文件。
-/usr/bin/python3 -m pip install \
-  --target "$(/usr/bin/python3 -m site --user-site)" \
-  --no-deps pupil-labs-uvc==1.0.4
-
-# 检查系统解释器能导入 uvc 和兼容的 NumPy。
-/usr/bin/python3 -c 'import uvc, numpy; print(uvc.__file__, numpy.__version__)'
-```
-
-此方式要求系统 Python 已有兼容的 NumPy 1.x。重建后如再次出现
-`No module named 'uvc'`，先检查入口首行，再为该解释器安装依赖。
+入口首行应指向 `.venv-numpy1/bin/python`。每个运行终端都按
+Jazzy → `.venv-numpy1` → `install/setup.bash` 的顺序加载环境。
+C++ `usb_camera_ffmpeg` 与 `usb_camera_receiver` 也归入 NumPy 1 构建组；
+它们自身不导入 Python 图像库。旧的 CMake 缓存可用
+`--cmake-clean-cache` 重新配置。首次迁移旧构建目录时，先按工作区总 README
+将旧 `build` 移走，避免缓存保留其他解释器路径。本工作区统一流程以 Jazzy 为准。
 
 libuvc 直接访问 USB 设备。首次使用时可为这一型号安装 udev 规则：
 
@@ -214,11 +125,11 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
 两端设置一致的 `ROS_DOMAIN_ID`，网络需允许 DDS 发现与数据流量。发送端启动：
 
 ```bash
-# 加载发送机的 ROS 2 环境；Jazzy 主机改为 /opt/ros/jazzy/setup.bash。
-source /opt/ros/humble/setup.bash
-
-# 加载已构建的工作空间，使 launch 能找到本包。
-source /path/to/ros2_ws/install/setup.bash
+# 两台机器分别加载自己的 Jazzy、NumPy 1 和工作空间环境。
+cd /path/to/FastUMI_Data/ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
 
 # 在两台机器使用相同的 DDS 域编号。
 export ROS_DOMAIN_ID=63
@@ -242,11 +153,11 @@ ros2 topic bw /usb_camera/image_raw/ffmpeg
 接收端启动：
 
 ```bash
-# 加载接收机的 ROS 2 环境；Jazzy 主机改为 /opt/ros/jazzy/setup.bash。
-source /opt/ros/humble/setup.bash
-
-# 加载已构建的工作空间，使 launch 能找到接收节点。
-source /path/to/ros2_ws/install/setup.bash
+# 接收机也加载本机的 NumPy 1 和工作空间环境。
+cd /path/to/FastUMI_Data/ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
 
 # 与发送机使用相同的 DDS 域编号。
 export ROS_DOMAIN_ID=63
@@ -292,10 +203,11 @@ ros2 topic echo /usb_camera/image_raw --field header
 ros2 run rqt_image_view rqt_image_view
 
 # 在工作空间根目录运行本包的 Python 和 C++ 测试。
-colcon test --packages-select fastumi_usb_camera --ctest-args --output-on-failure
+python -m colcon test --build-base build \
+  --packages-select fastumi_usb_camera --ctest-args --output-on-failure
 
 # 汇总并显示本包及工作空间的测试结果。
-colcon test-result --verbose
+python -m colcon test-result --verbose
 ```
 
 在默认模式下，用 `rqt_image_view` 选择 `/usb_camera/image_raw` 检查画面；

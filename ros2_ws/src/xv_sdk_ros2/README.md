@@ -30,20 +30,24 @@ Ceres 和 SuiteSparse 库。
 
 ## 构建
 
+本 C++ 包与 `xv_ros2_msgs` 归属共享的 NumPy 1 构建组；环境创建见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
 在仓库的 ROS 2 工作区中构建消息包和驱动包：
 
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install --packages-select xv_ros2_msgs xv_sdk_ros2
+source .venv-numpy1/bin/activate
+python -m colcon build --build-base build --symlink-install --packages-select xv_ros2_msgs xv_sdk_ros2
 source install/setup.bash
 ```
 
 运行功能测试：
 
 ```bash
-colcon test --packages-select xv_ros2_msgs xv_sdk_ros2
-colcon test-result --all --verbose
+python -m colcon test --build-base build --packages-select xv_ros2_msgs xv_sdk_ros2
+python -m colcon test-result --all --verbose
 ```
 
 ## 启动
@@ -52,6 +56,7 @@ colcon test-result --all --verbose
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
 source ros2_ws/install/setup.bash
 ros2 launch xv_sdk_ros2 xv_sdk_node_launch.py
 ```

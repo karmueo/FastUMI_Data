@@ -54,17 +54,21 @@ test -f "$OPENVR_SDK_ROOT/lib/linux64/libopenvr_api.so"
 
 ## 构建与测试
 
+本 C++ 包归属工作区 NumPy 1 构建组；环境创建见
+[`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
 
-colcon build \
+python -m colcon build --build-base build --symlink-install \
   --packages-select vive_tracker \
   --cmake-args -DOPENVR_SDK_ROOT="$OPENVR_SDK_ROOT"
 
 source install/setup.bash
-colcon test --packages-select vive_tracker
-colcon test-result --verbose
+python -m colcon test --build-base build --packages-select vive_tracker
+python -m colcon test-result --verbose
 ```
 
 构建过程会将 `libopenvr_api.so` 复制到节点的构建目录和安装目录。仓库不会提交 OpenVR 第三方二进制。
@@ -78,6 +82,7 @@ colcon test-result --verbose
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
 source install/setup.bash
 ros2 launch vive_tracker vive_tracker.launch.py
 ```
@@ -173,6 +178,7 @@ ros2 launch vive_tracker vive_tracker.launch.py use_rviz:=false
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
 source install/setup.bash
 
 ros2 bag record \
@@ -198,6 +204,7 @@ ros2 bag info vive_tracker_session
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
 source install/setup.bash
 
 rviz2 \
@@ -210,6 +217,7 @@ rviz2 \
 ```bash
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
 source install/setup.bash
 
 ros2 bag play vive_tracker_session --clock 30

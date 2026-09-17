@@ -59,8 +59,8 @@ class PlacoRm75Kinematics:
             import placo
         except ImportError as error:
             raise RuntimeError(
-                "缺少 placo 0.9.23，请在包目录执行 "
-                "uv sync --project runtime --locked"
+                "缺少 placo 0.9.23，请按 ros2_ws/README.md 配置共享的 "
+                "NumPy 2 虚拟环境"
             ) from error
 
         self._placo = placo
