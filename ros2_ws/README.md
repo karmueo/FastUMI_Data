@@ -115,7 +115,8 @@ RGB、iTOF 深度/灰度和原始 IMU 话题，并可选启动 Madgwick 或互�
 `publish_compressed=true` 时只发布 `/usb_camera/image_raw/compressed`。
 当解码或发布积压时只保留最新待处理帧。
 另有 C++ FFmpeg 发送与接收节点，分别发布 `/usb_camera/image_raw/ffmpeg` 和
-`/usb_camera/image_decoded`；两种采集节点分别启动，避免争用 USB 相机。
+`/usb_camera/image_decoded`；统一启动入口可通过 `enable_ffmpeg:=true` 选择
+FFmpeg 发送端，每次仅启动一种采集节点，避免争用 USB 相机。
 启动和 USB 权限配置见 [`src/fastumi_usb_camera/README.md`](src/fastumi_usb_camera/README.md)。
 
 ### `fastumi_gripper_estimator`
