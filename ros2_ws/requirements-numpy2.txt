@@ -1,0 +1,6 @@
+# ROS 2 Humble / Python 3.10 / aarch64: RM75 Placo controller only.
+# Do not import the system cv_bridge binary extension in this environment.
+numpy==2.2.6
+scipy==1.15.3
+placo==0.9.23
+pytest>=7.4,<8

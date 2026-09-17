@@ -1,0 +1,4 @@
+[submodule "ros2_ws/src/ros2_rm_robot"]
+	path = ros2_ws/src/ros2_rm_robot
+	url = https://github.com/karmueo/ros2_rm_robot.git
+	branch = agx

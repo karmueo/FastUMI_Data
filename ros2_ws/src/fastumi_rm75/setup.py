@@ -23,7 +23,8 @@ setup(
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
         (f"share/{PACKAGE_NAME}/assets", glob("assets/*")),
     ],
-    install_requires=["placo>=0.9.23", "setuptools"],
+    # Placo belongs to the shared NumPy 2 runtime, not the NumPy 1 build env.
+    install_requires=["setuptools"],
     zip_safe=True,
     maintainer="FastUMI Maintainer",
     maintainer_email="maintainer@example.com",

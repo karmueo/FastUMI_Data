@@ -13,6 +13,7 @@ from fastumi_interfaces.msg import PolicyActionSequence
 import numpy as np
 import placo
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rm_ros_interfaces.msg import Jointpos
@@ -290,7 +291,7 @@ def main(args=None) -> None:
     try:
         node = Rm75PlacoController()
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         if node is not None:

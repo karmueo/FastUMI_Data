@@ -1,0 +1,8 @@
+# ROS 2 Humble / Python 3.10 / aarch64: ordinary ROS nodes and cv_bridge.
+# ROS packages and matplotlib are provided by apt/rosdep when appropriate.
+numpy==1.26.4
+scipy==1.13.1
+h5py==3.13.0
+opencv-python==4.11.0.86
+pupil-labs-uvc==1.0.4
+pytest>=7.4,<8

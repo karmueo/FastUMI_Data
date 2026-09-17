@@ -14,126 +14,34 @@
 解码并发布原始图像。两种采集节点会争用同一 USB 相机，因此每次只启动一种。
 FFmpeg 链路仍只缓存最新待处理帧，避免编码或网络变慢时积压旧画面。
 
-## 安装与构建
+## 安装与构建（ROS 2 Humble / Jetson）
 
-先安装对应发行版的 ROS 2：Humble 对应 Ubuntu 22.04 / Python 3.10，Jazzy
-对应 Ubuntu 24.04 / Python 3.12。节点使用**构建时 CMake 选择的 Python**，
-该解释器必须能导入 `uvc`。以下两套命令分别在对应系统的新终端中执行，
-从仓库的 `ros2_ws` 目录构建。ROS 2 本体的安装步骤见
-[Humble 安装文档](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)
-和 [Jazzy 安装文档](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)。
-
-### ROS 2 Humble
+本包的 Python 相机节点使用工作区共享的 `.venv-numpy1`；`cv_bridge` 和
+`rclpy` 由 Humble 提供，NumPy、OpenCV 和 `pupil-labs-uvc` 由
+[`ros2_ws/requirements-numpy1.txt`](../../requirements-numpy1.txt) 安装。
+节点使用**构建时 CMake 选择的 Python**，该解释器必须能导入 `uvc`。
+先按[工作区说明](../../README.md#两套共享-uv-环境humble--jetson)创建环境，
+再安装系统依赖并构建：
 
 ```bash
-# 加载 Humble 环境，使构建工具找到该发行版的 ROS 包。
+cd ros2_ws
 source /opt/ros/humble/setup.bash
-
-# 更新软件包索引，以便安装编译和 FFmpeg 传输依赖。
-sudo apt update
-
-# 安装虚拟环境、UVC/OpenCV 开发库及 Humble 的传输、Python 和测试依赖。
-sudo apt install python3-venv libuvc-dev libopencv-dev \
+source .venv-numpy1/bin/activate
+sudo apt install libuvc-dev libopencv-dev \
   ros-humble-ffmpeg-image-transport ros-humble-cv-bridge \
   ros-humble-ament-cmake-python ros-humble-ament-cmake-gtest \
   ros-humble-ament-cmake-pytest
-
-# 用 Humble 对应的系统 Python 创建可读取 ROS Python 包的虚拟环境。
-/usr/bin/python3 -m venv --system-site-packages ~/.local/share/fastumi_usb_camera_humble_venv
-
-# 激活构建和运行此包所用的虚拟环境。
-source ~/.local/share/fastumi_usb_camera_humble_venv/bin/activate
-
-# 安装匹配 cv_bridge 的 NumPy/OpenCV、UVC 采集库及 colcon。
-python -m pip install 'numpy<2' 'opencv-python==4.11.0.86' 'pytest<8' \
-  pupil-labs-uvc==1.0.4 colcon-common-extensions
-
-# 进入本仓库的 ROS 2 工作空间；把路径换成实际检出位置。
-cd /path/to/FastUMI_Data/ros2_ws
-
-# 用当前虚拟环境的 Python 构建 Python 入口和 C++ FFmpeg 节点。
-colcon build --symlink-install --packages-select fastumi_usb_camera \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$(command -v python)"
-
-# 加载刚构建的包，供 ros2 launch 和 ros2 run 查找。
+python -m colcon build --symlink-install --packages-select fastumi_usb_camera \
+  --cmake-clean-cache --cmake-args -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
-
-# 检查入口脚本首行是否指向 Humble 虚拟环境的 Python。
 head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
 
-### ROS 2 Jazzy
-
-```bash
-# 加载 Jazzy 环境，使构建工具找到该发行版的 ROS 包。
-source /opt/ros/jazzy/setup.bash
-
-# 更新软件包索引，以便安装编译和 FFmpeg 传输依赖。
-sudo apt update
-
-# 安装虚拟环境、UVC/OpenCV 开发库及 Jazzy 的传输、Python 和测试依赖。
-sudo apt install python3-venv libuvc-dev libopencv-dev \
-  ros-jazzy-ffmpeg-image-transport ros-jazzy-cv-bridge \
-  ros-jazzy-ament-cmake-python ros-jazzy-ament-cmake-gtest \
-  ros-jazzy-ament-cmake-pytest
-
-# 用 Jazzy 对应的系统 Python 创建可读取 ROS Python 包的虚拟环境。
-/usr/bin/python3 -m venv --system-site-packages ~/.local/share/fastumi_usb_camera_jazzy_venv
-
-# 激活构建和运行此包所用的虚拟环境。
-source ~/.local/share/fastumi_usb_camera_jazzy_venv/bin/activate
-
-# 安装匹配 cv_bridge 的 NumPy/OpenCV、UVC 采集库及 colcon。
-python -m pip install 'numpy<2' 'opencv-python==4.11.0.86' 'pytest<8' \
-  pupil-labs-uvc==1.0.4 colcon-common-extensions
-
-# 进入本仓库的 ROS 2 工作空间；把路径换成实际检出位置。
-cd /path/to/FastUMI_Data/ros2_ws
-
-# 用当前虚拟环境的 Python 构建 Python 入口和 C++ FFmpeg 节点。
-colcon build --symlink-install --packages-select fastumi_usb_camera \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$(command -v python)"
-
-# 加载刚构建的包，供 ros2 launch 和 ros2 run 查找。
-source install/setup.bash
-
-# 检查入口脚本首行是否指向 Jazzy 虚拟环境的 Python。
-head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
-```
-
-使用激活的虚拟环境构建；`--system-site-packages` 让它读取对应发行版提供的
-`rclpy`、`cv_bridge` 等系统依赖。NumPy 需低于 2，以匹配当前 ROS 的
-`cv_bridge` 二进制扩展；固定的 OpenCV 4 Python 轮包可避免 OpenCV 5
-覆盖 ROS 兼容版本。以后打开新终端运行 Python 相机节点时，重新加载对应的
-ROS 环境、上述虚拟环境和 `ros2_ws/install/setup.bash`；仅运行 C++ 发送端或
-接收端时，加载 ROS 环境及工作空间即可。
-
-从旧 `ament_python` 构建迁移时，先清理这个包的旧构建缓存和安装目录，再按上面
-的 CMake 命令重建：
-
-```bash
-# 仅删除 fastumi_usb_camera 的旧构建缓存和安装产物，避免沿用 ament_python 布局。
-rm -rf build/fastumi_usb_camera install/fastumi_usb_camera
-```
-
-清理后执行上方对应发行版的构建命令。
-
-如果使用系统 Python 构建，入口首行会指向系统解释器，例如
-`#!/usr/bin/python3.10`。
-可将 UVC 依赖安装到该解释器的用户级包目录（不修改系统 Python 文件）：
-
-```bash
-# 将 UVC Python 包安装到系统解释器的用户包目录，不改动系统文件。
-/usr/bin/python3 -m pip install \
-  --target "$(/usr/bin/python3 -m site --user-site)" \
-  --no-deps pupil-labs-uvc==1.0.4
-
-# 检查系统解释器能导入 uvc 和兼容的 NumPy。
-/usr/bin/python3 -c 'import uvc, numpy; print(uvc.__file__, numpy.__version__)'
-```
-
-此方式要求系统 Python 已有兼容的 NumPy 1.x。重建后如再次出现
-`No module named 'uvc'`，先检查入口首行，再为该解释器安装依赖。
+入口首行应指向 `ros2_ws/.venv-numpy1/bin/python`。以后运行 Python 相机节点时，
+先依次加载 Humble、`.venv-numpy1` 和 `install/setup.bash`。迁移旧构建缓存时，
+按工作区说明移走旧的 `build`、`install` 和 `log`，避免保留旧独立环境的解释器路径。
+C++ FFmpeg 节点也在 NumPy 1 构建阶段构建，但自身不导入 Python 图像库。
 
 libuvc 直接访问 USB 设备。首次使用时可为这一型号安装 udev 规则：
 

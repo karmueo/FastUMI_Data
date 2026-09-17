@@ -2,13 +2,13 @@
 
 # FastUMI ROS 2 工作空间
 
-`ros2_ws` 是 FastUMI 的 ROS 2 Jazzy 工作空间，覆盖 ToF 双目相机、XV 相机与 IMU 数据发布、
+`ros2_ws` 是 FastUMI 的 ROS 2 Humble 工作空间，覆盖 ToF 双目相机、XV 相机与 IMU 数据发布、
 VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转换、回放补标，
 以及 RM75 机械臂策略部署。
 
 ## `src` 目录总览
 
-`src` 下的每个顶层文件夹都是一个独立 ROS 2 包：
+`src` 下多数顶层文件夹是独立 ROS 2 包；`ros2_rm_robot` 是包含多个包的子模块：
 
 | 文件夹 | 类型 | 主要作用 |
 | --- | --- | --- |
@@ -22,6 +22,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
+| [`ros2_rm_robot`](src/ros2_rm_robot/) | 多包机械臂项目 | 提供 Humble 版 RM75 驱动、接口、MoveIt2 配置及示例。 |
 
 ## 包之间的数据关系
 
@@ -196,34 +197,91 @@ XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆�
 `rm_ros_interfaces`。部署前应根据现场环境收紧工作空间限制。详细接口见
 [`src/fastumi_rm75/README.md`](src/fastumi_rm75/README.md)。
 
-## 构建与验证
+## `ros2_rm_robot` 子模块
 
-在工作空间根目录执行：
+`src/ros2_rm_robot` 固定为 `karmueo/ros2_rm_robot` 的 Humble/Jetson `agx` 分支
+提交 `45bfec0`。首次克隆使用 `git clone --recurse-submodules`；已有仓库在根目录执行
+`git submodule update --init --recursive`。普通更新以主仓库记录的提交为准；只有准备
+升级驱动版本时才使用 `git submodule update --remote --checkout ros2_ws/src/ros2_rm_robot`
+并提交新的子模块指针。
+
+## 两套共享 uv 环境（Humble / Jetson）
+
+Ubuntu 22.04 的 ROS 2 Humble 使用系统 Python 3.10。两套环境都通过
+`--system-site-packages` 读取系统的 `rclpy` 等 ROS 包。NumPy 1 环境供通常的
+ROS 节点、`cv_bridge` 和工作区构建使用；NumPy 2 环境只运行
+`fastumi_rm75.rm75_placo_controller`，其 Placo 和 SciPy 依赖由
+`requirements-numpy2.txt` 管理。NumPy 1 环境另装 SciPy 1.13.1 和 HDF5 的
+Python 接口；系统 SciPy 1.8 与 NumPy 1.26 不兼容。两个环境都建在 `ros2_ws` 根目录；
+`model/dp/.venv` 仍由 DP 项目自己的 Jetson PyTorch 锁文件管理。
 
 ```bash
 cd ros2_ws
-source /opt/ros/jazzy/setup.bash
-rosdep install --from-paths src --ignore-src -r -y
-colcon build --symlink-install
-source install/setup.bash
+source /opt/ros/humble/setup.bash
+uv venv --python /usr/bin/python3 --system-site-packages .venv-numpy1
+uv pip install --python .venv-numpy1/bin/python -r requirements-numpy1.txt
+uv venv --python /usr/bin/python3 --system-site-packages .venv-numpy2
+uv pip install --python .venv-numpy2/bin/python -r requirements-numpy2.txt
 ```
 
-`vive_tracker` 构建时需要提供 OpenVR SDK 根目录，`xv_sdk_ros2` 需要预先安装
-匹配版本的 XV SDK；`tof_stereo_camera` 仅支持随包提供的 Linux x86-64 SDK 二进制；
-RM75 实机部署还需要官方驱动及接口包。只使用部分功能时，
-可通过 `colcon build --packages-up-to <包名>` 构建目标包及其工作空间内依赖。
+不要在 NumPy 2 环境导入 Humble 的 `cv_bridge`，它与 NumPy 1 的系统二进制接口配套。
+现有独立相机或 Placo 虚拟环境不再参与工作区构建；迁移后检查节点入口首行，确认
+它们指向正确的共享环境。
 
-运行测试：
+## 构建与验证
+
+先在 NumPy 1 终端构建本次集成涉及的包；`fastumi_rm75` 本身也在此阶段构建，
+但 Placo 控制器运行时显式调用 NumPy 2 解释器。旧 `build` 缓存含此前的 Python
+路径，迁移时将旧 `build`、`install` 和 `log` 移到备份目录，再重新构建。
 
 ```bash
-colcon test
-colcon test-result --all --verbose
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+rosdep install --from-paths src/fastumi_interfaces src/fastumi_usb_camera \
+  src/ros2_rm_robot/rm_ros_interfaces src/ros2_rm_robot/rm_description \
+  src/ros2_rm_robot/rm_driver --ignore-src -r -y
+python -m colcon build --symlink-install --packages-select \
+  fastumi_interfaces rm_ros_interfaces rm_description rm_driver \
+  fastumi_usb_camera \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+source install/setup.bash
+python -m colcon build --symlink-install --packages-select fastumi_rm75 \
+  --packages-ignore fastumi_data
+source install/setup.bash
+head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
 
-构建、测试和运行节点前都应先加载 ROS 2 环境；构建完成后还需加载
-`install/setup.bash`。
+相机入口应指向 `.venv-numpy1/bin/python`。要构建其他包，仍在 NumPy 1 终端
+按实际依赖选择包。`fastumi_rm75` 的旧策略桥运行时依赖 `fastumi_data`；
+只构建 Placo 控制器时用 `--packages-ignore fastumi_data` 跳过这条数据链路，
+旧策略桥需在数据链路包另行构建后使用。`--packages-up-to fastumi_rm75` 会把
+VIVE/ToF 等运行依赖也加入构建，Jetson 上不适合直接使用。
+`vive_tracker` 需 OpenVR SDK，`xv_sdk_ros2` 需匹配的
+XV SDK；`tof_stereo_camera` 随包二进制仅支持 x86-64，不能在本机 Jetson 构建。
+机械臂驱动构建后用 `ros2 interface show rm_ros_interfaces/msg/Jointpos` 检查接口。
+
+Placo 测试和控制器启动在新终端按 Humble、NumPy 2、工作区的顺序加载：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy2/bin/activate
+source install/setup.bash
+python -m pytest src/fastumi_rm75/test/test_placo_control.py \
+  src/fastumi_rm75/test/test_placo_ik.py -q
+python -m fastumi_rm75.rm75_placo_controller --ros-args \
+  --params-file src/fastumi_rm75/config/rm75_placo_controller.yaml \
+  -p dry_run:=true
+```
+
+最后一条命令显式启用 dry-run，不向机械臂发送运动指令。其他节点在 NumPy 1 终端
+运行；每个新终端都按 ROS、对应环境、`install/setup.bash` 的顺序加载。
 
 ## 独立 Kalibr 相机内参标定
+
+以下 Kalibr overlay 步骤仍是原有 Jazzy/SuiteSparse 7 流程，尚未适配 Humble；
+不要在本机直接执行这段补丁和构建命令。
 
 `calibrate_tracker_camera` 的完整外参标定必须显式传入 `--camera-config`；`--detect-only` 仍不加载相机内参。需要生成内参时，先运行独立包 `fastumi_camera_calibration`，再把生成的 `camera_intrinsics.yaml` 传给外参命令。独立命令从 MCAP 默认按 4 Hz 抽取 `sensor_msgs/msg/Image`，调用 Kalibr overlay 并发布 YAML、TXT、PDF 和日志。
 

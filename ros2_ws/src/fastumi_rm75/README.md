@@ -20,17 +20,27 @@ Placo 求解七轴关节，并通过睿尔曼低跟随 CANFD 接口控制 RM75�
 
 ## 环境、构建与启动
 
-ROS 2 Humble 的系统 Python 未安装 Placo。请使用包含系统 site-packages 的独立
-Python 3.10 环境安装 `placo>=0.9.23`、NumPy 和 SciPy，再在该环境中构建或运行：
+ROS 2 Humble 的系统 Python 未安装 Placo。按
+[`ros2_ws/README.md`](../../README.md#两套共享-uv-环境humble--jetson) 创建
+工作区的两套 uv 环境：本包与接口在 NumPy 1 环境构建，Placo 控制器在
+NumPy 2 环境运行。Placo 版本固定为 0.9.23。
 
 ```bash
-source /opt/ros/humble/setup.bash
-source /path/to/placo-venv/bin/activate
-python -m pip install 'placo>=0.9.23'
 cd ros2_ws
-colcon build --packages-select fastumi_interfaces fastumi_rm75 --symlink-install
-source install/local_setup.bash
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+python -m colcon build --packages-select \
+  fastumi_interfaces rm_ros_interfaces rm_description --symlink-install
+source install/setup.bash
+python -m colcon build --packages-select fastumi_rm75 \
+  --packages-ignore fastumi_data --symlink-install
+deactivate
+source .venv-numpy2/bin/activate
+source install/setup.bash
 ```
+
+这里跳过 `fastumi_data` 是为了在 Jetson 上只构建 Placo 控制器；旧
+`rm75_policy_bridge` 仍依赖该数据包，须在数据链路完整构建后运行。
 
 配置默认 `dry_run=false`，一旦收到新鲜关节反馈和有效预测就会直接向实机发送命令。
 首次联调应显式启用 dry-run：
@@ -48,13 +58,13 @@ python -m fastumi_rm75.rm75_placo_controller --ros-args \
   --params-file src/fastumi_rm75/config/rm75_placo_controller.yaml
 ```
 
-激活 Placo 环境后也可使用单节点 launch。launch 会调用当前 `PATH` 中的 `python3`，
-也可通过 `python_executable` 指定解释器：
+单节点 launch 默认定位本工作区的 `.venv-numpy2/bin/python`，不会随当前
+`PATH` 误用 NumPy 1 解释器。自定义工作区布局时可通过 `python_executable` 覆盖：
 
 ```bash
 ros2 launch fastumi_rm75 rm75_placo_controller.launch.py
 ros2 launch fastumi_rm75 rm75_placo_controller.launch.py \
-  python_executable:=/path/to/placo-venv/bin/python
+  python_executable:=/absolute/path/to/ros2_ws/.venv-numpy2/bin/python
 ```
 
 `urdf_path` 留空时使用随包安装、且与推理端字节一致的精简 RM75 URDF。控制频率、
@@ -69,7 +79,7 @@ Placo 控制节点同时向同一台机械臂或夹爪发布命令。
 ## 验证
 
 ```bash
-PYTHONPATH=src/fastumi_rm75 python -m pytest \
+python -m pytest \
   src/fastumi_rm75/test/test_placo_control.py \
   src/fastumi_rm75/test/test_placo_ik.py -q
 ```
