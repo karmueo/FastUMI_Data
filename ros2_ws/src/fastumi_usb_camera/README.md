@@ -81,6 +81,75 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py config:=/absolute/path/camer
 ros2 launch fastumi_usb_camera usb_camera.launch.py width:=640 height:=480 fps:=30
 ```
 
+### 获取 `vendor_id` 和 `product_id`
+
+在相机所在主机执行：
+
+```bash
+lsusb
+```
+
+输出中的 `ID` 字段格式为 `vendor_id:product_id`。例如：
+
+```text
+Bus 001 Device 005: ID 1bcf:28c4 USB Camera
+```
+
+这里的 `vendor_id` 是 `1bcf`，`product_id` 是 `28c4`。启动参数支持十进制或带
+`0x` 前缀的十六进制：
+
+```bash
+ros2 launch fastumi_usb_camera usb_camera.launch.py \
+  vendor_id:=0x1bcf product_id:=0x28c4
+```
+
+连接多台相机时，可用设备节点进一步确认对应关系：
+
+```bash
+udevadm info --query=property --name=/dev/video0 | \
+  grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT'
+```
+
+其中 `ID_VENDOR_ID`、`ID_MODEL_ID` 分别对应两个启动参数，
+`ID_SERIAL_SHORT` 可用于区分相同型号的相机。将 `/dev/video0` 替换为实际设备
+节点；可先用 `v4l2-ctl --list-devices` 查看设备列表。
+
+### 多相机启动
+
+每个 `usb_camera.launch.py` 进程只打开一台 UVC 相机。不同型号的相机可以分别
+启动，并用不同的 ROS namespace 隔离话题：
+
+```bash
+# 终端 1：前置相机
+ros2 launch fastumi_usb_camera usb_camera.launch.py \
+  namespace:=front vendor_id:=0x1bcf product_id:=0x28c4
+
+# 终端 2：侧面相机（VID/PID 按 lsusb 输出填写）
+ros2 launch fastumi_usb_camera usb_camera.launch.py \
+  namespace:=side vendor_id:=0x1234 product_id:=0x5678
+```
+
+上述示例分别发布 `/front/image_raw` 和 `/side/image_raw`（压缩模式对应各自
+namespace 下的 `image_raw/compressed`）。Python 节点要求 VID/PID 恰好匹配一台
+设备；当多台相机具有相同 VID/PID 时会报“找到多个”并停止。此时请使用 FFmpeg
+模式，并为每台相机建立独立的 YAML，设置不同的 `serial_number` 和绝对 `topic`：
+
+```yaml
+/**:
+  ros__parameters:
+    vendor_id: 7119       # 0x1bcf
+    product_id: 10436     # 0x28c4
+    serial_number: "相机序列号"
+    topic: /front/image_raw
+```
+
+然后为每个 YAML 启动一个 FFmpeg 节点：
+
+```bash
+ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
+  config:=/absolute/path/front.yaml
+```
+
 默认相机参数位于 `config/usb_camera.yaml`。`config` 指向的 YAML 是基础配置；
 非空的 launch 参数 `vendor_id`、`product_id`、`width`、`height`、`fps`、
 `frame_id` 会逐项覆盖 YAML；Python 模式还支持 `publish_compressed` 覆盖。

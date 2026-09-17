@@ -22,6 +22,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
+| [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，发布 RM75 Link7 扩散策略推荐序列。 |
 | [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
 | [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
 | [`tracker_teleoperated`](src/tracker_teleoperated/) | Python 遥操包 | 使用 Placo 将 Tracker 目标转换为 RM75 关节指令。 |
@@ -200,6 +201,14 @@ XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆�
 `rm_ros_interfaces`。部署前应根据现场环境收紧工作空间限制。详细接口见
 [`src/fastumi_rm75/README.md`](src/fastumi_rm75/README.md)。
 
+### `dp_infer`
+
+该包在独立 `.venv-dp` 环境中运行 Link7 扩散策略，订阅
+`/usb_camera/image_raw`、`/joint_states` 和 `/gripper/openness`，发布
+`fastumi_interfaces/PolicyActionSequence`。它自带模型推理所需的本地 Python
+模块，checkpoint 和训练 URDF 由启动参数指定。构建和 ROS 2 启动命令见
+[`src/dp_infer/README.md`](src/dp_infer/README.md)。
+
 ## `ros2_rm_robot` 子模块
 
 `src/ros2_rm_robot` 使用 `karmueo/ros2_rm_robot` 的 `scl_dev_jazzy` 分支。
@@ -222,12 +231,14 @@ git commit -m "chore: 更新 ros2_rm_robot 子模块"
 
 ## 构建与验证
 
-### 两套共享 Python 环境
+### ROS 2 工作区 Python 环境
 
 以下命令针对 Ubuntu 24.04、ROS 2 Jazzy 和系统 Python 3.12。ROS 的 `rclpy`、
 `cv_bridge` 等二进制模块通过 `--system-site-packages` 从系统安装中读取。
 `cv_bridge` 与 NumPy 1 配合使用；`tracker_teleoperated` 的 Placo 锁文件需要
-NumPy 2。两套环境分别放在工作空间根目录，不在包内创建虚拟环境。
+NumPy 2。这两套环境分别放在工作空间根目录，不在包内创建虚拟环境。
+DP 推理包另用 `.venv-dp`，依赖由其锁文件管理；命令见
+[`src/dp_infer/README.md`](src/dp_infer/README.md)。
 
 ```bash
 cd ros2_ws
@@ -247,6 +258,7 @@ NumPy 2 环境中导入 `cv_bridge`。
 | 环境 | ROS 包 | 原因 |
 | --- | --- | --- |
 | NumPy 2 | `tracker_teleoperated` | Placo 0.9.23 与锁文件中的 NumPy 2.3.5。 |
+| 独立 DP/NumPy 1 | `dp_infer` | 保持当前 checkpoint 的 PyTorch/CUDA 与训练时依赖版本。 |
 | NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`fastumi_rm75`、`fastumi_usb_camera` | 图像转换、数据处理及系统 SciPy/Kalibr 依赖。 |
 | NumPy 1 | `fastumi_interfaces`、`fastumi_rviz_plugins`、`stereo_camera`、`tof_stereo_camera`、`vive_tracker`、`xv_ros2_msgs`、`xv_sdk_ros2` | 消息、C++ 驱动和 RViz 插件跟随 ROS 工作区基础构建环境。 |
 | NumPy 1 | `control_arm_move`、`force_position_control`、`get_arm_state`、`rm_bringup`、`rm_control`、`rm_description`、`rm_doc`、`rm_driver`、`rm_example`、`rm_gazebo`、`rm_install`、`rm_moveit2`、`rm_ros_interfaces` | `ros2_rm_robot` 的示例、驱动、模型、文档和 MoveIt2 包。 |
@@ -267,7 +279,7 @@ source .venv-numpy1/bin/activate
 rosdep install --from-paths src --ignore-src -r -y
 PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
   python -m colcon build --build-base build \
-  --symlink-install --packages-skip tracker_teleoperated \
+  --symlink-install --packages-skip tracker_teleoperated dp_infer \
   --cmake-clean-cache --cmake-args \
   -DCMAKE_BUILD_TYPE=Release \
   -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python" \
@@ -292,8 +304,24 @@ head -1 install/tracker_teleoperated/lib/tracker_teleoperated/tracker_teleop_nod
 head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
 
-两条入口首行应分别指向 `.venv-numpy2/bin/python` 和
-`.venv-numpy1/bin/python`。若入口仍指向旧解释器，请重新构建所属包并再次
+DP 推理包单独用锁定的 `.venv-dp` 构建；`fastumi_interfaces` 已在 NumPy 1
+阶段生成。在新终端执行：
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+uv venv --python /usr/bin/python3 --system-site-packages .venv-dp
+source .venv-dp/bin/activate
+uv sync --project src/dp_infer/runtime --active --locked
+source install/setup.bash
+python -m colcon build --build-base build --symlink-install \
+  --packages-select dp_infer
+source install/setup.bash
+head -1 install/dp_infer/lib/dp_infer/dp_infer_node
+```
+
+三个入口首行应分别指向 `.venv-numpy2/bin/python`、`.venv-numpy1/bin/python`
+和 `.venv-dp/bin/python`。若入口仍指向旧解释器，请重新构建所属包并再次
 检查首行；不要仅靠切换终端中的 `python`。
 
 `vive_tracker` 构建时需要提供 OpenVR SDK 根目录，`xv_sdk_ros2` 需要预先安装
@@ -324,6 +352,17 @@ source /opt/ros/jazzy/setup.bash
 source .venv-numpy2/bin/activate
 source install/setup.bash
 ros2 launch tracker_teleoperated tracker_teleoperated.launch.py
+```
+
+```bash
+# DP 推理终端；checkpoint 与 URDF 使用训练时匹配的文件
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-dp/bin/activate
+source install/setup.bash
+ros2 launch dp_infer dp_infer.launch.py \
+  checkpoint:=/path/to/best.ckpt \
+  urdf_path:=/path/to/rm_75.urdf
 ```
 
 运行测试：

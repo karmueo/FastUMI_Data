@@ -4,6 +4,7 @@ install/
 log/
 .venv-numpy1/
 .venv-numpy2/
+.venv-dp/
 __pycache__/
 .pytest_cache/
 *.pyc
