@@ -1,0 +1,10 @@
+# 该文件保存默认 USB 相机标识、MJPEG 模式及图像输出参数。
+/**:
+  ros__parameters:
+    vendor_id: 7119
+    product_id: 10436
+    width: 1280
+    height: 960
+    fps: 30
+    frame_id: usb_camera_optical_frame
+    publish_compressed: false

@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!-- 该文件声明 USB 单目相机 ROS 2 包的元数据和运行依赖。 -->
+<package format="3">
+  <name>fastumi_usb_camera</name>
+  <version>0.1.0</version>
+  <description>采集 UVC MJPEG 并发布原始、JPEG 或 FFmpeg H.264 图像。</description>
+  <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>ament_cmake_python</build_depend>
+  <depend>ffmpeg_image_transport</depend>
+  <depend>ffmpeg_image_transport_msgs</depend>
+  <depend>image_transport</depend>
+  <depend>libopencv-dev</depend>
+  <depend>libuvc-dev</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
