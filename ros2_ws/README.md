@@ -19,6 +19,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_usb_camera`](src/fastumi_usb_camera/) | Python/C++ 相机包 | 使用 UVC 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
+| [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度。 |
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
@@ -196,6 +197,14 @@ XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆�
 默认 `dry_run` 为开启状态；实机控制还依赖 RM75 官方 ROS 2 驱动与
 `rm_ros_interfaces`。部署前应根据现场环境收紧工作空间限制。详细接口见
 [`src/fastumi_rm75/README.md`](src/fastumi_rm75/README.md)。
+
+### `unitree_gripper`
+
+将 `/motion_control/gripper_command` 的归一化目标映射为 Dex1-1 电机命令，并在
+`/motion_control/gripper_state` 发布实际开度。包内带厂商服务端、动态库和最小 SDK；
+首次准备私有 CycloneDDS 0.10.2 后，用 NumPy 1 环境构建，通过一个脚本同时启动
+服务端和控制节点。启动后默认平滑打开到 `1.0`。详细步骤见
+[`src/unitree_gripper/README.md`](src/unitree_gripper/README.md)。
 
 ## `ros2_rm_robot` 子模块
 
