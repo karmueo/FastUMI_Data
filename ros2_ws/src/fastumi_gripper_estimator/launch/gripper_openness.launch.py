@@ -1,6 +1,7 @@
 """启动 FastUMI 夹爪开合度估计节点并加载默认参数。"""
 
 import os
+from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -17,20 +18,27 @@ def generate_launch_description() -> LaunchDescription:
     """
     # 估计包安装后的共享目录。
     package_share = get_package_share_directory("fastumi_gripper_estimator")
-    # ToF 相机安装后的共享目录。
-    tof_camera_share = get_package_share_directory("tof_stereo_camera")
+    # 夹爪标定包安装后的共享目录，供估计节点复用同一组标定文件。
+    calibration_share = get_package_share_directory("gripper_openness")
     # 默认节点参数文件路径。
     parameter_file = os.path.join(
         package_share, "config", "gripper_openness.yaml"
     )
-    # ToF 驱动随包安装的默认相机标定文件路径。
+    # 夹爪标定节点默认读取的相机标定文件路径。
     default_calibration_file = os.path.join(
-        tof_camera_share, "config", "calibration.yaml"
+        calibration_share, "config", "calib.yaml"
     )
-    # 输入话题参数默认选择 ToF 三维鱼眼解算使用的原始 RGB 图像。
+    # 优先使用用户新生成的标定，首次运行时保留包内示例标定。
+    user_gripper_calibration = Path.home() / "fastumi_gripper_calibration.yaml"
+    default_gripper_calibration_file = (
+        str(user_gripper_calibration)
+        if user_gripper_calibration.is_file()
+        else os.path.join(calibration_share, "config", "calibration.yaml")
+    )
+    # 默认订阅与相机标定对应的 USB 原始图像。
     image_topic_argument = DeclareLaunchArgument(
         "image_topic",
-        default_value="/tof_stereo_camera/rgb/image_raw",
+        default_value="/usb_camera/image_raw",
         description="用于三维夹爪距离估计的原始 sensor_msgs/Image 话题",
     )
     # 调试图像开关允许通过 launch 命令行覆盖 YAML 默认值。
@@ -43,7 +51,13 @@ def generate_launch_description() -> LaunchDescription:
     calibration_argument = DeclareLaunchArgument(
         "camera_calibration_path",
         default_value=default_calibration_file,
-        description="ToF 或 Kalibr 鱼眼相机标定 YAML 路径",
+        description="相机标定 YAML 路径",
+    )
+    # 夹爪范围标定允许在启动时指定其他文件。
+    gripper_calibration_argument = DeclareLaunchArgument(
+        "gripper_calibration_path",
+        default_value=default_gripper_calibration_file,
+        description="夹爪范围标定 YAML 路径",
     )
     # 夹爪估计节点启动动作。
     estimator_node = Node(
@@ -61,6 +75,9 @@ def generate_launch_description() -> LaunchDescription:
                 "camera_calibration_path": LaunchConfiguration(
                     "camera_calibration_path"
                 ),
+                "gripper_calibration_path": LaunchConfiguration(
+                    "gripper_calibration_path"
+                ),
             },
         ],
     )
@@ -69,6 +86,7 @@ def generate_launch_description() -> LaunchDescription:
             image_topic_argument,
             debug_argument,
             calibration_argument,
+            gripper_calibration_argument,
             estimator_node,
         ]
     )

@@ -18,9 +18,10 @@ def test_default_config_matches_namespaced_node():
     )
     try:
         assert node.get_namespace() == "/usb_camera"
-        assert node.get_parameter("vendor_id").value == 0x1BCF
-        assert node.get_parameter("product_id").value == 0x28C4
-        assert node.get_parameter("width").value == 1280
+        assert node.get_parameter("video_device").value == "/dev/video0"
+        assert not node.has_parameter("vendor_id")
+        assert not node.has_parameter("product_id")
+        assert node.get_parameter("width").value == 1920
         assert node.get_parameter("publish_compressed").value is False
     finally:
         node.destroy_node()

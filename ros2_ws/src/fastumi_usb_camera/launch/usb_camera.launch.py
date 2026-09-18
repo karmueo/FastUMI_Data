@@ -21,6 +21,10 @@ def _camera_node(context):
     frame_id = LaunchConfiguration("frame_id").perform(context)
     if frame_id:
         overrides["frame_id"] = frame_id
+    device_uid = LaunchConfiguration("device_uid").perform(context)
+    video_device = LaunchConfiguration("video_device").perform(context)
+    if device_uid and video_device:
+        raise ValueError("device_uid 和 video_device 只能指定其中一个")
     enable_ffmpeg = LaunchConfiguration("enable_ffmpeg").perform(context).lower()
     if enable_ffmpeg not in ("true", "false"):
         raise ValueError("enable_ffmpeg 只能是 true 或 false")
@@ -29,6 +33,8 @@ def _camera_node(context):
         raise ValueError("publish_compressed 只能是 true 或 false")
 
     if enable_ffmpeg == "true":
+        if device_uid or video_device:
+            raise ValueError("device_uid 和 video_device 仅支持 Python 相机模式")
         # 先加载编码与话题配置，再由相机配置和命令行相机参数逐层覆盖。
         return [Node(
             package="fastumi_usb_camera",
@@ -40,6 +46,16 @@ def _camera_node(context):
 
     if compressed:
         overrides["publish_compressed"] = compressed == "true"
+    if device_uid:
+        overrides["device_uid"] = device_uid
+        overrides["video_device"] = ""
+    if video_device:
+        overrides["video_device"] = video_device
+    elif not device_uid and any(
+        name in overrides for name in ("vendor_id", "product_id")
+    ):
+        # 显式指定 VID/PID 时关闭 YAML 中的默认视频设备路径。
+        overrides["video_device"] = ""
     return [Node(
         package="fastumi_usb_camera",
         executable="usb_camera_node",
@@ -66,7 +82,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(name, default_value="")
         for name in (
             "vendor_id", "product_id", "width", "height", "fps",
-            "frame_id", "publish_compressed",
+            "frame_id", "publish_compressed", "device_uid", "video_device",
         )
     )
     return LaunchDescription(arguments + [OpaqueFunction(function=_camera_node)])

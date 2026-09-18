@@ -117,17 +117,16 @@ def _validate_camera_model(camera_key: str, camera_data: dict) -> None:
             )
         return
 
-    try:
-        camera_model = str(camera_data["camera_model"])
-    except KeyError as error:
-        raise ValueError("cam0 缺少 camera_model 字段") from error
-    if camera_model != "pinhole":
-        raise ValueError(f"仅支持 cam0.pinhole 相机模型，当前为 {camera_model}")
-    if distortion_model != "equidistant":
+    if distortion_model not in ("equidistant", "fisheye"):
         raise ValueError(
-            "仅支持 cam0.equidistant 鱼眼畸变模型，"
+            "仅支持 cam0.equidistant 或 cam0.fisheye 鱼眼畸变模型，"
             f"当前为 {distortion_model}"
         )
+    camera_model = camera_data.get("camera_model")
+    if camera_model is None and distortion_model == "equidistant":
+        raise ValueError("cam0 缺少 camera_model 字段")
+    if camera_model is not None and str(camera_model) != "pinhole":
+        raise ValueError(f"仅支持 cam0.pinhole 相机模型，当前为 {camera_model}")
 
 
 def _load_finite_values(

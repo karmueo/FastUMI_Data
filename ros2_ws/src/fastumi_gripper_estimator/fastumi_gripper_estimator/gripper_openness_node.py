@@ -15,6 +15,7 @@ from fastumi_gripper_estimator.estimator import (
     OpennessEstimate,
 )
 from fastumi_interfaces.msg import GripperState
+from gripper_openness.calibration import load_gripper_calibration
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -54,6 +55,9 @@ class GripperOpennessNode(Node):
         )
         if not camera_calibration_path.strip():
             camera_calibration_path = self._default_calibration_path()
+        gripper_calibration_path = str(
+            self.get_parameter("gripper_calibration_path").value
+        ).strip()
         # 夹爪编号用于区分配置，毫米距离用于最终归一化。
         gripper_id = int(
             self.get_parameter("gripper_range.gripper_id").value
@@ -84,6 +88,32 @@ class GripperOpennessNode(Node):
             )
             # 每帧必须与该宽高一致，才能直接使用标定内参。
             self._calibration_resolution = camera_calibration.resolution
+            marker_size_mm = float(self.get_parameter("marker_size_mm").value)
+            dictionary_name = str(self.get_parameter("dictionary_name").value)
+            left_marker_id = int(
+                self.get_parameter("gripper_range.left_finger_tag_id").value
+            )
+            right_marker_id = int(
+                self.get_parameter("gripper_range.right_finger_tag_id").value
+            )
+            if gripper_calibration_path:
+                range_calibration = load_gripper_calibration(
+                    gripper_calibration_path
+                )
+                if range_calibration.resolution != camera_calibration.resolution:
+                    raise ValueError(
+                        "相机标定与夹爪范围标定的分辨率不一致"
+                    )
+                min_distance_mm = range_calibration.min_marker_dist_mm
+                max_distance_mm = range_calibration.max_marker_dist_mm
+                marker_size_mm = range_calibration.marker_size_mm
+                dictionary_name = range_calibration.dictionary_name
+                left_marker_id = range_calibration.left_finger_tag_id
+                right_marker_id = range_calibration.right_finger_tag_id
+                roi_ratios = self._calibrated_roi_ratios(
+                    range_calibration,
+                    int(self.get_parameter("roi_padding_pixels").value),
+                )
             gripper_range = validate_gripper_distance_range(
                 min_distance_mm,
                 max_distance_mm,
@@ -95,25 +125,13 @@ class GripperOpennessNode(Node):
                 ),
                 closed_distance_mm=gripper_range.min_distance_mm,
                 open_distance_mm=gripper_range.max_distance_mm,
-                marker_size_mm=float(
-                    self.get_parameter("marker_size_mm").value
-                ),
+                marker_size_mm=marker_size_mm,
                 smoothing_alpha=float(
                     self.get_parameter("smoothing_alpha").value
                 ),
-                dictionary_name=str(
-                    self.get_parameter("dictionary_name").value
-                ),
-                left_marker_id=int(
-                    self.get_parameter(
-                        "gripper_range.left_finger_tag_id"
-                    ).value
-                ),
-                right_marker_id=int(
-                    self.get_parameter(
-                        "gripper_range.right_finger_tag_id"
-                    ).value
-                ),
+                dictionary_name=dictionary_name,
+                left_marker_id=left_marker_id,
+                right_marker_id=right_marker_id,
                 roi_ratios=roi_ratios,
                 image_resolution=camera_calibration.resolution,
             )
@@ -170,6 +188,20 @@ class GripperOpennessNode(Node):
         package_share = get_package_share_directory("tof_stereo_camera")
         return f"{package_share}/config/calibration.yaml"
 
+    @staticmethod
+    def _calibrated_roi_ratios(calibration, padding_pixels: int) -> tuple:
+        """将标定像素 ROI 加边距后转换为估计器使用的宽高比例。"""
+        if padding_pixels < 0:
+            raise ValueError("roi_padding_pixels 不能为负数")
+        width, height = calibration.resolution
+        crop = calibration.crop_reference
+        return (
+            max(0, crop["left_x"] - padding_pixels) / width,
+            max(0, crop["top_y"] - padding_pixels) / height,
+            min(width, crop["right_x"] + padding_pixels) / width,
+            min(height, crop["bottom_y"] + padding_pixels) / height,
+        )
+
     def _declare_parameters(self) -> None:
         """声明节点支持的全部 ROS 参数及默认值。"""
         self.declare_parameter("image_topic", DEFAULT_IMAGE_TOPIC)
@@ -180,6 +212,8 @@ class GripperOpennessNode(Node):
         )
         self.declare_parameter("publish_debug_image", False)
         self.declare_parameter("camera_calibration_path", "")
+        self.declare_parameter("gripper_calibration_path", "")
+        self.declare_parameter("roi_padding_pixels", 50)
         self.declare_parameter("marker_size_mm", 16.0)
         self.declare_parameter("dictionary_name", "DICT_4X4_50")
         self.declare_parameter(

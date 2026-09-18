@@ -79,6 +79,10 @@ def test_collection_launch_includes_devices_and_optional_recorder() -> None:
     assert gripper_arguments["image_topic"] == (
         "/tof_stereo_camera/rgb/image_raw"
     )
+    assert gripper_arguments["gripper_calibration_path"] == ""
+    assert perform_substitutions(
+        launch_context, [gripper_arguments["camera_calibration_path"]]
+    ).endswith("/share/tof_stereo_camera/config/calibration.yaml")
 
 
 def test_collection_launch_declares_recording_arguments_with_safe_defaults(

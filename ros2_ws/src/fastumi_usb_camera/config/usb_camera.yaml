@@ -1,8 +1,7 @@
-# 该文件保存默认 USB 相机标识、MJPEG 模式及图像输出参数。
+# 该文件保存默认视频设备路径、MJPEG 模式及图像输出参数。
 /**:
   ros__parameters:
-    vendor_id: 7119
-    product_id: 10436
+    video_device: /dev/video0
     width: 1920
     height: 1080
     fps: 30

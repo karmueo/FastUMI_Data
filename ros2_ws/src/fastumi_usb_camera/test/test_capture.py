@@ -4,6 +4,7 @@ import threading
 
 import pytest
 
+from fastumi_usb_camera import capture
 from fastumi_usb_camera.capture import UvcCamera, select_device
 
 
@@ -70,6 +71,73 @@ def test_select_device_reports_missing_and_duplicate_candidates():
         select_device([DEVICE], 0x1234, 0x5678)
     with pytest.raises(RuntimeError, match="找到多个.*camera-2"):
         select_device([DEVICE, {**DEVICE, "uid": "camera-2"}], 0x1BCF, 0x28C4)
+
+
+def test_select_device_uses_uid_for_identical_cameras():
+    """同 VID/PID 的相机按 UID 精确选择，不匹配时保留候选提示。"""
+    devices = [DEVICE, {**DEVICE, "uid": "camera-2"}]
+    assert select_device(devices, 0x1BCF, 0x28C4, "camera-2") == devices[1]
+    with pytest.raises(RuntimeError, match="device_uid=missing.*camera-2"):
+        select_device(devices, 0x1BCF, 0x28C4, "missing")
+    uvc = FakeUvc(devices)
+    camera = UvcCamera(
+        vendor_id=0x1BCF, product_id=0x28C4, device_uid="camera-2",
+        width=1280, height=960, fps=30, uvc_module=uvc,
+    )
+    assert uvc.capture.uid == "camera-2"
+    camera.close()
+
+
+def test_video_device_resolves_usb_bus_and_address(tmp_path):
+    """通过视频节点的 sysfs 父设备定位当前 USB 地址。"""
+    device_root = tmp_path / "dev"
+    device_root.mkdir()
+    video = device_root / "video0"
+    video.touch()
+    alias = device_root / "camera-front"
+    alias.symlink_to(video)
+    usb_device = tmp_path / "sys" / "devices" / "1-1.4"
+    interface = usb_device / "1-1.4:1.0"
+    interface.mkdir(parents=True)
+    (usb_device / "busnum").write_text("1\n")
+    (usb_device / "devnum").write_text("17\n")
+    sysfs_root = tmp_path / "sys" / "class" / "video4linux"
+    video_class = sysfs_root / "video0"
+    video_class.mkdir(parents=True)
+    (video_class / "device").symlink_to(interface)
+
+    assert capture._usb_location_from_video_device(
+        str(alias), sysfs_root, device_root
+    ) == (1, 17)
+    with pytest.raises(ValueError, match="不存在"):
+        capture._usb_location_from_video_device(
+            str(device_root / "video9"), sysfs_root, device_root
+        )
+
+
+def test_video_device_selects_matching_pyuvc_device(monkeypatch):
+    """相同 VID/PID 的相机按视频节点对应的 USB 地址选择。"""
+    devices = [
+        {**DEVICE, "uid": "1:17", "bus_number": 1, "device_address": 17},
+        {**DEVICE, "uid": "1:14", "bus_number": 1, "device_address": 14},
+    ]
+    monkeypatch.setattr(
+        capture, "_usb_location_from_video_device", lambda _: (1, 17)
+    )
+    uvc = FakeUvc(devices)
+    camera = UvcCamera(
+        video_device="/dev/video0",
+        width=1280, height=960, fps=30, uvc_module=uvc,
+    )
+    assert uvc.capture.uid == "1:17"
+    camera.close()
+    assert select_device(devices, usb_location=(1, 14)) == devices[1]
+    with pytest.raises(ValueError, match="只能指定其中一个"):
+        UvcCamera(
+            vendor_id=0x1BCF, product_id=0x28C4, device_uid="1:17",
+            video_device="/dev/video0", width=1280, height=960, fps=30,
+            uvc_module=uvc,
+        )
 
 
 def test_unsupported_mode_releases_device():

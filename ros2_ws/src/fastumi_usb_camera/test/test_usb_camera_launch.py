@@ -58,6 +58,48 @@ def test_jpeg_mode_starts_only_python_node(monkeypatch):
     assert node["parameters"][1] == {"publish_compressed": True}
 
 
+def test_device_uid_is_passed_only_to_python_node(monkeypatch):
+    """将设备 UID 传给 Python 节点，并拒绝 FFmpeg 模式中无效的 UID。"""
+    module = _load_launch()
+    node = _selected_node(monkeypatch, module, device_uid="1:15")
+    assert node["parameters"][1] == {
+        "device_uid": "1:15", "video_device": ""
+    }
+    with pytest.raises(ValueError, match="device_uid"):
+        _selected_node(
+            monkeypatch, module, device_uid="1:15", enable_ffmpeg="true"
+        )
+
+
+def test_video_device_is_passed_only_to_python_node(monkeypatch):
+    """视频节点路径传给 Python 节点，且不能与 UID 同时指定。"""
+    module = _load_launch()
+    node = _selected_node(monkeypatch, module, video_device="/dev/video0")
+    assert node["parameters"][1] == {"video_device": "/dev/video0"}
+    with pytest.raises(ValueError, match="video_device"):
+        _selected_node(
+            monkeypatch, module, video_device="/dev/video0",
+            enable_ffmpeg="true",
+        )
+    with pytest.raises(ValueError, match="只能指定其中一个"):
+        _selected_node(
+            monkeypatch, module, video_device="/dev/video0", device_uid="1:17"
+        )
+
+
+def test_explicit_usb_id_disables_default_video_device(monkeypatch):
+    """显式 VID/PID 启动时清除 YAML 中的默认视频设备路径。"""
+    module = _load_launch()
+    node = _selected_node(
+        monkeypatch, module, vendor_id="0x1bcf", product_id="0x28c4"
+    )
+    assert node["parameters"][1] == {
+        "vendor_id": 0x1BCF,
+        "product_id": 0x28C4,
+        "video_device": "",
+    }
+
+
 def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
     """FFmpeg 模式只启一个 C++ 发送端，并依次叠加配置和显式相机参数。"""
     module = _load_launch()

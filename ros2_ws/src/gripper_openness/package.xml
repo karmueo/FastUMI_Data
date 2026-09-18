@@ -1,28 +1,26 @@
 <?xml version="1.0"?>
-<!-- 该文件声明 FastUMI 夹爪开合度估计 ROS 2 包的依赖与元数据。 -->
+<!-- 该文件声明夹爪范围标定和开合度预测 ROS 2 包的依赖。 -->
 <package format="3">
-  <name>fastumi_gripper_estimator</name>
+  <name>gripper_openness</name>
   <version>0.1.0</version>
-  <description>基于双 ArUco 鱼眼三维位姿发布无量纲夹爪归一化距离。</description>
+  <description>ROS 2 夹爪范围标定和双 ArUco 开合度预测。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>cv_bridge</exec_depend>
-  <exec_depend>fastumi_interfaces</exec_depend>
-  <exec_depend>gripper_openness</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>rosbag2_py</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
-  <exec_depend>tof_stereo_camera</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>fastumi_interfaces</exec_depend>
 
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

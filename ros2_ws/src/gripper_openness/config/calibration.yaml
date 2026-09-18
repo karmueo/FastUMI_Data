@@ -1,0 +1,16 @@
+gripper_calibration:
+  marker_size_mm: 16.0
+  dictionary_name: DICT_4X4_50
+  left_finger_tag_id: 0
+  right_finger_tag_id: 1
+  min_marker_dist_mm: 47.45843946455117
+  max_marker_dist_mm: 129.63380814698166
+  resolution:
+  - 1920
+  - 1080
+  crop_reference:
+    top_y: 900
+    bottom_y: 1008
+    left_x: 379
+    right_x: 1446
+  total_valid_frames: 923

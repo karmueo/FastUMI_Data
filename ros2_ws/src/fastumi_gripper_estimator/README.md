@@ -9,10 +9,10 @@ ID 1，使用相机鱼眼标定和标记实际边长计算两个标签的三维�
 - `1.0`：夹爪完全张开
 - 中间值：三维距离在闭合、张开毫米标定范围内的线性映射，并经过指数平滑
 
-默认输入为原始 RGB 话题：
+默认启动输入为 USB 相机原始图像话题：
 
 ```text
-/tof_stereo_camera/rgb/image_raw
+/usb_camera/image_raw
 ```
 
 默认输出为：
@@ -46,7 +46,17 @@ normalized_distance =
 
 ## 必需配置
 
-默认参数位于 `config/gripper_openness.yaml`：
+默认启动使用与 `gripper_openness` 标定节点对应的文件：
+
+- `config/calib.yaml`：相机内参和畸变参数。
+- `~/fastumi_gripper_calibration.yaml`：标定节点生成的夹爪距离范围、标签参数及 ROI；文件不存在时使用包内 `config/calibration.yaml` 示例。
+
+先运行 `gripper_openness gripper_calibration.launch.py` 完成标定，生成
+`~/fastumi_gripper_calibration.yaml`，再启动本估计节点。默认从 `/usb_camera/image_raw` 读取
+`1920x1080` 图像。可分别通过 `camera_calibration_path:=...` 和
+`gripper_calibration_path:=...` 指定其他文件。两个文件的分辨率必须一致。
+
+本包原有的 `config/gripper_openness.yaml` 保留直接运行节点时使用的参数：
 
 ```yaml
 camera_calibration_path: ""
@@ -59,23 +69,24 @@ gripper_range:
   max_marker_dist_mm: 126.372
 ```
 
-空的 `camera_calibration_path` 会使用安装后的
-`tof_stereo_camera/config/calibration.yaml`。文件的 RGB 标定分辨率严格为
-`2048x1536`，输入图像宽高必须完全一致。显式路径仍支持 legacy Kalibr 标定覆盖：
+直接运行节点且 `camera_calibration_path` 为空时仍使用安装后的
+`tof_stereo_camera/config/calibration.yaml`。未提供 `gripper_calibration_path` 时
+使用上述 `gripper_range` 和 `roi_ratios` 参数。显式路径也支持 Kalibr 标定覆盖：
 
 ```bash
 ros2 launch fastumi_gripper_estimator gripper_openness.launch.py \
   camera_calibration_path:=/path/to/camera.yaml
 ```
 
-默认 ToF YAML 使用唯一的 `rgb` 块并要求：
+ToF YAML 使用唯一的 `rgb` 块并要求：
 
 ```yaml
 distortion_model: fisheye
 ```
 
-显式 legacy Kalibr 覆盖使用唯一的 `cam0` 块，并要求 `camera_model: pinhole`
-和 `distortion_model: equidistant`。两种模式均要求四个有限内参、四个有限畸变
+Kalibr 标定使用唯一的 `cam0` 块，并要求 `camera_model: pinhole`
+和 `distortion_model: equidistant`。USB 标定使用 `cam0/fisheye`，可省略
+`camera_model`。这些模式均要求四个有限内参、四个有限畸变
 系数和两个正整数像素分辨率。
 
 `gripper_range` 是 ROS 参数子项。夹爪距离严格使用毫米，最小距离必须为
@@ -94,7 +105,7 @@ cd ros2_ws
 source /opt/ros/jazzy/setup.bash
 source .venv-numpy1/bin/activate
 python -m colcon build --build-base build --symlink-install \
-  --packages-select fastumi_gripper_estimator
+  --packages-up-to fastumi_gripper_estimator
 source install/setup.bash
 ```
 
@@ -115,7 +126,7 @@ ros2 launch fastumi_gripper_estimator gripper_openness.launch.py
 source /opt/ros/jazzy/setup.bash
 source ros2_ws/.venv-numpy1/bin/activate
 ros2 bag play <bag_path> \
-  --topics /tof_stereo_camera/rgb/image_raw
+  --topics /usb_camera/image_raw
 ```
 
 终端 3：
@@ -150,9 +161,9 @@ RPY 使用 XYZ roll-pitch-yaw 约定：
 ## 重新标定
 
 更换相机标定、相机安装位置、ArUco 实际尺寸或夹爪结构后，需要在正确
-`equidistant` 鱼眼解算流程下重新测量完全闭合和完全张开距离，并更新
-`config/gripper_openness.yaml` 中 `gripper_range` 子项。范围数值的单位始终
-为毫米。
+鱼眼解算流程下重新测量完全闭合和完全张开距离。默认启动使用
+`~/fastumi_gripper_calibration.yaml` 的新标定结果；直接运行旧节点参数
+模式时更新 `config/gripper_openness.yaml` 的 `gripper_range` 子项。范围单位为毫米。
 
 ## 开合端点标定命令
 

@@ -125,6 +125,10 @@ def generate_launch_description() -> LaunchDescription:
         launch_arguments={
             "image_topic": TOF_RGB_IMAGE_TOPIC,
             "publish_debug_image": publish_debug_image,
+            "camera_calibration_path": PathJoinSubstitution(
+                [camera_share, "config", "calibration.yaml"]
+            ),
+            "gripper_calibration_path": "",
         }.items(),
     )
     # 可选录制进程使用 MCAP 原生快速 Zstd 块压缩并持续发现全部话题。

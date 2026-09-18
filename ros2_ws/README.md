@@ -19,6 +19,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_usb_camera`](src/fastumi_usb_camera/) | Python/C++ 相机包 | 使用 UVC 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
+| [`gripper_openness`](src/gripper_openness/) | Python 感知包 | 独立提供夹爪范围标定节点和 USB 图像开合度预测节点。 |
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
@@ -140,6 +141,17 @@ FFmpeg 发送端，每次仅启动一种采集节点，避免争用 USB 相机�
 
 详细算法与重新标定方法见
 [`src/fastumi_gripper_estimator/README.md`](src/fastumi_gripper_estimator/README.md)。
+
+### `gripper_openness`
+
+该包是独立的夹爪标定与预测实现，默认订阅 `/usb_camera/image_raw`，支持当前
+USB `cam0/fisheye` 标定、Kalibr `equidistant` 标定及常见针孔畸变模型。
+
+- `gripper_calibration_node`：通过 `~/start`、`~/save`、`~/reset` 服务采集实时图像，或扫描本地视频，保存夹爪毫米距离范围和 1%/99% ROI YAML。
+- `gripper_openness_node`：读取相机和夹爪范围 YAML，发布 `/gripper/openness` 与带原图时间戳的 `/gripper/state`。
+- `launch/` 和 `config/`：提供两类节点的标准 ROS 2 启动入口和参数模板。
+
+详细操作见 [`src/gripper_openness/README.md`](src/gripper_openness/README.md)。
 
 ### `fastumi_camera_calibration`
 
@@ -267,7 +279,7 @@ NumPy 2 环境中导入 `cv_bridge`。
 | --- | --- | --- |
 | NumPy 2 | `tracker_teleoperated` | Placo 0.9.23 与锁文件中的 NumPy 2.3.5。 |
 | 独立 DP/NumPy 1 | `dp_infer` | 保持当前 checkpoint 的 PyTorch/CUDA 与训练时依赖版本。 |
-| NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`fastumi_rm75`、`fastumi_usb_camera`、`unitree_gripper` | 图像转换、数据处理及设备控制依赖。 |
+| NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`gripper_openness`、`fastumi_rm75`、`fastumi_usb_camera`、`unitree_gripper` | 图像转换、数据处理及设备控制依赖。 |
 | NumPy 1 | `fastumi_interfaces`、`fastumi_rviz_plugins`、`stereo_camera`、`tof_stereo_camera`、`vive_tracker`、`xv_ros2_msgs`、`xv_sdk_ros2` | 消息、C++ 驱动和 RViz 插件跟随 ROS 工作区基础构建环境。 |
 | NumPy 1 | `control_arm_move`、`force_position_control`、`get_arm_state`、`rm_bringup`、`rm_control`、`rm_description`、`rm_doc`、`rm_driver`、`rm_example`、`rm_gazebo`、`rm_install`、`rm_moveit2`、`rm_ros_interfaces` | `ros2_rm_robot` 的示例、驱动、模型、文档和 MoveIt2 包。 |
 | NumPy 1 | `rm_63_config`、`rm_65_config`、`rm_75_config`、`rm_eco62_config`、`rm_eco63_config`、`rm_eco65_config`、`rm_gen72_config`、`rm_rx75_config` | 八个 MoveIt2 配置包。 |
@@ -378,7 +390,8 @@ ros2 launch dp_infer dp_infer.launch.py \
 ```bash
 python -m colcon test --build-base build \
   --packages-select fastumi_usb_camera fastumi_data \
-  fastumi_gripper_estimator fastumi_rm75 fastumi_camera_calibration
+  fastumi_gripper_estimator gripper_openness fastumi_rm75 \
+  fastumi_camera_calibration
 python -m colcon test-result --test-result-base build --all --verbose
 ```
 

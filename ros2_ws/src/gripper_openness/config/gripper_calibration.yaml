@@ -1,0 +1,17 @@
+# 该文件提供夹爪范围标定节点的默认 ROS 2 参数。
+gripper_calibration:
+  ros__parameters:
+    source_mode: topic
+    image_topic: /usb_camera/image_raw
+    video_path: ''
+    video_fps: 30.0
+    camera_calibration_path: ''
+    output_path: ''
+    overwrite: false
+    publish_debug_image: false
+    debug_image_topic: /gripper/calibration/debug_image
+    marker_size_mm: 16.0
+    dictionary_name: DICT_4X4_50
+    left_finger_tag_id: 0
+    right_finger_tag_id: 1
+    roi_ratios: [0.0, 0.0, 1.0, 1.0]

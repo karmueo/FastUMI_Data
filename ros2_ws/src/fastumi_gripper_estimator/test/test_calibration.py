@@ -54,9 +54,25 @@ def valid_tof_document():
     }
 
 
+def valid_usb_document():
+    """生成与夹爪标定包 calib.yaml 相同结构的 USB 相机参数。"""
+    return {
+        "cam0": {
+            "distortion_model": "fisheye",
+            "intrinsics": [601.0, 602.0, 960.0, 540.0],
+            "distortion_coeffs": [0.1, 0.2, -0.1, 0.01],
+            "resolution": [1920, 1080],
+        }
+    }
+
+
 @pytest.mark.parametrize(
     ("document_factory", "expected_resolution"),
-    [(valid_legacy_document, (640, 480)), (valid_tof_document, (2048, 1536))],
+    [
+        (valid_legacy_document, (640, 480)),
+        (valid_tof_document, (2048, 1536)),
+        (valid_usb_document, (1920, 1080)),
+    ],
 )
 def test_load_supported_camera_calibration(
     tmp_path: Path, document_factory, expected_resolution

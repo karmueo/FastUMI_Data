@@ -34,6 +34,8 @@ class UsbCameraNode(Node):
         super().__init__("usb_camera_node")
         self.declare_parameter("vendor_id", 0x1BCF)
         self.declare_parameter("product_id", 0x28C4)
+        self.declare_parameter("device_uid", "")
+        self.declare_parameter("video_device", "")
         self.declare_parameter("width", 1280)
         self.declare_parameter("height", 960)
         self.declare_parameter("fps", 30)
@@ -44,8 +46,19 @@ class UsbCameraNode(Node):
         # 这些参数只在创建节点时读取，不支持运行时改变设备或发布器。
         camera_config = {
             name: self._positive_int(name)
-            for name in ("vendor_id", "product_id", "width", "height", "fps")
+            for name in ("width", "height", "fps")
         }
+        device_uid = self.get_parameter("device_uid").value
+        if not isinstance(device_uid, str):
+            raise ValueError("device_uid 必须是字符串")
+        camera_config["device_uid"] = device_uid.strip()
+        video_device = self.get_parameter("video_device").value
+        if not isinstance(video_device, str):
+            raise ValueError("video_device 必须是字符串")
+        camera_config["video_device"] = video_device.strip()
+        if not camera_config["video_device"]:
+            camera_config["vendor_id"] = self._positive_int("vendor_id")
+            camera_config["product_id"] = self._positive_int("product_id")
         self._width = camera_config["width"]
         self._height = camera_config["height"]
         self._frame_id = str(self.get_parameter("frame_id").value).strip()
@@ -84,14 +97,15 @@ class UsbCameraNode(Node):
         except Exception:
             self.destroy_node()
             raise
+        camera_label = camera_config["video_device"] or (
+            f"{camera_config['vendor_id']:04x}:{camera_config['product_id']:04x}"
+        )
+        output_topic = (
+            "image_raw/compressed" if self._publish_compressed else "image_raw"
+        )
         self.get_logger().info(
-            "USB 相机 %04x:%04x，%dx%d@%d FPS，发布 %s"
-            % (
-                camera_config["vendor_id"], camera_config["product_id"],
-                self._width, self._height, camera_config["fps"],
-                "image_raw/compressed" if self._publish_compressed
-                else "image_raw",
-            )
+            f"USB 相机 {camera_label}，{self._width}x{self._height}@"
+            f"{camera_config['fps']} FPS，发布 {output_topic}"
         )
 
     def _positive_int(self, name: str) -> int:
