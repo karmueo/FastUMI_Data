@@ -1,0 +1,61 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,11 @@
+ cmake_minimum_required(VERSION 3.10)
+ project(Dex1_1)
+ 
++# 使用工作区内固定版本的 SDK 和 DDS，避免依赖机器的 /usr/local。
++set(UNITREE_SDK2_ROOT "" CACHE PATH "Unitree SDK2 source root")
++set(CYCLONEDDS_ROOT "" CACHE PATH "CycloneDDS installation root")
++set(BOOST_HEADER_OVERLAY "" CACHE PATH "System Boost header overlay")
++
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+@@ -23,27 +28,30 @@
+ 
+ find_package(Boost REQUIRED COMPONENTS program_options)
+ find_package(yaml-cpp REQUIRED)
++find_package(fmt REQUIRED)
++find_library(SERIALPORT_LIBRARY serialport REQUIRED)
+ 
+ include_directories(
+-  /usr/local/include/ddscxx
++  ${BOOST_HEADER_OVERLAY}
++  ${UNITREE_SDK2_ROOT}/include
++  ${UNITREE_SDK2_ROOT}/thirdparty/include/ddscxx
++  ${CYCLONEDDS_ROOT}/include
+   ${CMAKE_SOURCE_DIR}/include
+ )
+ 
+-link_directories(
+-  ${CMAKE_SOURCE_DIR}/lib
+-)
+-link_libraries(
+-  unitree_sdk2 ddsc ddscxx rt pthread
+-  libboost_program_options.a yaml-cpp fmt
+-)
+-
+-if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64") 
+-    link_libraries( libUnitreeMotorSDK_Arm64.so)
++if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
++  set(MOTOR_LIBRARY ${CMAKE_SOURCE_DIR}/lib/libUnitreeMotorSDK_Arm64.so)
+ else()
+-    link_libraries( libUnitreeMotorSDK_Linux64.so)
++  set(MOTOR_LIBRARY ${CMAKE_SOURCE_DIR}/lib/libUnitreeMotorSDK_Linux64.so)
+ endif()
+ 
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+ add_executable(dex1_1_gripper_server main.cpp)
+-add_executable(test_dex1_1_gripper_server test/test_gripper.cpp)
+-add_executable(test_dex1_1_gripper_server2 test/test_gripper2.cpp)
+\ No newline at end of file
++target_link_libraries(dex1_1_gripper_server PRIVATE
++  ${UNITREE_SDK2_ROOT}/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}/libunitree_sdk2.a
++  ${UNITREE_SDK2_ROOT}/thirdparty/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}/libddscxx.so
++  ${CYCLONEDDS_ROOT}/lib/libddsc.so
++  ${MOTOR_LIBRARY}
++  Boost::program_options yaml-cpp fmt::fmt ${SERIALPORT_LIBRARY} rt pthread
++)
++set_target_properties(dex1_1_gripper_server PROPERTIES
++  BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN/lib")

@@ -1,0 +1,7 @@
+# 保留随包提交的运行库；源码检出和本机构建缓存由准备脚本生成。
+!/install/
+/src/
+/build/
+/include/
+/local/
+/server-ldd.txt

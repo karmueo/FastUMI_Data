@@ -22,6 +22,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_data`](src/fastumi_data/) | Python 数据包 | 统一管理 episode、连续录制 MCAP、标定、同步、HDF5 转换和回放补标。 |
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
+| [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度；x86 服务端及 DDS 运行库位于包内 `deps`。 |
 | [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，发布 RM75 Link7 扩散策略推荐序列。 |
 | [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
 | [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
@@ -201,6 +202,13 @@ XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆�
 `rm_ros_interfaces`。部署前应根据现场环境收紧工作空间限制。详细接口见
 [`src/fastumi_rm75/README.md`](src/fastumi_rm75/README.md)。
 
+### `unitree_gripper`
+
+该包订阅 `/motion_control/gripper_command` 的归一化目标，向 Dex1-1 电机下发限速命令，
+并在 `/motion_control/gripper_state` 发布真实反馈。Jazzy x86 服务端及 DDS 运行库随包提交，
+缺失时可按固定源码版本重新构建；ARM64 使用包内厂商程序。构建和启动步骤见
+[`src/unitree_gripper/README.md`](src/unitree_gripper/README.md)。
+
 ### `dp_infer`
 
 该包在独立 `.venv-dp` 环境中运行 Link7 扩散策略，订阅
@@ -259,7 +267,7 @@ NumPy 2 环境中导入 `cv_bridge`。
 | --- | --- | --- |
 | NumPy 2 | `tracker_teleoperated` | Placo 0.9.23 与锁文件中的 NumPy 2.3.5。 |
 | 独立 DP/NumPy 1 | `dp_infer` | 保持当前 checkpoint 的 PyTorch/CUDA 与训练时依赖版本。 |
-| NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`fastumi_rm75`、`fastumi_usb_camera` | 图像转换、数据处理及系统 SciPy/Kalibr 依赖。 |
+| NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`fastumi_rm75`、`fastumi_usb_camera`、`unitree_gripper` | 图像转换、数据处理及设备控制依赖。 |
 | NumPy 1 | `fastumi_interfaces`、`fastumi_rviz_plugins`、`stereo_camera`、`tof_stereo_camera`、`vive_tracker`、`xv_ros2_msgs`、`xv_sdk_ros2` | 消息、C++ 驱动和 RViz 插件跟随 ROS 工作区基础构建环境。 |
 | NumPy 1 | `control_arm_move`、`force_position_control`、`get_arm_state`、`rm_bringup`、`rm_control`、`rm_description`、`rm_doc`、`rm_driver`、`rm_example`、`rm_gazebo`、`rm_install`、`rm_moveit2`、`rm_ros_interfaces` | `ros2_rm_robot` 的示例、驱动、模型、文档和 MoveIt2 包。 |
 | NumPy 1 | `rm_63_config`、`rm_65_config`、`rm_75_config`、`rm_eco62_config`、`rm_eco63_config`、`rm_eco65_config`、`rm_gen72_config`、`rm_rx75_config` | 八个 MoveIt2 配置包。 |
@@ -268,7 +276,7 @@ NumPy 2 环境中导入 `cv_bridge`。
 
 两阶段共用工作区的 `build` 和 `install` 目录，各包只在所属环境中构建。
 迁移旧构建目录时，先将含旧解释器缓存的 `build` 移走，再执行以下命令。
-先在干净终端加载 ROS 和 NumPy 1 环境，安装系统依赖并构建其余 33 个包。
+先在干净终端加载 ROS 和 NumPy 1 环境，安装系统依赖并构建其余工作区包。
 本机的 `Boost_DIR` 用于避免 `/usr/local` 中另一版本的 Boost 干扰 RM75
 MoveIt2；其他主机应改成对应的系统 Boost 配置目录。
 
