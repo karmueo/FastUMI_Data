@@ -3,7 +3,7 @@
 <package format="3">
   <name>tracker_teleoperated</name>
   <version>0.1.0</version>
-  <description>使用 VIVE Tracker 相对位姿控制 RM75 七轴机械臂。</description>
+  <description>使用 VIVE Tracker 控制 RM75 七轴机械臂，并根据视觉预测控制 Unitree 夹爪。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,8 @@
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>fastumi_interfaces</exec_depend>
+  <exec_depend>fastumi_gripper_estimator</exec_depend>
+  <exec_depend>fastumi_usb_camera</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
@@ -21,11 +23,13 @@
   <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rm_description</exec_depend>
+  <exec_depend>rm_bringup</exec_depend>
   <exec_depend>rm_ros_interfaces</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>vive_tracker</exec_depend>
+  <exec_depend>unitree_gripper</exec_depend>
 
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

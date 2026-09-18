@@ -7,10 +7,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import yaml
-from fastumi_interfaces.msg import TrackerStatus
+from fastumi_interfaces.msg import GripperState, TrackerStatus
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import SetBool, Trigger
 
 from tracker_teleoperated.keyboard import (
@@ -24,6 +24,7 @@ from tracker_teleoperated.core import (
     PoseStreamValidator,
     parse_home_joint_positions,
 )
+from tracker_teleoperated.gripper_follow import GripperFollower
 from tracker_teleoperated.node import (
     TrackerTeleopNode,
     build_home_command,
@@ -230,6 +231,7 @@ class TrackerInputState(WorkspaceCalibrationState):
     _disable = TrackerTeleopNode._disable
     _clear_control_reference = TrackerTeleopNode._clear_control_reference
     _publish_enabled = TrackerTeleopNode._publish_enabled
+    _update_gripper = TrackerTeleopNode._update_gripper
     _mapping_recovery_instruction = (
         TrackerTeleopNode._mapping_recovery_instruction
     )
@@ -251,12 +253,86 @@ class TrackerInputState(WorkspaceCalibrationState):
         self._command_positions = np.zeros(7)
         self._command_velocity = np.zeros(7)
         self._enabled_publisher = FakePublisher()
+        self._gripper_follower = GripperFollower(0.25, 0.25)
+        self._gripper_command_publisher = FakePublisher()
         # 记录保持目标，验证恢复输入不会自动继续驱动机械臂。
         self.commands = []
 
     def _publish_command(self, positions):
         """记录指令，避免向实机发送数据。"""
         self.commands.append(np.asarray(positions).copy())
+
+
+class GripperBridgeState:
+    """承载夹爪 ROS 回调和状态发布所需的最小节点状态。"""
+
+    _update_gripper = TrackerTeleopNode._update_gripper
+    _publish_status = TrackerTeleopNode._publish_status
+
+    def __init__(self):
+        """创建默认暂停且尚无夹爪输入的模拟节点。"""
+        self._enabled = False
+        self._gripper_follower = GripperFollower(0.25, 0.25)
+        self._gripper_command_publisher = FakePublisher()
+        self._status_publisher = FakePublisher()
+
+
+def test_gripper_ros_callbacks_hold_and_resume_without_pausing_arm():
+    """确认状态接口输出实测保持值，预测恢复后机械臂保持启用。"""
+    state = GripperBridgeState()
+    TrackerTeleopNode._gripper_feedback_callback(state, Float32(data=0.3))
+    assert state._gripper_command_publisher.messages[-1].data == pytest.approx(
+        0.3
+    )
+
+    predicted = GripperState()
+    predicted.valid = True
+    predicted.filtered_openness = 0.8
+    TrackerTeleopNode._gripper_estimate_callback(state, predicted)
+    state._enabled = True
+    TrackerTeleopNode._update_gripper(state, True, time.monotonic())
+    assert state._gripper_command_publisher.messages[-1].data == pytest.approx(
+        0.8
+    )
+
+    TrackerTeleopNode._gripper_feedback_callback(state, Float32(data=0.45))
+    predicted.valid = False
+    predicted.filtered_openness = float("nan")
+    TrackerTeleopNode._gripper_estimate_callback(state, predicted)
+    assert state._gripper_command_publisher.messages[-1].data == pytest.approx(
+        0.45
+    )
+    assert state._enabled
+    assert "夹爪预测无效" in state._status_publisher.messages[-1].data
+
+    predicted.valid = True
+    predicted.filtered_openness = 0.2
+    TrackerTeleopNode._gripper_estimate_callback(state, predicted)
+    TrackerTeleopNode._update_gripper(state, True, time.monotonic())
+    assert state._gripper_command_publisher.messages[-1].data == pytest.approx(
+        0.2
+    )
+    assert state._enabled
+
+
+def test_gripper_prediction_timeout_does_not_pause_arm_control():
+    """确认控制周期在预测超时时仅保持夹爪，机械臂继续发送原有目标。"""
+    state = TrackerInputState()
+    now = time.monotonic()
+    state._latest_tracker_monotonic = now - 0.15
+    state._pose_timeout_s = 0.25
+    state._freeze_timeout_s = 0.10
+    state._gripper_follower.update_feedback(0.4, now)
+    state._gripper_follower.update_estimate(True, 0.8, now - 0.3)
+
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._enabled
+    assert state._gripper_command_publisher.messages[-1].data == pytest.approx(
+        0.4
+    )
+    assert state.commands[-1] == pytest.approx(np.zeros(7))
+    assert "夹爪预测超时" in state._status_publisher.messages[-1].data
 
 
 def test_invalid_tracker_status_pauses_and_preserves_mapping():
@@ -271,6 +347,22 @@ def test_invalid_tracker_status_pauses_and_preserves_mapping():
     assert not state._enabled
     assert state._mapping_basis == pytest.approx(np.eye(3))
     assert "标定方向已保留" in state._status_publisher.messages[-1].data
+
+
+def test_tracker_pause_holds_latest_real_gripper_openness():
+    """确认 Tracker 故障沿用机械臂暂停路径并保持真实夹爪开度。"""
+    state = TrackerInputState()
+    state._gripper_follower.update_feedback(0.4, time.monotonic())
+    state._gripper_follower.update_estimate(True, 0.9, time.monotonic())
+    state._update_gripper(True, time.monotonic())
+    state._gripper_follower.update_feedback(0.5, time.monotonic())
+
+    TrackerTeleopNode._disable(state, "Tracker 跟踪状态无效", True)
+
+    assert not state._enabled
+    assert [
+        message.data for message in state._gripper_command_publisher.messages
+    ] == pytest.approx([0.9, 0.5])
 
 
 def test_heartbeat_timeout_pauses_and_preserves_mapping(monkeypatch):
@@ -523,6 +615,11 @@ def test_default_yaml_uses_configured_home_target():
     assert parameters["workspace_minimum_angle_deg"] == pytest.approx(60.0)
     assert parameters["mapping_mode"] == "workspace"
     assert parameters["translation_scale"] == pytest.approx(1.0)
+    assert parameters["gripper_estimate_topic"] == "/gripper/state"
+    assert parameters["gripper_feedback_topic"] == "/motion_control/gripper_state"
+    assert parameters["gripper_command_topic"] == "/motion_control/gripper_command"
+    assert parameters["gripper_estimate_timeout_s"] == pytest.approx(0.25)
+    assert parameters["gripper_feedback_timeout_s"] == pytest.approx(0.25)
 
 
 def call_return_home(state):

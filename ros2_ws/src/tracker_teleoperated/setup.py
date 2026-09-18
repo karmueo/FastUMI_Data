@@ -48,7 +48,7 @@ setup(
     zip_safe=True,
     maintainer="FastUMI Maintainer",
     maintainer_email="maintainer@example.com",
-    description="基于 VIVE Tracker 相对位姿的 RM75 遥操节点。",
+    description="基于 VIVE Tracker 和夹爪视觉预测的 RM75 与 Unitree 遥操节点。",
     license="Apache-2.0",
     tests_require=["pytest"],
     cmdclass={"install_scripts": RosInstallScripts},
@@ -56,6 +56,7 @@ setup(
         "console_scripts": [
             "tracker_teleop_node = tracker_teleoperated.node:main",
             "tracker_teleop_keyboard = tracker_teleoperated.keyboard:main",
+            "tracker_teleop_wait_ready = tracker_teleoperated.bringup_checks:main",
         ],
     },
 )

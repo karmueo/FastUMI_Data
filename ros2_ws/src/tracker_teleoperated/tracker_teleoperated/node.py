@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Optional, Protocol
 
-from fastumi_interfaces.msg import TrackerStatus
+from fastumi_interfaces.msg import GripperState, TrackerStatus
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 import numpy as np
@@ -21,7 +21,7 @@ from rclpy.qos import (
 from rm_ros_interfaces.msg import Jointpos, Movej
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, Empty, Float32, String
 from std_srvs.srv import SetBool, Trigger
 
 from tracker_teleoperated.calibration_store import (
@@ -43,6 +43,7 @@ from tracker_teleoperated.core import (
     validate_transform,
     workspace_mapping_from_samples,
 )
+from tracker_teleoperated.gripper_follow import GripperFollower
 from tracker_teleoperated.kinematics import (
     JOINT_NAMES,
     PlacoRm75Kinematics,
@@ -272,6 +273,15 @@ class TrackerTeleopNode(Node):
                 self.get_parameter("recovery_samples").value
             ),
         )
+        # 夹爪跟随决策与机械臂运动学独立，使用单调时钟判断输入是否新鲜。
+        self._gripper_follower = GripperFollower(
+            estimate_timeout_s=float(
+                self.get_parameter("gripper_estimate_timeout_s").value
+            ),
+            feedback_timeout_s=float(
+                self.get_parameter("gripper_feedback_timeout_s").value
+            ),
+        )
 
         command_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -297,6 +307,11 @@ class TrackerTeleopNode(Node):
         self._move_stop_publisher = self.create_publisher(
             Empty,
             str(self.get_parameter("move_stop_topic").value),
+            command_qos,
+        )
+        self._gripper_command_publisher = self.create_publisher(
+            Float32,
+            str(self.get_parameter("gripper_command_topic").value),
             command_qos,
         )
         self._target_publisher = self.create_publisher(
@@ -329,6 +344,18 @@ class TrackerTeleopNode(Node):
             str(self.get_parameter("joint_state_topic").value),
             self._joint_state_callback,
             20,
+        )
+        self.create_subscription(
+            GripperState,
+            str(self.get_parameter("gripper_estimate_topic").value),
+            self._gripper_estimate_callback,
+            1,
+        )
+        self.create_subscription(
+            Float32,
+            str(self.get_parameter("gripper_feedback_topic").value),
+            self._gripper_feedback_callback,
+            1,
         )
         self.create_subscription(
             Bool,
@@ -426,6 +453,15 @@ class TrackerTeleopNode(Node):
         self.declare_parameter("home_command_topic", "/rm_driver/movej_cmd")
         self.declare_parameter("home_result_topic", "/rm_driver/movej_result")
         self.declare_parameter("move_stop_topic", "/rm_driver/move_stop_cmd")
+        self.declare_parameter("gripper_estimate_topic", "/gripper/state")
+        self.declare_parameter(
+            "gripper_feedback_topic", "/motion_control/gripper_state"
+        )
+        self.declare_parameter(
+            "gripper_command_topic", "/motion_control/gripper_command"
+        )
+        self.declare_parameter("gripper_estimate_timeout_s", 0.25)
+        self.declare_parameter("gripper_feedback_timeout_s", 0.25)
         self.declare_parameter("home_speed_percent", 20)
         self.declare_parameter("home_timeout_s", 30.0)
         # ROS 的空列表可能为未设置值或字节数组，动态类型允许数值数组覆盖。
@@ -475,6 +511,43 @@ class TrackerTeleopNode(Node):
     def _heartbeat_callback(self, _message: Empty) -> None:
         """记录键盘进程最近一次存活心跳。"""
         self._latest_heartbeat_monotonic = time.monotonic()
+
+    def _gripper_estimate_callback(self, message: GripperState) -> None:
+        """接收预测状态；无效帧立即使夹爪退出跟随。"""
+        now = time.monotonic()
+        valid = self._gripper_follower.update_estimate(
+            bool(message.valid), float(message.filtered_openness), now
+        )
+        if not valid and self._enabled:
+            self._update_gripper(True, now)
+
+    def _gripper_feedback_callback(self, message: Float32) -> None:
+        """接收真实夹爪开度，暂停时尽快建立保持目标。"""
+        now = time.monotonic()
+        valid = self._gripper_follower.update_feedback(float(message.data), now)
+        if not valid or not self._enabled:
+            self._update_gripper(self._enabled, now)
+
+    def _update_gripper(self, enabled: bool, now: float) -> None:
+        """根据遥操与夹爪输入状态发布预测目标或一次性保持目标。"""
+        decision = self._gripper_follower.step(enabled, now)
+        if decision.command is not None:
+            self._gripper_command_publisher.publish(
+                Float32(data=float(decision.command))
+            )
+        if not enabled or not decision.changed:
+            return
+        # 夹爪输入问题只更改夹爪状态说明，不改变机械臂启用状态。
+        status_messages = {
+            "following": "夹爪正在跟随预测开度；机械臂继续跟随",
+            "feedback_missing": "夹爪实测反馈未就绪，暂不发送夹爪预测命令；机械臂继续跟随",
+            "feedback_invalid": "夹爪实测反馈无效，保持最近实测开度；机械臂继续跟随",
+            "feedback_timeout": "夹爪实测反馈超时，保持最近实测开度；机械臂继续跟随",
+            "estimate_missing": "夹爪预测未就绪，保持最近实测开度；机械臂继续跟随",
+            "estimate_invalid": "夹爪预测无效，保持最近实测开度；机械臂继续跟随",
+            "estimate_timeout": "夹爪预测超时，保持最近实测开度；机械臂继续跟随",
+        }
+        self._publish_status(status_messages[decision.mode])
 
     def _cancel_workspace_calibration(self) -> bool:
         """清除未完成的工作空间标定样本并返回此前是否正在标定。"""
@@ -967,6 +1040,7 @@ class TrackerTeleopNode(Node):
         if not self._enabled:
             return
         now = time.monotonic()
+        self._update_gripper(False, now)
         feedback_fresh = bool(
             self._latest_joint_positions is not None
             and now - self._latest_joint_monotonic <= self._feedback_timeout_s
@@ -1005,6 +1079,7 @@ class TrackerTeleopNode(Node):
                 self._stop_homing("超过回位时间上限")
             return
         if not self._enabled:
+            self._update_gripper(False, now)
             return
         if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
             self._disable("键盘心跳超时", publish_hold=True)
@@ -1016,6 +1091,7 @@ class TrackerTeleopNode(Node):
         if tracker_age > self._pose_timeout_s:
             self._disable("Tracker 里程计超时", publish_hold=True)
             return
+        self._update_gripper(True, now)
         assert self._command_positions is not None
         if tracker_age > self._freeze_timeout_s:
             self._publish_command(self._command_positions)

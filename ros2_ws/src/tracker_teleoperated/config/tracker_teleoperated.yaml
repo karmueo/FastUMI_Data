@@ -10,6 +10,14 @@ tracker_teleop:
     home_result_topic: /rm_driver/movej_result
     move_stop_topic: /rm_driver/move_stop_cmd
 
+    # 夹爪预测状态、真实反馈及归一化目标，0 闭合、1 张开。
+    gripper_estimate_topic: /gripper/state
+    gripper_feedback_topic: /motion_control/gripper_state
+    gripper_command_topic: /motion_control/gripper_command
+    # 两种输入超过阈值后停止跟随，并发送最近实测开度作为保持目标。
+    gripper_estimate_timeout_s: 0.25
+    gripper_feedback_timeout_s: 0.25
+
     # 按 h 的默认回位目标，按 joint1 至 joint7 排列，单位为弧度；修改后重启节点。
     home_joint_positions_rad:
       - 0.0
