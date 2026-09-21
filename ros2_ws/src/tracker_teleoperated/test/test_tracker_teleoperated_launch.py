@@ -11,6 +11,8 @@ import yaml
 
 # 包内源码资源用于独立验证，不依赖旧的安装目录。
 ROOT = Path(__file__).resolve().parents[1]
+UMI_DEVICE = "/dev/v4l/by-path/pci-test-usb-0:2.4:1.0-video-index0"
+WRIST_DEVICE = "/dev/v4l/by-path/pci-test-usb-0:2.3:1.0-video-index0"
 
 
 def module():
@@ -80,7 +82,8 @@ def test_saved_rviz_sources_initialize_manager(tmp_path, monkeypatch):
     """加载保存的视频源时，管理器与 RViz 使用同一初始输入。"""
     loaded = module()
     saved = yaml.safe_load((ROOT / "config/tracker_teleoperated.rviz").read_text())
-    saved['Panels'][0].update(UmiVideoDevice='/dev/video4', WristVideoDevice='/dev/video6')
+    saved['Panels'][0].update(
+        UmiVideoDevice=UMI_DEVICE, WristVideoDevice=WRIST_DEVICE)
     for item in saved["Visualization Manager"]["Displays"]:
         if item["Class"] == "rviz_default_plugins/Image":
             item["Topic"]["Value"] = "/saved/umi" if item["Name"] == "UMI 视频" else "/saved/wrist"
@@ -102,6 +105,27 @@ def test_saved_rviz_sources_initialize_manager(tmp_path, monkeypatch):
         "rviz_config": str(path),
     })
     loaded._launch(context)
-    assert captured[0]["parameters"][0]["umi_video_device"] == "/dev/video4"
-    assert captured[0]["parameters"][0]["wrist_video_device"] == "/dev/video6"
+    assert captured[0]["parameters"][0]["umi_video_device"] == UMI_DEVICE
+    assert captured[0]["parameters"][0]["wrist_video_device"] == WRIST_DEVICE
     assert 'umi_image_topic' not in captured[0]['parameters'][0]
+
+
+def test_legacy_dynamic_rviz_sources_are_ignored(tmp_path, monkeypatch):
+    """旧 RViz 动态节点不覆盖管理配置中的稳定端口。"""
+    loaded = module()
+    saved = yaml.safe_load((ROOT / "config/tracker_teleoperated.rviz").read_text())
+    saved['Panels'][0].update(UmiVideoDevice='/dev/video2', WristVideoDevice='/dev/video0')
+    path = tmp_path / "legacy.rviz"
+    path.write_text(yaml.safe_dump(saved))
+    captured = []
+    monkeypatch.setattr(loaded, "Node", lambda **kwargs: captured.append(kwargs) or Node(**kwargs))
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "config_file": str(ROOT / "config/tracker_teleoperated.yaml"),
+        "manager_config": str(ROOT / "config/component_manager.yaml"),
+        "autostart": "false", "use_recorder": "true", "use_rviz": "true",
+        "rviz_config": str(path),
+    })
+    loaded._launch(context)
+    assert 'umi_video_device' not in captured[0]["parameters"][0]
+    assert 'wrist_video_device' not in captured[0]["parameters"][0]

@@ -1,6 +1,7 @@
 """验证设备枚举、相机事务互锁、交换释放顺序及失败恢复。"""
 
 from concurrent.futures import Future
+from pathlib import Path
 from types import SimpleNamespace
 import struct
 import time
@@ -15,15 +16,22 @@ from tracker_teleoperated.component_manager import ComponentManager
 from test_component_manager import manager, FakeClient  # noqa: F401
 
 
+# 测试使用稳定物理路径，端口 2.4、2.3 分别对应默认 UMI 和末端相机。
+UMI_DEVICE = '/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.4:1.0-video-index0'
+WRIST_DEVICE = '/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.3:1.0-video-index0'
+ALT_DEVICE = '/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.5:1.0-video-index0'
+
+
 def prepare(manager):
     """注入两个可用物理相机，不访问真实采集设备。"""
     source = manager.video_sources
-    source.devices = [dict(device=f'/dev/video{i}', name=f'camera{i}', error='') for i in (0, 2, 10)]
+    source.devices = [dict(device=device, name=f'camera{index}', error='')
+                      for index, device in enumerate((UMI_DEVICE, WRIST_DEVICE, ALT_DEVICE))]
     source.next_scan = float('inf')
     return source
 
 
-def select(manager, key='umi', device='/dev/video10'):
+def select(manager, key='umi', device=ALT_DEVICE):
     """走标准 ROS 原子参数接口发起选择。"""
     return manager.set_parameters_atomically([Parameter(key+'_video_device', value=device)])
 
@@ -45,10 +53,10 @@ def test_stopped_selection_and_stable_topics(manager):
     assert select(manager).successful
     source.tick(time.monotonic())
     assert source.operation is None
-    assert source.sources['umi_camera']['actual'] == '/dev/video10'
-    assert manager.components['umi_camera'].config['parameters']['video_device'] == '/dev/video10'
+    assert source.sources['umi_camera']['actual'] == ALT_DEVICE
+    assert manager.components['umi_camera'].config['parameters']['video_device'] == ALT_DEVICE
     command, _ = ComponentManager._command(manager, 'umi_camera')
-    assert 'video_device:=/dev/video10' in command
+    assert f'video_device:={ALT_DEVICE}' in command
     assert source.launch_topic('estimator') == '/umi_camera/image_raw'
     assert source.launch_topic('recorder') == '/wrist_camera/image_raw'
 
@@ -59,16 +67,16 @@ def test_swap_releases_both_before_restart(manager):
     for key in ('umi_camera', 'wrist_camera', 'estimator'):
         manager._start(key)
     old = {k: manager.components[k].process for k in ('umi_camera', 'wrist_camera', 'estimator')}
-    assert select(manager, device='/dev/video2').successful
+    assert select(manager, device=WRIST_DEVICE).successful
     assert not select(manager).successful
     source.tick(time.monotonic())
     assert all(p.stop_started is not None for p in old.values())
     assert all(manager.components[k].process is p for k, p in old.items())
     advance(manager)
     assert source.operation is None
-    assert source.sources['umi_camera']['actual'] == '/dev/video2'
-    assert source.sources['wrist_camera']['actual'] == '/dev/video0'
-    assert manager.get_parameter('wrist_video_device').value == '/dev/video0'
+    assert source.sources['umi_camera']['actual'] == WRIST_DEVICE
+    assert source.sources['wrist_camera']['actual'] == UMI_DEVICE
+    assert manager.get_parameter('wrist_video_device').value == UMI_DEVICE
     assert all(manager.components[k].process is not p for k, p in old.items())
 
 
@@ -98,7 +106,7 @@ def test_failed_start_rolls_back(manager, monkeypatch):
 
     def command(key):
         """目标设备模拟不支持配置的采集模式。"""
-        if key == 'umi_camera' and manager.components[key].config['parameters']['video_device'] == '/dev/video10':
+        if key == 'umi_camera' and manager.components[key].config['parameters']['video_device'] == ALT_DEVICE:
             raise RuntimeError('不支持采集模式')
         return original(key)
 
@@ -107,7 +115,7 @@ def test_failed_start_rolls_back(manager, monkeypatch):
     for _ in range(4):
         advance(manager)
     assert source.operation is None
-    assert source.sources['umi_camera']['actual'] == '/dev/video0'
+    assert source.sources['umi_camera']['actual'] == UMI_DEVICE
     assert '已恢复' in source.sources['umi_camera']['error']
     assert manager.components['umi_camera'].process is not None
 
@@ -141,31 +149,47 @@ def test_pause_failure_keeps_original_camera(manager):
 
 def test_catalog_filters_metadata_deduplicates_and_sorts(tmp_path, monkeypatch):
     """同物理相机只展示一个采集入口，元数据过滤，错误可见。"""
+    device_root = tmp_path / 'dev'
+    by_path_root = device_root / 'v4l' / 'by-path'
+    by_path_root.mkdir(parents=True)
     for number in (10, 2, 3, 4, 5):
-        (tmp_path / f'video{number}').touch()
+        (device_root / f'video{number}').touch()
+    aliases = {
+        'pci-test-usb-0:2.3:1.0-video-index0': 2,
+        'pci-test-usbv2-0:2.3:1.0-video-index0': 2,
+        'pci-test-usb-0:2.3:1.0-video-index1': 3,
+        'pci-test-usb-0:2.4:1.0-video-index0': 4,
+        'pci-test-usb-0:2.5:1.0-video-index0': 5,
+        'pci-test-usb-0:2.10:1.0-video-index0': 10,
+    }
+    for name, number in aliases.items():
+        (by_path_root / name).symlink_to(device_root / f'video{number}')
     monkeypatch.setattr(camera_catalog, '_usb_location_from_video_device',
-                        lambda path, *_: (1, 1 if path.endswith(('2', '3', '4')) else int(path.split('video')[-1])))
+                        lambda *_: (1, 1))
     real_open = camera_catalog.os.open
     descriptors = {}
 
     def open_device(path, flags):
         """模拟权限错误并保存描述符对应的节点名。"""
-        if str(path).endswith('5'):
+        target = Path(path).resolve().name
+        if target == 'video5':
             raise PermissionError('权限不足')
         descriptor = real_open(path, flags)
-        descriptors[descriptor] = str(path)
+        descriptors[descriptor] = target
         return descriptor
 
     def query(descriptor, _request, buffer, _mutate):
         """模拟 QUERYCAP 的采集能力和元数据节点。"""
         buffer[16:19] = b'USB'
         struct.pack_into('II', buffer, 84, 0x80000000,
-                         0x800000 if descriptors[descriptor].endswith('2') else 1)
+                         0x800000 if descriptors[descriptor] == 'video4' else 1)
 
     monkeypatch.setattr(camera_catalog.os, 'open', open_device)
     monkeypatch.setattr(camera_catalog.fcntl, 'ioctl', query)
-    result = camera_catalog.scan_devices(tmp_path)
-    assert [d['device'].split('/')[-1] for d in result] == ['video3', 'video5', 'video10']
+    result = camera_catalog.scan_devices(by_path_root, device_root=device_root)
+    assert [d['physical_port'] for d in result] == ['2.3', '2.5', '2.10']
+    assert result[0]['device'].endswith('usb-0:2.3:1.0-video-index0')
+    assert result[0]['kernel_device'].endswith('video2')
     assert result[1]['error']
 
 
@@ -179,7 +203,7 @@ def test_catalog_publishes_ros_byte_levels(manager):
     """通过真实 ROS 发布器序列化设备目录，覆盖 Jazzy 的 byte 类型等级。"""
     source = prepare(manager)
     source.scan = Future()
-    source.scan.set_result(source.devices + [dict(device='/dev/video12', name='', error='权限不足')])
+    source.scan.set_result(source.devices + [dict(device=ALT_DEVICE, name='', error='权限不足')])
     source.tick(time.monotonic())
     assert source.scan is None
     assert source.devices[-1]['error'] == '权限不足'
@@ -267,7 +291,7 @@ def test_verify_timeout_restores_old_assignment(manager):
     assert source.operation['rollback']
     advance(manager)
     assert source.operation is None
-    assert source.sources['umi_camera']['actual'] == '/dev/video0'
+    assert source.sources['umi_camera']['actual'] == UMI_DEVICE
 
 
 def test_restore_failure_stops_new_processes(manager, monkeypatch):
@@ -304,13 +328,13 @@ def test_external_device_readback_and_no_writes(manager):
             """返回实际使用的设备路径。"""
             assert names == ['video_device']
             future = Future()
-            future.set_result(SimpleNamespace(values=[SimpleNamespace(string_value='/dev/video10')]))
+            future.set_result(SimpleNamespace(values=[SimpleNamespace(string_value=ALT_DEVICE)]))
             return future
 
     source.observers['umi_camera']['client'] = Reader()
     source.tick(time.monotonic())
     source.tick(time.monotonic())
-    assert source.fields('umi_camera')['video_device'] == '/dev/video10'
+    assert source.fields('umi_camera')['video_device'] == ALT_DEVICE
     assert source.fields('umi_camera')['source_editable'] == 'false'
     assert not select(manager).successful
 
@@ -318,7 +342,13 @@ def test_external_device_readback_and_no_writes(manager):
 def test_swap_rejects_missing_return_device(manager):
     """当前设备拔出后保留原选择，但不能交换成无效分配。"""
     source = prepare(manager)
-    source.devices = [d for d in source.devices if d['device'] != '/dev/video0']
-    assert not select(manager, device='/dev/video2').successful
-    assert source.sources['umi_camera']['actual'] == '/dev/video0'
+    source.devices = [d for d in source.devices if d['device'] != UMI_DEVICE]
+    assert not select(manager, device=WRIST_DEVICE).successful
+    assert source.sources['umi_camera']['actual'] == UMI_DEVICE
     assert source.operation is None
+
+
+def test_direct_video_device_is_rejected(manager):
+    """管理参数不再接受动态内核视频编号。"""
+    prepare(manager)
+    assert not select(manager, device='/dev/video0').successful

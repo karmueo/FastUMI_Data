@@ -41,3 +41,15 @@ TEST(CameraConfiguration, RequiresAbsoluteTopicAndFrameId)
   config.topic = "/usb_camera/image_raw/";
   EXPECT_THROW(validate_configuration(config), std::invalid_argument);
 }
+
+TEST(CameraConfiguration, RequiresStablePhysicalDevicePath)
+{
+  auto config = CameraConfiguration{};  ///< 待校验的相机配置。
+  config.video_device = "/dev/video0";
+  EXPECT_THROW(validate_configuration(config), std::invalid_argument);
+  config.video_device =
+    "/dev/v4l/by-path/pci-test-usb-0:2.4:1.0-video-index0";
+  EXPECT_NO_THROW(validate_configuration(config));
+  config.serial_number = "duplicate";
+  EXPECT_THROW(validate_configuration(config), std::invalid_argument);
+}

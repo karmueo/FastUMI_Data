@@ -53,9 +53,12 @@ RViz 自动加载 `tracker_teleoperated/TeleopPanel`，同时显示 UMI 视频 `
 `/wrist_camera/image_raw`、里程计 `/vive_tracker/odom`、轨迹和 TF。
 默认固定坐标系为 `vive_tracker_odom`。也可在 RViz 的 Panels 菜单中添加该面板。
 
-面板顶部的“末端视频”和“UMI 视频”下拉框选择本机 `/dev/videoN` 设备，并显示设备名称。
+面板顶部的“末端视频”和“UMI 视频”下拉框选择本机
+`/dev/v4l/by-path/*-video-index0` 物理端口，并显示设备名称、Hub 端口链和当前
+`/dev/videoN` 调试信息。
 管理器每两秒后台读取设备能力，也可点击“刷新设备”；扫描不启动视频流，过滤元数据
-节点，同一 USB 相机只展示一个采集入口。当前设备拔出后仍保留选择并标记“设备不存在”。
+节点，并合并 udev 生成的 `usb`/`usbv2` 重复链接。当前设备拔出后仍保留选择并标记
+“设备不存在”，不会自动使用另一台同型号相机。
 选择另一角色已使用的设备会交换两路分配，先释放两台相机，再启动并等待有效图像。
 
 录制或保存期间两个选择框均禁用。空闲时切换先锁定录制启动并暂停遥操，完成后保持暂停；
@@ -67,7 +70,8 @@ RViz 自动加载 `tracker_teleoperated/TeleopPanel`，同时显示 UMI 视频 `
 `/wrist_camera/image_raw`）；Displays 中修改 Topic 会恢复为角色话题。
 `record_camera=false` 时保持关闭图像录制。设备选择不写回 YAML，组件重启继续沿用。
 RViz 保存配置时保存面板的 `UmiVideoDevice`、`WristVideoDevice` 字段；通过 `rviz_config`
-加载时在自动启动前恢复。旧配置没有设备字段时使用管理配置默认值，Topic 字段不决定业务输入。
+加载时在自动启动前恢复。旧配置中的 `/dev/videoN` 字段会被忽略，使用管理配置的稳定
+默认端口；下次保存 RViz 后会写入 by-path。Topic 字段不决定业务输入。
 
 ## 2. 组件状态、控制与数据保存
 
@@ -80,13 +84,17 @@ RViz 保存配置时保存面板的 `UmiVideoDevice`、`WristVideoDevice` 字段
 | RM75 驱动 | `rm_driver/rm_75_driver.launch.py`，驱动地址沿用该包配置 |
 | VIVE Tracker | 现有 Tracker launch，关闭其独立 RViz |
 | Unitree 夹爪 | `run_gripper.sh`，管理服务端和 ROS 节点 |
-| UMI 相机 | `/dev/video0` → `/umi_camera/image_raw` |
+| UMI 相机 | Hub 端口 `2.4` → `/umi_camera/image_raw` |
 | 夹爪预测 | `/umi_camera/image_raw` → `/gripper/state` |
-| 末端相机 | `/dev/video2` → `/wrist_camera/image_raw` |
+| 末端相机 | Hub 端口 `2.3` → `/wrist_camera/image_raw` |
 | 遥操控制 | 默认暂停，50 Hz 控制；人工启用后才连续发送指令 |
 | 数据记录 | 默认空闲，使用现有 HDF5/MP4 数据格式 |
 
 `component_manager.yaml` 为各组件提供 `mode`：
+
+默认物理路径包含当前主机的 PCI 控制器地址 `0000:06:00.4`。Hub 必须继续连接
+当前电脑上游端口，UMI 和末端相机分别固定在 Hub 端口 `2.4`、`2.3`。自定义管理配置
+中的相机参数也必须使用 `video-index0` by-path；直接配置 `/dev/videoN` 会在启动时报告错误。
 
 - `auto`：发现已有节点或数据发布端时只监测，否则由本会话启动。
 - `observe`：始终只监测，适用于远程机械臂或由其他终端管理的设备。

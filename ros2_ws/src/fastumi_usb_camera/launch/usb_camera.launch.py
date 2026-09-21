@@ -8,6 +8,8 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from fastumi_usb_camera.capture import is_physical_video_device_path
+
 
 def _camera_node(context):
     """每次只启动一个采集节点，并应用显式给出的相机参数。"""
@@ -23,6 +25,10 @@ def _camera_node(context):
         overrides["frame_id"] = frame_id
     device_uid = LaunchConfiguration("device_uid").perform(context)
     video_device = LaunchConfiguration("video_device").perform(context)
+    if video_device and not is_physical_video_device_path(video_device):
+        raise ValueError(
+            "video_device 必须使用 /dev/v4l/by-path/*-video-index0 物理端口路径"
+        )
     if device_uid and video_device:
         raise ValueError("device_uid 和 video_device 只能指定其中一个")
     enable_ffmpeg = LaunchConfiguration("enable_ffmpeg").perform(context).lower()
@@ -33,8 +39,12 @@ def _camera_node(context):
         raise ValueError("publish_compressed 只能是 true 或 false")
 
     if enable_ffmpeg == "true":
-        if device_uid or video_device:
-            raise ValueError("device_uid 和 video_device 仅支持 Python 相机模式")
+        if device_uid:
+            raise ValueError("device_uid 仅支持 Python 相机模式")
+        if video_device:
+            overrides["video_device"] = video_device
+        elif any(name in overrides for name in ("vendor_id", "product_id")):
+            overrides["video_device"] = ""
         # 先加载编码与话题配置，再由相机配置和命令行相机参数逐层覆盖。
         return [Node(
             package="fastumi_usb_camera",

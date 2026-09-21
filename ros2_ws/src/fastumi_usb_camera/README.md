@@ -2,11 +2,13 @@
 
 # fastumi_usb_camera
 
-这个 ROS 2 包通过 `pupil-labs-uvc` 按视频设备路径打开单目 UVC 相机，
+这个 ROS 2 包通过 `pupil-labs-uvc` 按 USB 物理端口打开单目 UVC 相机，
 采集原生 MJPEG。默认解码并发布 `sensor_msgs/msg/Image`；设置
 `publish_compressed:=true` 时只发布原始 JPEG 字节组成的
 `sensor_msgs/msg/CompressedImage`，不创建 raw 话题，也不执行 JPEG 解码。
-默认设备为 `/dev/video0`，模式为 `1920x1080@30`。
+默认设备为 UMI 相机端口
+`/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.4:1.0-video-index0`，
+模式为 `1920x1080@30`。
 
 独立的 C++ `usb_camera_ffmpeg` 节点直接采集 MJPEG，在发送端解码 JPEG，
 用官方 `ffmpeg_image_transport` 编码为 H.264；`usb_camera_receiver` 在接收端
@@ -103,49 +105,41 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py \
   vendor_id:=0x1bcf product_id:=0x28c4
 ```
 
-连接多台相机时，可用设备节点进一步确认对应关系：
+连接多台相机时，用动态节点查询对应的物理路径：
 
 ```bash
 udevadm info --query=property --name=/dev/video0 | \
-  grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT'
+  grep -E 'ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_PATH='
 ```
 
-其中 `ID_VENDOR_ID`、`ID_MODEL_ID` 分别对应两个启动参数，
-序列号唯一时 `ID_SERIAL_SHORT` 可用于区分相同型号的相机。将 `/dev/video0` 替换为实际设备
-节点；可先用 `v4l2-ctl --list-devices` 查看设备列表。
+其中 `ID_PATH` 表示 USB 控制器、Hub 及端口链。也可直接运行
+`ls -l /dev/v4l/by-path/` 查看稳定路径当前指向哪个动态节点。
 
 ### 多相机启动
 
 每个 `usb_camera.launch.py` 进程只打开一台 UVC 相机。用不同的 ROS namespace
-隔离话题，并为每台相机指定视频设备路径：
+隔离话题，并为每台相机指定 `video-index0` 物理路径：
 
 ```bash
-# 终端 1：前置相机
+# 终端 1：UMI 相机，Hub 端口 2.4
 ros2 launch fastumi_usb_camera usb_camera.launch.py \
-  namespace:=front video_device:=/dev/video0
+  namespace:=umi_camera \
+  config:="$(ros2 pkg prefix --share fastumi_usb_camera)/config/usb_camera.yaml"
 
-# 终端 2：侧面相机
+# 终端 2：机械臂末端相机，Hub 端口 2.3
 ros2 launch fastumi_usb_camera usb_camera.launch.py \
-  namespace:=side video_device:=/dev/video2
+  namespace:=wrist_camera \
+  config:="$(ros2 pkg prefix --share fastumi_usb_camera)/config/usb_camera_1280_960.yaml" \
 ```
 
-上述示例分别发布 `/front/image_raw` 和 `/side/image_raw`（压缩模式对应各自
+上述示例分别发布 `/umi_camera/image_raw` 和 `/wrist_camera/image_raw`（压缩模式对应各自
 namespace 下的 `image_raw/compressed`）。未指定视频设备路径时，Python 节点
 要求 VID/PID 恰好匹配一台设备；若匹配到多台会列出 pyuvc 的设备 UID。
-Python 模式使用 `video_device` 时，节点会从 `/dev/video*` 对应的 sysfs 信息读取
-USB 总线号和设备地址，再选择 pyuvc 相机。用 `v4l2-ctl --list-devices` 找到每台
-相机的图像采集节点，例如：
-
-```bash
-# 前置相机对应 /dev/video0，侧面相机对应 /dev/video2 时：
-ros2 launch fastumi_usb_camera usb_camera.launch.py \
-  namespace:=front video_device:=/dev/video0
-ros2 launch fastumi_usb_camera usb_camera.launch.py \
-  namespace:=side video_device:=/dev/video2
-```
-
-也可以传入指向该节点的 `/dev/v4l/by-path/` 符号链接，以固定 USB 端口身份。
-`/dev/video*` 编号可能随设备重新枚举而改变，启动前应核对对应关系。
+Python 和 FFmpeg 模式都要求 `video_device` 使用
+`/dev/v4l/by-path/*-video-index0`。节点沿 sysfs 取得当前 USB bus/device 地址后，
+分别匹配 pyuvc 或 libuvc 设备。直接传入 `/dev/videoN` 会被拒绝。
+只要 Hub 连接电脑的上游端口以及两台相机所在 Hub 端口保持不变，重新插拔导致的
+动态编号变化不会改变角色绑定。
 `device_uid` 可按当前 pyuvc 枚举结果指定设备，与 `video_device` 二选一：
 
 ```bash
@@ -168,6 +162,7 @@ UID 中的设备地址可能在重新插拔、重启或 USB 设备重新枚举�
   ros__parameters:
     vendor_id: 7119       # 0x1bcf
     product_id: 10436     # 0x28c4
+    video_device: ""      # 使用序列号时关闭默认物理端口
     serial_number: "相机序列号"
     topic: /front/image_raw
 ```
@@ -182,7 +177,8 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
 默认相机参数位于 `config/usb_camera.yaml`，其中以 `video_device` 指定设备，
 不配置 VID/PID。`config` 指向的 YAML 是基础配置；非空的 launch 参数
 `width`、`height`、`fps`、`frame_id` 会逐项覆盖 YAML；Python 模式还支持
-`video_device`、`device_uid` 和 `publish_compressed` 覆盖。
+`video_device`、`device_uid` 和 `publish_compressed` 覆盖；FFmpeg 模式同样支持
+`video_device` 覆盖。
 显式指定 `vendor_id` 或 `product_id` 时会停用 YAML 中的默认视频设备路径。
 USB 标识可以用十进制
 或带 `0x` 前缀的十六进制传入。相机参数只在启动时读取，模式必须精确匹配

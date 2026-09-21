@@ -1,4 +1,4 @@
-"""后台枚举 USB 视频采集入口，复用相机驱动的物理设备映射。"""
+"""后台枚举稳定的 USB 物理端口视频入口。"""
 
 import fcntl
 import os
@@ -6,19 +6,35 @@ from pathlib import Path
 import re
 import struct
 
-from fastumi_usb_camera.capture import _usb_location_from_video_device
+from fastumi_usb_camera.capture import (
+    _usb_location_from_video_device,
+    physical_port_label,
+)
 
 
-def scan_devices(device_root=Path('/dev'), sysfs_root=Path('/sys/class/video4linux')):
-    """读取 QUERYCAP（不启动视频流），过滤元数据并按 USB 身份去重。"""
+def scan_devices(by_path_root=Path('/dev/v4l/by-path'),
+                 sysfs_root=Path('/sys/class/video4linux'),
+                 device_root=Path('/dev')):
+    """读取 by-path 主视频入口的 QUERYCAP，并合并同一节点的重复别名。"""
     devices = []
-    identities = set()
-    for path in sorted(device_root.glob('video*'), key=lambda p: int(p.name[5:])
-                       if re.fullmatch(r'video\d+', p.name) else -1):
-        if not re.fullmatch(r'video\d+', path.name):
+    aliases = {}
+    for path in by_path_root.glob('*-video-index0'):
+        if not re.fullmatch(r'.+-video-index0', path.name):
             continue
         try:
-            identity = _usb_location_from_video_device(str(path), sysfs_root, device_root)
+            target = path.resolve(strict=True)
+            aliases.setdefault(target, []).append(path)
+        except (OSError, RuntimeError) as error:
+            devices.append({
+                'device': str(path), 'name': '', 'physical_port': physical_port_label(str(path)),
+                'kernel_device': '', 'error': str(error),
+            })
+    for target, paths in sorted(aliases.items(), key=lambda item: str(item[0])):
+        # udev 可能同时生成 usb 与 usbv2 链接；优先使用更通用的无版本名称。
+        path = min(paths, key=lambda value: ('-usbv' in value.name, len(value.name), value.name))
+        try:
+            _usb_location_from_video_device(
+                str(path), sysfs_root, device_root, by_path_root)
             # v4l2_capability 固定 104 字节，QUERYCAP 不申请采集缓冲区。
             capability = bytearray(104)
             descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -28,11 +44,23 @@ def scan_devices(device_root=Path('/dev'), sysfs_root=Path('/sys/class/video4lin
                 os.close(descriptor)
             caps, device_caps = struct.unpack_from('II', capability, 84)
             caps = device_caps if caps & 0x80000000 else caps
-            if not caps & (0x1 | 0x1000) or identity in identities:
+            if not caps & (0x1 | 0x1000):
                 continue
-            identities.add(identity)
             name = capability[16:48].split(b'\0', 1)[0].decode(errors='replace')
-            devices.append({'device': str(path), 'name': name, 'error': ''})
-        except (OSError, ValueError) as error:
-            devices.append({'device': str(path), 'name': '', 'error': str(error)})
-    return devices
+            devices.append({
+                'device': str(path), 'name': name,
+                'physical_port': physical_port_label(str(path)),
+                'kernel_device': str(target), 'error': '',
+            })
+        except (OSError, RuntimeError, ValueError) as error:
+            devices.append({
+                'device': str(path), 'name': '',
+                'physical_port': physical_port_label(str(path)),
+                'kernel_device': str(target), 'error': str(error),
+            })
+    def port_key(item):
+        """把点分隔端口链转换为自然数字顺序。"""
+        return tuple(int(part) for part in item['physical_port'].split('.')
+                     if part.isdigit()), item['device']
+
+    return sorted(devices, key=port_key)

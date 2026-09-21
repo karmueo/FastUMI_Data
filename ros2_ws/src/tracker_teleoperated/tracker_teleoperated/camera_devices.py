@@ -1,7 +1,6 @@
 """协调设备目录、录制互锁和可恢复的双相机设备交换。"""
 
 from concurrent.futures import ThreadPoolExecutor
-import re
 import time
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -10,6 +9,8 @@ from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
+
+from fastumi_usb_camera.capture import is_physical_video_device_path
 
 from tracker_teleoperated.camera_catalog import scan_devices
 
@@ -35,12 +36,16 @@ class CameraDevices:
         self.publisher = manager.create_publisher(DiagnosticArray, '/tracker_teleoperated/camera_devices', qos)
         manager.create_service(Trigger, '/tracker_teleoperated/refresh_camera_devices', self.refresh)
         manager.create_subscription(String, '/tracker_teleoperated/record_state', self._record, qos)
-        for key, default in (('umi_camera', '/dev/video0'), ('wrist_camera', '/dev/video2')):
+        defaults = {
+            'umi_camera': '/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.4:1.0-video-index0',
+            'wrist_camera': '/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.3:1.0-video-index0',
+        }
+        for key, default in defaults.items():
             parameter = key.replace('_camera', '_video_device')
             config = manager.components[key].config.setdefault('parameters', {})
             device = manager.declare_parameter(parameter, config.get('video_device', default)).value
-            if not re.fullmatch(r'/dev/video\d+', device):
-                raise ValueError(f'无效相机设备: {device}')
+            if not is_physical_video_device_path(device):
+                raise ValueError(f'相机设备必须使用 /dev/v4l/by-path/*-video-index0: {device}')
             config['video_device'] = device
             self.sources[key] = dict(parameter=parameter, actual=device, requested=device,
                                      state='deferred', error='')
@@ -101,8 +106,8 @@ class CameraDevices:
                 raise ValueError('请一次选择一个设备；设备交换由管理器协调')
             key, parameter = selected[0]
             target = parameter.value
-            if not isinstance(target, str) or not re.fullmatch(r'/dev/video\d+', target):
-                raise ValueError('请选择 /dev/videoN 设备')
+            if not isinstance(target, str) or not is_physical_video_device_path(target):
+                raise ValueError('请选择 /dev/v4l/by-path/*-video-index0 物理端口')
             reason = self.reason(key)
             if reason:
                 raise ValueError(reason)
@@ -201,8 +206,8 @@ class CameraDevices:
             if future and future.done():
                 try:
                     device = future.result().values[0].string_value
-                    if not re.fullmatch(r'/dev/video\d+', device):
-                        raise ValueError('外部相机未提供有效 video_device 参数')
+                    if not is_physical_video_device_path(device):
+                        raise ValueError('外部相机未提供有效 by-path video_device 参数')
                     self.sources[key].update(actual=device, requested=device, state='ready')
                 except Exception as error:
                     self.sources[key]['error'] = '读取外部相机参数失败：' + str(error)

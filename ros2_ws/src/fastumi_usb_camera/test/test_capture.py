@@ -11,6 +11,7 @@ from fastumi_usb_camera.capture import UvcCamera, select_device
 # 测试使用的 USB 设备标识和 MJPEG 模式。
 DEVICE = {"uid": "camera-1", "idVendor": "0x1bcf", "idProduct": "0x28c4"}
 MODE = (1280, 960, 30)
+PHYSICAL_DEVICE = "/dev/v4l/by-path/pci-test-usb-0:2.4:1.0-video-index0"
 
 
 class FakeCapture:
@@ -94,7 +95,9 @@ def test_video_device_resolves_usb_bus_and_address(tmp_path):
     device_root.mkdir()
     video = device_root / "video0"
     video.touch()
-    alias = device_root / "camera-front"
+    by_path_root = device_root / "v4l" / "by-path"
+    by_path_root.mkdir(parents=True)
+    alias = by_path_root / "pci-test-usb-0:2.4:1.0-video-index0"
     alias.symlink_to(video)
     usb_device = tmp_path / "sys" / "devices" / "1-1.4"
     interface = usb_device / "1-1.4:1.0"
@@ -107,11 +110,17 @@ def test_video_device_resolves_usb_bus_and_address(tmp_path):
     (video_class / "device").symlink_to(interface)
 
     assert capture._usb_location_from_video_device(
-        str(alias), sysfs_root, device_root
+        str(alias), sysfs_root, device_root, by_path_root
     ) == (1, 17)
+    with pytest.raises(ValueError, match="by-path"):
+        capture._usb_location_from_video_device(
+            str(device_root / "video9"), sysfs_root, device_root, by_path_root
+        )
+    broken = by_path_root / "pci-test-usb-0:2.5:1.0-video-index0"
+    broken.symlink_to(device_root / "video9")
     with pytest.raises(ValueError, match="不存在"):
         capture._usb_location_from_video_device(
-            str(device_root / "video9"), sysfs_root, device_root
+            str(broken), sysfs_root, device_root, by_path_root
         )
 
 
@@ -126,7 +135,7 @@ def test_video_device_selects_matching_pyuvc_device(monkeypatch):
     )
     uvc = FakeUvc(devices)
     camera = UvcCamera(
-        video_device="/dev/video0",
+        video_device=PHYSICAL_DEVICE,
         width=1280, height=960, fps=30, uvc_module=uvc,
     )
     assert uvc.capture.uid == "1:17"
@@ -135,9 +144,19 @@ def test_video_device_selects_matching_pyuvc_device(monkeypatch):
     with pytest.raises(ValueError, match="只能指定其中一个"):
         UvcCamera(
             vendor_id=0x1BCF, product_id=0x28C4, device_uid="1:17",
-            video_device="/dev/video0", width=1280, height=960, fps=30,
+            video_device=PHYSICAL_DEVICE, width=1280, height=960, fps=30,
             uvc_module=uvc,
         )
+
+
+def test_physical_path_validation_and_port_label():
+    """只接受主视频 by-path，并提取 Hub 端口链。"""
+    assert capture.is_physical_video_device_path(PHYSICAL_DEVICE)
+    assert capture.physical_port_label(PHYSICAL_DEVICE) == "2.4"
+    assert not capture.is_physical_video_device_path("/dev/video0")
+    assert not capture.is_physical_video_device_path(
+        "/dev/v4l/by-path/pci-test-usb-0:2.4:1.0-video-index1"
+    )
 
 
 def test_unsupported_mode_releases_device():

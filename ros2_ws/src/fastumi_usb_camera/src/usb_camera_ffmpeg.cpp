@@ -1,4 +1,7 @@
-// Copyright 2026 karmueo
+/**
+ * @file usb_camera_ffmpeg.cpp
+ * @brief 按稳定 USB 物理端口采集 MJPEG，并通过 FFmpeg image transport 发布。
+ */
 
 #include <libuvc/libuvc.h>
 
@@ -27,6 +30,7 @@
 #include "fastumi_usb_camera/configuration.hpp"
 #include "fastumi_usb_camera/jpeg_frame.hpp"
 #include "fastumi_usb_camera/latest_frame_buffer.hpp"
+#include "fastumi_usb_camera/physical_device.hpp"
 
 namespace fastumi_usb_camera
 {
@@ -49,8 +53,16 @@ public:
   {
     check(uvc_init(&context_, nullptr), "initialize libuvc");
     uvc_device_t ** devices = nullptr;
+    /** @brief 物理路径存在时按其当前 USB 地址枚举，否则沿用 VID/PID/序列号。 */
+    const bool use_physical_path = !config.video_device.empty();
+    /** @brief 稳定路径当前解析出的 USB 地址。 */
+    const UsbLocation location = use_physical_path ?
+      usb_location_from_video_device(config.video_device) : UsbLocation{0, 0};
+    /** @brief 兼容模式使用的可选序列号。 */
     const char * serial = config.serial_number.empty() ? nullptr : config.serial_number.c_str();
-    const auto find_result = uvc_find_devices(
+    /** @brief libuvc 枚举结果。 */
+    const auto find_result = use_physical_path ? uvc_get_device_list(context_, &devices) :
+      uvc_find_devices(
       context_, &devices, static_cast<int>(config.vendor_id),
       static_cast<int>(config.product_id), serial);
     if (find_result != UVC_SUCCESS) {
@@ -62,24 +74,39 @@ public:
       cleanup();
       throw std::runtime_error("libuvc returned an empty device list");
     }
+    /** @brief 唯一匹配的 libuvc 设备。 */
+    uvc_device_t * selected = nullptr;
+    /** @brief 符合选择条件的设备数量。 */
     size_t count = 0;
-    while (devices[count] != nullptr) {
-      ++count;
+    for (size_t index = 0; devices[index] != nullptr; ++index) {
+      if (!use_physical_path || (
+          uvc_get_bus_number(devices[index]) == location.bus_number &&
+          uvc_get_device_address(devices[index]) == location.device_address))
+      {
+        selected = devices[index];
+        ++count;
+      }
     }
     if (count != 1) {
       uvc_free_device_list(devices, 1);
       cleanup();
       std::ostringstream message;
-      message << "expected exactly one UVC camera matching " << std::hex << std::setfill('0') <<
-        std::setw(4) << config.vendor_id << ':' << std::setw(4) << config.product_id <<
-        ", found " << std::dec << count;
-      if (count > 1 && config.serial_number.empty()) {
+      message << "expected exactly one UVC camera matching ";
+      if (use_physical_path) {
+        message << config.video_device;
+      } else {
+        message << std::hex << std::setfill('0') << std::setw(4) << config.vendor_id << ':' <<
+          std::setw(4) << config.product_id;
+      }
+      message << ", found " << std::dec << count;
+      if (!use_physical_path && count > 1 && config.serial_number.empty()) {
         message << "; set serial_number to select one device";
       }
       throw std::runtime_error(message.str());
     }
 
-    const auto open_result = uvc_open(devices[0], &handle_);
+    /** @brief 打开物理端口最终对应的唯一设备。 */
+    const auto open_result = uvc_open(selected, &handle_);
     uvc_free_device_list(devices, 1);
     if (open_result != UVC_SUCCESS) {
       cleanup();
@@ -173,6 +200,7 @@ public:
     config_.fps = declare_parameter<int64_t>("fps", config_.fps);
     config_.frame_timeout_seconds = declare_parameter<double>(
       "frame_timeout_seconds", config_.frame_timeout_seconds);
+    config_.video_device = declare_parameter<std::string>("video_device", "");
     config_.serial_number = declare_parameter<std::string>("serial_number", "");
     config_.frame_id = declare_parameter<std::string>("frame_id", config_.frame_id);
     config_.topic = declare_parameter<std::string>("topic", config_.topic);
@@ -214,8 +242,9 @@ public:
     }
     RCLCPP_INFO(
       get_logger(),
-      "Streaming UVC %04lx:%04lx MJPEG %ldx%ld@%ld -> %s/ffmpeg",
-      config_.vendor_id, config_.product_id, config_.width, config_.height, config_.fps,
+      "Streaming UVC %s MJPEG %ldx%ld@%ld -> %s/ffmpeg",
+      (config_.video_device.empty() ? "VID/PID selection" : config_.video_device.c_str()),
+      config_.width, config_.height, config_.fps,
       config_.topic.c_str());
   }
 

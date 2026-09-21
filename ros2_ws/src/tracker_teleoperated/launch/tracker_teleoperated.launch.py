@@ -15,6 +15,8 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 import yaml
 
+from fastumi_usb_camera.capture import is_physical_video_device_path
+
 
 def configured_rviz(template_path, config_path, manager_config_path=None):
     """从控制、记录及管理配置同步两路视频和里程计显示，返回配置字典。"""
@@ -50,7 +52,7 @@ def _launch(context):
             if panel.get('Class') == 'tracker_teleoperated/TeleopPanel':
                 for field, parameter in (('UmiVideoDevice', 'umi_video_device'),
                                          ('WristVideoDevice', 'wrist_video_device')):
-                    if panel.get(field):
+                    if is_physical_video_device_path(panel.get(field, '')):
                         video_parameters[parameter] = panel[field]
                 break
     manager = Node(

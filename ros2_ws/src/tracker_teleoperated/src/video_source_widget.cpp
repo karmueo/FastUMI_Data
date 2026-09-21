@@ -8,6 +8,7 @@
 
 #include <QComboBox>
 #include <QAbstractItemView>
+#include <QCollator>
 #include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -146,11 +147,13 @@ void VideoSourceWidget::initialize(
 /** @copydoc VideoSourceWidget::refreshSources */
 void VideoSourceWidget::refreshSources()
 {
-  /** @brief 管理器目录已过滤元数据，按设备编号排序。 */
+  /** @brief 管理器目录已过滤元数据，按稳定物理端口排序。 */
   QStringList topics;
   for (const auto & device : devices_) {topics.append(device.first);}
-  std::sort(topics.begin(), topics.end(), [](const QString & a, const QString & b) {
-      return a.mid(10).toInt() < b.mid(10).toInt();
+  QCollator collator;  ///< 支持 2.3、2.10 等端口链的自然数字顺序。
+  collator.setNumericMode(true);
+  std::sort(topics.begin(), topics.end(), [&collator](const QString & left, const QString & right) {
+      return collator.compare(left, right) < 0;
     });
   /** @brief 两个显示是否仍存在于当前 RViz 配置。 */
   const bool wrist_found = updateCombo(wrist_combo_, "末端视频", topics);
@@ -344,10 +347,15 @@ void VideoSourceWidget::updateDevices(const diagnostic_msgs::msg::DiagnosticArra
   scan_error_.clear();
   for (const auto & item : message.status) {
     if (item.name == "scan") {scan_error_ = QString::fromStdString(item.message); continue;}
-    QString label;  ///< 名称及具体访问错误。
+    QString label;  ///< 名称、物理端口及当前内核节点。
+    QString port;  ///< Hub 物理端口链。
+    QString kernel_device;  ///< 当前动态内核节点，仅用于排查。
     for (const auto & value : item.values) {
       if (value.key == "name") {label = QString::fromStdString(value.value);}
+      if (value.key == "physical_port") {port = QString::fromStdString(value.value);}
+      if (value.key == "kernel_device") {kernel_device = QString::fromStdString(value.value);}
     }
+    if (!port.isEmpty()) {label += "（端口 " + port + (kernel_device.isEmpty() ? "" : "，" + kernel_device) + "）";}
     if (!item.message.empty()) {label += "（" + QString::fromStdString(item.message) + "）";}
     devices_[QString::fromStdString(item.name)] = label;
   }

@@ -10,6 +10,7 @@ import pytest
 
 
 LAUNCH_FILE = Path(__file__).resolve().parents[1] / "launch" / "usb_camera.launch.py"
+PHYSICAL_DEVICE = "/dev/v4l/by-path/pci-test-usb-0:2.4:1.0-video-index0"
 
 
 def _load_launch():
@@ -71,20 +72,22 @@ def test_device_uid_is_passed_only_to_python_node(monkeypatch):
         )
 
 
-def test_video_device_is_passed_only_to_python_node(monkeypatch):
-    """视频节点路径传给 Python 节点，且不能与 UID 同时指定。"""
+def test_video_device_is_passed_to_both_camera_modes(monkeypatch):
+    """稳定物理路径传给两种节点，且不能与 UID 同时指定。"""
     module = _load_launch()
-    node = _selected_node(monkeypatch, module, video_device="/dev/video0")
-    assert node["parameters"][1] == {"video_device": "/dev/video0"}
-    with pytest.raises(ValueError, match="video_device"):
-        _selected_node(
-            monkeypatch, module, video_device="/dev/video0",
-            enable_ffmpeg="true",
-        )
+    node = _selected_node(monkeypatch, module, video_device=PHYSICAL_DEVICE)
+    assert node["parameters"][1] == {"video_device": PHYSICAL_DEVICE}
+    ffmpeg = _selected_node(
+        monkeypatch, module, video_device=PHYSICAL_DEVICE,
+        enable_ffmpeg="true",
+    )
+    assert ffmpeg["parameters"][2] == {"video_device": PHYSICAL_DEVICE}
     with pytest.raises(ValueError, match="只能指定其中一个"):
         _selected_node(
-            monkeypatch, module, video_device="/dev/video0", device_uid="1:17"
+            monkeypatch, module, video_device=PHYSICAL_DEVICE, device_uid="1:17"
         )
+    with pytest.raises(ValueError, match="by-path"):
+        _selected_node(monkeypatch, module, video_device="/dev/video0")
 
 
 def test_explicit_usb_id_disables_default_video_device(monkeypatch):
@@ -116,7 +119,8 @@ def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
     ) == "/tmp/ffmpeg.yaml"
     assert node["parameters"][1:] == [
         "/tmp/camera.yaml",
-        {"vendor_id": 0x1BCF, "width": 640, "frame_id": "custom_frame"},
+        {"vendor_id": 0x1BCF, "width": 640, "frame_id": "custom_frame",
+         "video_device": ""},
     ]
     assert "namespace" not in node
     assert "publish_compressed" not in node["parameters"][2]

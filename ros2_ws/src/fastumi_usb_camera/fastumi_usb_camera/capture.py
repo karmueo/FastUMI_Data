@@ -4,9 +4,37 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Callable
+
+
+BY_PATH_ROOT = Path("/dev/v4l/by-path")
+VIDEO_DEVICE_PATTERN = re.compile(r"[^/]+-video-index0")
+
+
+def is_physical_video_device_path(
+    video_device: str, by_path_root: Path = BY_PATH_ROOT,
+) -> bool:
+    """判断路径是否为主视频节点的稳定 udev 物理端口链接。"""
+    if not isinstance(video_device, str) or not video_device:
+        return False
+    path = Path(video_device)
+    return (
+        path.is_absolute()
+        and path.parent == by_path_root
+        and VIDEO_DEVICE_PATTERN.fullmatch(path.name) is not None
+    )
+
+
+def physical_port_label(video_device: str) -> str:
+    """从 by-path 文件名提取便于界面展示的 USB Hub 端口链。"""
+    match = re.search(
+        r"-usb(?:v\d+)?-\d+:([^:]+):\d+\.\d+-video-index0$",
+        Path(video_device).name,
+    )
+    return match.group(1) if match else Path(video_device).name
 
 
 def _usb_id(value: Any) -> int:
@@ -21,9 +49,14 @@ def _usb_id(value: Any) -> int:
 
 def _usb_location_from_video_device(
     video_device: str, sysfs_root: Path = Path("/sys/class/video4linux"),
-    device_root: Path = Path("/dev"),
+    device_root: Path = Path("/dev"), by_path_root: Path = BY_PATH_ROOT,
 ) -> tuple[int, int]:
-    """沿视频节点的 sysfs 父设备查找 USB 总线号和当前设备地址。"""
+    """校验稳定物理路径，并沿 sysfs 查找 USB 总线号和当前设备地址。"""
+    if not is_physical_video_device_path(video_device, by_path_root):
+        raise ValueError(
+            "视频设备必须使用 /dev/v4l/by-path/*-video-index0 物理端口路径："
+            f"{video_device}"
+        )
     try:
         resolved = Path(video_device).resolve(strict=True)
     except (OSError, RuntimeError) as error:

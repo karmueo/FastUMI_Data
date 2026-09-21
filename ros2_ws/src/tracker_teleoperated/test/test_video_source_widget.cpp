@@ -14,6 +14,16 @@ QApplication * application();
 
 namespace
 {
+/** @brief 默认 UMI 相机物理端口。 */
+const std::string kUmiDevice =
+  "/dev/v4l/by-path/pci-test-usb-0:2.4:1.0-video-index0";
+/** @brief 默认末端相机物理端口。 */
+const std::string kWristDevice =
+  "/dev/v4l/by-path/pci-test-usb-0:2.3:1.0-video-index0";
+/** @brief 测试切换使用的备用物理端口。 */
+const std::string kAltDevice =
+  "/dev/v4l/by-path/pci-test-usb-0:2.5:1.0-video-index0";
+
 /** @brief 构造双相机诊断。 @param[in] editable 是否允许选择。 @return 状态快照。 */
 diagnostic_msgs::msg::DiagnosticArray status(bool editable)
 {
@@ -22,7 +32,7 @@ diagnostic_msgs::msg::DiagnosticArray status(bool editable)
     diagnostic_msgs::msg::DiagnosticStatus item;  ///< 单相机诊断。
     item.name = name;
     for (const auto & pair : std::map<std::string, std::string>{
-        {"video_device", name == std::string("umi_camera") ? "/dev/video2" : "/dev/video10"},
+        {"video_device", name == std::string("umi_camera") ? kUmiDevice : kWristDevice},
         {"image_topic", "/" + std::string(name) + "/image_raw"},
         {"source_editable", editable ? "true" : "false"}, {"source_state", "ready"},
         {"source_reason", editable ? "" : "录制期间禁止切换"}}) {
@@ -38,11 +48,16 @@ diagnostic_msgs::msg::DiagnosticArray status(bool editable)
 diagnostic_msgs::msg::DiagnosticArray devices()
 {
   diagnostic_msgs::msg::DiagnosticArray message;  ///< 模拟扫描结果。
-  for (const auto & name : {"/dev/video10", "/dev/video2", "/dev/video4"}) {
+  for (const auto & entry : std::map<std::string, std::string>{
+      {kWristDevice, "2.3"}, {kUmiDevice, "2.4"}, {kAltDevice, "2.5"}}) {
     diagnostic_msgs::msg::DiagnosticStatus item;  ///< USB 采集入口。
-    item.name = name;
-    diagnostic_msgs::msg::KeyValue value;  ///< 设备友好名称。
-    value.key = "name"; value.value = "USB Camera"; item.values.push_back(value);
+    item.name = entry.first;
+    for (const auto & pair : std::map<std::string, std::string>{
+        {"name", "USB Camera"}, {"physical_port", entry.second},
+        {"kernel_device", entry.second == "2.3" ? "/dev/video0" : "/dev/video2"}}) {
+      diagnostic_msgs::msg::KeyValue value;  ///< 设备目录字段。
+      value.key = pair.first; value.value = pair.second; item.values.push_back(value);
+    }
     message.status.push_back(item);
   }
   return message;
@@ -61,16 +76,17 @@ TEST(VideoSources, DeviceCatalogAndStableRoleTopics)
   widget.updateSources(status(true));
   auto * combo = widget.findChild<QComboBox *>("umi_video_source");  ///< UMI 设备选择。
   ASSERT_NE(combo, nullptr);
-  EXPECT_EQ(combo->itemData(0).toString(), "/dev/video2");
-  EXPECT_EQ(combo->itemData(2).toString(), "/dev/video10");
+  EXPECT_EQ(combo->itemData(0).toString(), QString::fromStdString(kWristDevice));
+  EXPECT_EQ(combo->itemData(2).toString(), QString::fromStdString(kAltDevice));
   EXPECT_TRUE(combo->itemText(0).contains("USB Camera"));
-  EXPECT_EQ(combo->currentData().toString(), "/dev/video2");
+  EXPECT_TRUE(combo->itemText(0).contains("端口 2.3"));
+  EXPECT_EQ(combo->currentData().toString(), QString::fromStdString(kUmiDevice));
   EXPECT_EQ(displays["UMI 视频"], "/umi_camera/image_raw");
   displays["UMI 视频"] = "/other";
   widget.refreshSources();
   EXPECT_EQ(displays["UMI 视频"], "/umi_camera/image_raw");
   widget.updateDevices(diagnostic_msgs::msg::DiagnosticArray());
-  EXPECT_EQ(combo->currentData().toString(), "/dev/video2");
+  EXPECT_EQ(combo->currentData().toString(), QString::fromStdString(kUmiDevice));
   EXPECT_TRUE(combo->currentText().contains("设备不存在"));
 }
 
@@ -89,13 +105,13 @@ TEST(VideoSources, ReadOnlyAndPersistedDevices)
   widget.save(saved);
   QString value;  ///< 保存的设备路径。
   EXPECT_TRUE(saved.mapGetString("UmiVideoDevice", &value));
-  EXPECT_EQ(value, "/dev/video2");
+  EXPECT_EQ(value, QString::fromStdString(kUmiDevice));
   tracker_teleoperated::VideoSourceWidget restored;  ///< 第二实例读取保存值。
   restored.load(saved);
   rviz_common::Config copied;  ///< 恢复后重新保存。
   restored.save(copied);
   EXPECT_TRUE(copied.mapGetString("WristVideoDevice", &value));
-  EXPECT_EQ(value, "/dev/video10");
+  EXPECT_EQ(value, QString::fromStdString(kWristDevice));
   widget.updateSources(status(true));
   EXPECT_TRUE(widget.findChild<QComboBox *>("umi_video_source")->isEnabled());
   EXPECT_FALSE(widget.wristBusy());
@@ -126,7 +142,7 @@ TEST(VideoSources, AsyncDeviceRequestAndUnload)
       std::shared_ptr<rcl_interfaces::srv::SetParametersAtomically::Response> response) {
         ++calls;
         EXPECT_EQ(request->parameters.at(0).name, "umi_video_device");
-        EXPECT_EQ(request->parameters.at(0).value.string_value, "/dev/video4");
+        EXPECT_EQ(request->parameters.at(0).value.string_value, kAltDevice);
         response->result.successful = true;
       });  ///< 本机模拟管理器参数服务。
     rclcpp::executors::SingleThreadedExecutor executor;  ///< 在测试线程中执行 ROS 回调。
@@ -139,7 +155,7 @@ TEST(VideoSources, AsyncDeviceRequestAndUnload)
     widget->updateSources(status(true));
     for (int i = 0; i < 10; ++i) {executor.spin_some(); QTest::qWait(20);}
     auto * combo = widget->findChild<QComboBox *>("umi_video_source");  ///< 用户操作入口。
-    combo->setCurrentIndex(combo->findData("/dev/video4"));
+    combo->setCurrentIndex(combo->findData(QString::fromStdString(kAltDevice)));
     QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, combo->currentIndex()));
     QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, combo->currentIndex()));
     EXPECT_TRUE(widget->wristBusy());
@@ -150,10 +166,10 @@ TEST(VideoSources, AsyncDeviceRequestAndUnload)
     EXPECT_TRUE(widget->wristBusy());
     auto confirmed = status(true);  ///< 后端最终确认，与参数接受响应分开。
     diagnostic_msgs::msg::KeyValue requested;  ///< 当前请求设备。
-    requested.key = "requested_video_device"; requested.value = "/dev/video4";
+    requested.key = "requested_video_device"; requested.value = kAltDevice;
     confirmed.status[0].values.push_back(requested);
     for (auto & value : confirmed.status[0].values) {
-      if (value.key == "video_device") {value.value = "/dev/video4";}
+      if (value.key == "video_device") {value.value = kAltDevice;}
     }
     widget->updateSources(confirmed);
     EXPECT_FALSE(widget->wristBusy());
