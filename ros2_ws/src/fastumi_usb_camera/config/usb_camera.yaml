@@ -1,7 +1,7 @@
 # 该文件保存 UMI 相机物理端口、MJPEG 模式及图像输出参数。
 /**:
   ros__parameters:
-    video_device: /dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.4:1.0-video-index0
+    video_device: /dev/v4l/by-path/pci-0000:85:00.0-usb-0:4:1.0-video-index0
     width: 1920
     height: 1080
     fps: 30

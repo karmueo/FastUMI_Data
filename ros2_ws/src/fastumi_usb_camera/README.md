@@ -136,10 +136,8 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py \
 namespace 下的 `image_raw/compressed`）。未指定视频设备路径时，Python 节点
 要求 VID/PID 恰好匹配一台设备；若匹配到多台会列出 pyuvc 的设备 UID。
 Python 和 FFmpeg 模式都要求 `video_device` 使用
-`/dev/v4l/by-path/*-video-index0`。节点沿 sysfs 取得当前 USB bus/device 地址后，
-分别匹配 pyuvc 或 libuvc 设备。直接传入 `/dev/videoN` 会被拒绝。
-只要 Hub 连接电脑的上游端口以及两台相机所在 Hub 端口保持不变，重新插拔导致的
-动态编号变化不会改变角色绑定。
+`/dev/v4l/by-path/*-video-index0`。 可以通过 `ls -l /dev/v4l/by-path/`查看，节点取得当前 USB bus/device 地址后，
+分别匹配 pyuvc 或 libuvc 设备。
 `device_uid` 可按当前 pyuvc 枚举结果指定设备，与 `video_device` 二选一：
 
 ```bash
