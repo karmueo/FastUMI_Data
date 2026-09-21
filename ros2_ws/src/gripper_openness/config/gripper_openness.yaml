@@ -1,7 +1,7 @@
 # 该文件提供夹爪开合度预测节点的默认 ROS 2 参数。
 gripper_openness:
   ros__parameters:
-    image_topic: /usb_camera/image_raw
+    image_topic: /umi_camera/image_raw
     openness_topic: /gripper/openness
     state_topic: /gripper/state
     debug_image_topic: /gripper/openness/debug_image

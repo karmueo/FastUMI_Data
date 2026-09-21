@@ -1,0 +1,7 @@
+#!@Python3_EXECUTABLE@
+"""使用构建时选定的解释器启动 tracker_teleop_node。"""
+
+from tracker_teleoperated.node import main
+
+if __name__ == "__main__":
+    main()

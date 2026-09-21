@@ -1,93 +1,109 @@
-"""启动 RM75 Tracker 遥操控制节点和独立终端中的键盘节点。"""
+"""启动会话管理器和 RViz 面板，由管理器负责硬件、遥操及保存收尾。"""
+
+import os
+from pathlib import Path
+import signal
+import tempfile
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
-from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
-from launch.events import Shutdown
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
+from launch.event_handlers import OnProcessExit, OnShutdown
+from launch.events import Shutdown, matches_action
+from launch.events.process import SignalProcess
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+import yaml
 
 
-def generate_launch_description() -> LaunchDescription:
-    """创建支持配置覆盖和可选键盘终端的启动描述。"""
-    # 包内默认遥操参数文件。
-    default_config = PathJoinSubstitution(
-        [
-            FindPackageShare("tracker_teleoperated"),
-            "config",
-            "tracker_teleoperated.yaml",
-        ]
-    )
-    # 调用者可替换的配置文件路径。
-    config_file = LaunchConfiguration("config_file")
-    # 是否由 launch 创建独立键盘终端。
-    use_keyboard = LaunchConfiguration("use_keyboard")
-    # 创建交互终端所用的命令前缀。
-    keyboard_prefix = LaunchConfiguration("keyboard_prefix")
+def configured_rviz(template_path, config_path, manager_config_path=None):
+    """从控制、记录及管理配置同步两路视频和里程计显示，返回配置字典。"""
+    display = yaml.safe_load(Path(template_path).read_text(encoding="utf-8"))
+    parameters = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    control = parameters["tracker_teleop"]["ros__parameters"]
+    # 两路固定跟随角色命名空间，设备选择不改变业务话题。
+    management = (yaml.safe_load(Path(manager_config_path).read_text(encoding="utf-8"))
+                  if manager_config_path else {})
+    topics = {key: '/' + management.get('components', {}).get(key, {}).get(
+        'parameters', {}).get('namespace', key).strip('/') + '/image_raw'
+        for key in ('umi_camera', 'wrist_camera')}
+    manager = display["Visualization Manager"]
+    manager["Global Options"]["Fixed Frame"] = control.get("odom_frame", "vive_tracker_odom")
+    for item in manager["Displays"]:
+        if item["Class"] == "rviz_default_plugins/Image":
+            item["Topic"]["Value"] = topics['umi_camera' if item['Name'] == 'UMI 视频' else 'wrist_camera']
+        if item["Class"] == "rviz_default_plugins/Odometry":
+            item["Topic"]["Value"] = control.get("tracker_odom_topic", "/vive_tracker/odom")
+    return display
 
-    config_argument = DeclareLaunchArgument(
-        "config_file",
-        default_value=default_config,
-        description="Tracker 遥操 ROS 参数文件路径。",
+
+def _launch(context):
+    """创建管理器，按需生成 RViz 配置并接入退出信号转发。"""
+    config = LaunchConfiguration("config_file").perform(context)
+    share = FindPackageShare("tracker_teleoperated").perform(context)
+    # 在自动启动前读取面板保存的设备；旧 Topic 字段不改变业务输入。
+    rviz_config = LaunchConfiguration("rviz_config").perform(context)
+    video_parameters = {}
+    if rviz_config:
+        saved = yaml.safe_load(Path(rviz_config).read_text(encoding="utf-8"))
+        for panel in saved.get('Panels', []):
+            if panel.get('Class') == 'tracker_teleoperated/TeleopPanel':
+                for field, parameter in (('UmiVideoDevice', 'umi_video_device'),
+                                         ('WristVideoDevice', 'wrist_video_device')):
+                    if panel.get(field):
+                        video_parameters[parameter] = panel[field]
+                break
+    manager = Node(
+        package="tracker_teleoperated", executable="tracker_component_manager",
+        name="tracker_component_manager", output="screen", sigterm_timeout="320", sigkill_timeout="10",
+        parameters=[{
+            "config_file": config,
+            "manager_config": LaunchConfiguration("manager_config").perform(context),
+            "autostart": LaunchConfiguration("autostart").perform(context) == "true",
+            "use_recorder": LaunchConfiguration("use_recorder").perform(context) == "true",
+            **video_parameters,
+        }],
     )
-    keyboard_argument = DeclareLaunchArgument(
-        "use_keyboard",
-        default_value="true",
-        description="是否在独立终端中启动键盘启停节点。",
-    )
-    keyboard_prefix_argument = DeclareLaunchArgument(
-        "keyboard_prefix",
-        default_value="xterm -fa Monospace -fs 20 -e",
-        description="启动交互式键盘节点的终端命令前缀，默认使用 20 号等宽字体。",
-    )
-    control_node = Node(
-        package="tracker_teleoperated",
-        executable="tracker_teleop_node",
-        name="tracker_teleop",
-        output="screen",
-        parameters=[config_file],
-    )
-    keyboard_node = Node(
-        package="tracker_teleoperated",
-        executable="tracker_teleop_keyboard",
-        name="tracker_teleop_keyboard",
-        output="screen",
-        emulate_tty=True,
-        prefix=keyboard_prefix,
-        condition=IfCondition(use_keyboard),
-    )
-    # 键盘退出前会请求暂停；随后关闭整个 launch，避免控制节点单独残留。
-    keyboard_exit_handler = RegisterEventHandler(
-        OnProcessExit(
-            target_action=keyboard_node,
-            on_exit=[
-                EmitEvent(
-                    event=Shutdown(reason="Tracker 遥操键盘节点已退出")
-                )
-            ],
-        )
-    )
-    # 手动启动的键盘可请求控制节点退出，由此关闭整个 launch。
-    control_exit_handler = RegisterEventHandler(
-        OnProcessExit(
-            target_action=control_node,
-            on_exit=[
-                EmitEvent(
-                    event=Shutdown(reason="Tracker 遥操控制节点已退出")
-                )
-            ],
-        )
-    )
-    return LaunchDescription(
-        [
-            config_argument,
-            keyboard_argument,
-            keyboard_prefix_argument,
-            keyboard_exit_handler,
-            control_exit_handler,
-            control_node,
-            keyboard_node,
-        ]
-    )
+    actions = [RegisterEventHandler(OnProcessExit(
+        target_action=manager,
+        on_exit=[EmitEvent(event=Shutdown(reason="遥操会话管理器已退出"))],
+    )), manager]
+    if LaunchConfiguration("use_rviz").perform(context) == "true":
+        rviz_config = LaunchConfiguration("rviz_config").perform(context)
+        if not rviz_config:
+            # 仅修改运行时副本，包内配置始终保持可重用。
+            descriptor, rviz_config = tempfile.mkstemp(prefix="tracker-teleop-", suffix=".rviz")
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(configured_rviz(
+                    Path(share) / "config/tracker_teleoperated.rviz", config,
+                    LaunchConfiguration("manager_config").perform(context)), stream, allow_unicode=True)
+
+            def cleanup(_context, path=rviz_config):
+                """会话退出时删除临时显示配置。"""
+                Path(path).unlink(missing_ok=True)
+                return []
+
+            actions.append(RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=cleanup)])))
+        rviz = Node(package="rviz2", executable="rviz2", name="tracker_teleop_rviz",
+                    arguments=["-d", rviz_config], output="screen")
+        # 窗口退出时只通知管理器；等待管理器保存完成后才关闭整个 launch。
+        actions.extend([RegisterEventHandler(OnProcessExit(
+            target_action=rviz, on_exit=[EmitEvent(event=SignalProcess(
+                signal_number=signal.SIGINT, process_matcher=matches_action(manager),
+            ))],
+        )), rviz])
+    return actions
+
+
+def generate_launch_description():
+    """声明原有参数和面板管理参数，默认自动启动并显示 RViz。"""
+    share = FindPackageShare("tracker_teleoperated")
+    return LaunchDescription([
+        DeclareLaunchArgument("config_file", default_value=PathJoinSubstitution([share, "config", "tracker_teleoperated.yaml"])),
+        DeclareLaunchArgument("manager_config", default_value=PathJoinSubstitution([share, "config", "component_manager.yaml"])),
+        DeclareLaunchArgument("use_recorder", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("autostart", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("use_rviz", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("rviz_config", default_value=""),
+        OpaqueFunction(function=_launch),
+    ])

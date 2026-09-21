@@ -9,6 +9,9 @@ dependencies = [
     "placo==0.9.23",
     "pyyaml>=6.0",
     "scipy>=1.14",
+    "h5py>=3.11",
+    "pillow>=10",
+    "imageio-ffmpeg>=0.5",
 ]
 
 [dependency-groups]

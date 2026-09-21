@@ -72,7 +72,7 @@ class GripperOpennessNode(Node):
 
     def _declare_parameters(self) -> None:
         """声明预测节点的 ROS 参数。"""
-        self.declare_parameter("image_topic", "/usb_camera/image_raw")
+        self.declare_parameter("image_topic", "/umi_camera/image_raw")
         self.declare_parameter("openness_topic", "/gripper/openness")
         self.declare_parameter("state_topic", "/gripper/state")
         self.declare_parameter("debug_image_topic", "/gripper/openness/debug_image")

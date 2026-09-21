@@ -54,6 +54,8 @@ class GripperCalibrationNode(Node):
         self._bridge = CvBridge()
         self._accumulator = RangeAccumulator()
         self._sampling = self._source_mode == "video"
+        self._sampling_frame_count = 0
+        self._pair_detection_count = 0
         self._last_result: Optional[VisionResult] = None
         self._video_capture: Optional[cv2.VideoCapture] = None
         self._video_timer = None
@@ -64,12 +66,13 @@ class GripperCalibrationNode(Node):
         self.get_logger().info(
             f"夹爪标定节点已启动，输入模式={self._source_mode}，"
             f"分辨率={self._camera_calibration.resolution[0]}x"
-            f"{self._camera_calibration.resolution[1]}"
+            f"{self._camera_calibration.resolution[1]}，"
+            f"图像话题={self.get_parameter('image_topic').value}"
         )
 
     def _declare_parameters(self) -> None:
         """声明标定节点的 ROS 参数。"""
-        self.declare_parameter("image_topic", "/usb_camera/image_raw")
+        self.declare_parameter("image_topic", "/umi_camera/image_raw")
         self.declare_parameter("source_mode", "topic")
         self.declare_parameter("video_path", "")
         self.declare_parameter("video_fps", 30.0)
@@ -157,13 +160,17 @@ class GripperCalibrationNode(Node):
             self.get_logger().error(f"标定帧处理失败: {error}", throttle_duration_sec=2.0)
             return
         self._last_result = result
-        if self._sampling and result.valid:
-            self._accumulator.add(
-                result.distance_mm,
-                result.left_corners,
-                result.right_corners,
-                self._camera_calibration.resolution,
-            )
+        if self._sampling:
+            self._sampling_frame_count += 1
+            if result.detected_marker_count == 2:
+                self._pair_detection_count += 1
+            if result.valid:
+                self._accumulator.add(
+                    result.distance_mm,
+                    result.left_corners,
+                    result.right_corners,
+                    self._camera_calibration.resolution,
+                )
         if self._debug_publisher is not None:
             range_values = None
             if self._accumulator.distances_mm:
@@ -209,6 +216,8 @@ class GripperCalibrationNode(Node):
             response.message = "标定采样已经在进行"
             return response
         self._accumulator.reset()
+        self._sampling_frame_count = 0
+        self._pair_detection_count = 0
         self._sampling = True
         response.success = True
         response.message = "已开始夹爪范围采样，请覆盖完整开闭行程"
@@ -243,6 +252,8 @@ class GripperCalibrationNode(Node):
     def _reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         """清空当前样本并停止实时采样。"""
         self._accumulator.reset()
+        self._sampling_frame_count = 0
+        self._pair_detection_count = 0
         self._sampling = False
         response.success = True
         response.message = "已清空夹爪范围采样"
@@ -250,6 +261,20 @@ class GripperCalibrationNode(Node):
 
     def _build_calibration(self):
         """从采样器生成待写入的完整标定对象。"""
+        if self._accumulator.count == 0:
+            if self._sampling_frame_count == 0 and self._source_mode == "topic":
+                image_topic = str(self.get_parameter("image_topic").value)
+                raise ValueError(f"未收到标定图像，请检查图像话题 {image_topic}")
+            if self._pair_detection_count == 0:
+                raise ValueError(
+                    f"已处理 {self._sampling_frame_count} 帧，但未同时检测到 "
+                    f"ArUco ID {self._left_id} 和 {self._right_id}"
+                )
+            raise ValueError(
+                f"已处理 {self._sampling_frame_count} 帧，其中 "
+                f"{self._pair_detection_count} 帧检测到双 ArUco，"
+                "但双码位姿计算均无效"
+            )
         return self._accumulator.build(
             marker_size_mm=self._marker_size_mm,
             dictionary_name=self._dictionary_name,

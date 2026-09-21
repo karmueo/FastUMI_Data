@@ -2,7 +2,7 @@
 gripper_calibration:
   ros__parameters:
     source_mode: topic
-    image_topic: /usb_camera/image_raw
+    image_topic: /umi_camera/image_raw
     video_path: ''
     video_fps: 30.0
     camera_calibration_path: ''

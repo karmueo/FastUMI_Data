@@ -323,7 +323,7 @@ class TrackerTeleopNode(Node):
         self._enabled_publisher = self.create_publisher(
             Bool, "/tracker_teleoperated/enabled", state_qos
         )
-        # 锁存最近的状态说明，让键盘窗口能看到异步暂停原因和恢复步骤。
+        # 锁存最近的状态说明，让 RViz 面板能看到异步暂停原因和恢复步骤。
         self._status_publisher = self.create_publisher(
             String, "/tracker_teleoperated/status", state_qos
         )
@@ -365,7 +365,7 @@ class TrackerTeleopNode(Node):
         )
         self.create_subscription(
             Empty,
-            "/tracker_teleoperated/keyboard_heartbeat",
+            "/tracker_teleoperated/panel_heartbeat",
             self._heartbeat_callback,
             10,
         )
@@ -396,7 +396,7 @@ class TrackerTeleopNode(Node):
         )
 
         self._enabled = False
-        # 键盘请求退出后，由主循环完成安全收尾并结束控制进程。
+        # 面板请求退出后，由主循环完成安全收尾并结束控制进程。
         self._shutdown_requested = False
         self._latest_status_valid = False
         self._latest_status_stamp_ns: Optional[int] = None
@@ -420,6 +420,7 @@ class TrackerTeleopNode(Node):
         self._timer = self.create_timer(
             1.0 / self._control_rate_hz, self._control_tick
         )
+        self.create_timer(0.5, self._publish_enabled)
         self._publish_enabled()
         self._publish_status(
             workspace_load_message
@@ -505,11 +506,11 @@ class TrackerTeleopNode(Node):
         self._enabled_publisher.publish(Bool(data=self._enabled))
 
     def _publish_status(self, message: str) -> None:
-        """发布可供键盘和晚加入订阅者读取的状态及恢复说明。"""
+        """发布可供面板和晚加入订阅者读取的状态及恢复说明。"""
         self._status_publisher.publish(String(data=message))
 
     def _heartbeat_callback(self, _message: Empty) -> None:
-        """记录键盘进程最近一次存活心跳。"""
+        """记录 RViz 面板最近一次存活心跳。"""
         self._latest_heartbeat_monotonic = time.monotonic()
 
     def _gripper_estimate_callback(self, message: GripperState) -> None:
@@ -759,7 +760,7 @@ class TrackerTeleopNode(Node):
     def _freshness_error(self, now: float) -> Optional[str]:
         """返回阻止初始化或启用的首个完整输入健康问题。"""
         if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
-            return "键盘心跳未就绪或已超时"
+            return "面板心跳未就绪或已超时"
         tracker_error = self._tracker_freshness_error(now)
         if tracker_error is not None:
             return tracker_error
@@ -939,6 +940,11 @@ class TrackerTeleopNode(Node):
             response.message = "七轴反馈未就绪或已超时，拒绝执行回位"
             return response
 
+        if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
+            response.success = False
+            response.message = "面板心跳未就绪或已超时"
+            return response
+
         self._cancel_workspace_calibration()
         self._disable("收到回位请求", publish_hold=True)
         self._clear_control_reference()
@@ -962,7 +968,7 @@ class TrackerTeleopNode(Node):
     def _shutdown_callback(
         self, _request: Trigger.Request, response: Trigger.Response
     ) -> Trigger.Response:
-        """确认键盘退出请求，让主循环安全停止控制节点。"""
+        """确认面板退出请求，让主循环安全停止控制节点。"""
         self._shutdown_requested = True
         response.success = True
         response.message = "控制节点已收到退出请求"
@@ -1073,7 +1079,9 @@ class TrackerTeleopNode(Node):
         dt = min(max(now - self._last_tick_monotonic, 1.0e-4), 0.1)
         self._last_tick_monotonic = now
         if self._homing:
-            if now - self._latest_joint_monotonic > self._feedback_timeout_s:
+            if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
+                self._stop_homing("面板心跳超时")
+            elif now - self._latest_joint_monotonic > self._feedback_timeout_s:
                 self._stop_homing("七轴反馈超时")
             elif now - self._home_started_monotonic > self._home_timeout_s:
                 self._stop_homing("超过回位时间上限")
@@ -1082,7 +1090,7 @@ class TrackerTeleopNode(Node):
             self._update_gripper(False, now)
             return
         if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
-            self._disable("键盘心跳超时", publish_hold=True)
+            self._disable("面板心跳超时", publish_hold=True)
             return
         if now - self._latest_joint_monotonic > self._feedback_timeout_s:
             self._disable("七轴反馈超时", publish_hold=False)

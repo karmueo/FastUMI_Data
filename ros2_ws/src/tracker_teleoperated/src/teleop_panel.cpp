@@ -1,0 +1,494 @@
+/**
+ * @file teleop_panel.cpp
+ * @brief 实现 Tracker 遥操面板、RViz 窗口级快捷键及非阻塞 ROS 服务调用。
+ */
+#include "tracker_teleoperated/teleop_panel.hpp"
+#include "tracker_teleoperated/recordings_widget.hpp"
+#include "tracker_teleoperated/video_source_widget.hpp"
+
+#include <atomic>
+#include <QApplication>
+#include <QAbstractSpinBox>
+#include <QColor>
+#include <QComboBox>
+#include <QDialog>
+#include <QEvent>
+#include <QGridLayout>
+#include <QHeaderView>
+#include <QKeyEvent>
+#include <QKeySequenceEdit>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QTextEdit>
+#include <QTabWidget>
+#include <QTimer>
+#include <QTreeWidget>
+#include <QVBoxLayout>
+#include <pluginlib/class_list_macros.hpp>
+#include <rviz_common/display_context.hpp>
+#include <rviz_common/ros_integration/ros_node_abstraction_iface.hpp>
+#include <rviz_common/window_manager_interface.hpp>
+
+namespace tracker_teleoperated
+{
+namespace
+{
+/** @brief 控制接口公共前缀。 */
+const std::string prefix = "/tracker_teleoperated/";
+/** @brief 稳定时钟不受 ROS 模拟时间和系统时钟调整影响。 */
+using Clock = std::chrono::steady_clock;
+/** @brief 将稳定业务枚举翻译为界面文字。 @param state 进程状态枚举。 @return 中文名称或原值。 */
+QString translated(const std::string & state)
+{
+  /** @brief 进程与录制状态对应的中文展示。 */
+  static const std::map<std::string, QString> names = {
+    {"starting", "启动中"}, {"running", "运行中"}, {"stopped", "已停止"},
+    {"stopping", "停止中"}, {"external", "外部节点"}, {"failed", "启动失败"},
+    {"exited", "进程退出"}, {"idle", "空闲"}, {"recording", "录制中"}, {"saving", "保存中"}};
+  return names.count(state) ? names.at(state) : QString::fromStdString(state);
+}
+
+/**
+ * @brief 判断一个窗口或控件是否由指定 RViz 主窗口拥有。
+ * @param[in] widget 当前活动窗口或焦点控件，可为空。
+ * @param[in] rviz_window 当前面板所属 RViz 主窗口，可为空。
+ * @return `widget` 等于主窗口，或其 Qt 父控件链最终到达主窗口时为 true。
+ */
+bool belongsToRviz(QWidget * widget, QWidget * rviz_window)
+{
+  for (auto * current = widget; current; current = current->parentWidget()) {
+    if (current == rviz_window) {return true;}
+  }
+  return false;
+}
+
+/**
+ * @brief 判断焦点链是否需要保留控件原有键盘输入。
+ * @param[in] focus 当前焦点控件，可为空。
+ * @param[in] rviz_window 遍历焦点父链时的停止边界。
+ * @return 可编辑控件、下拉框、菜单或对话框获得焦点时为 true。
+ */
+bool protectsKeyboardInput(QWidget * focus, QWidget * rviz_window)
+{
+  for (auto * widget = focus; widget; widget = widget->parentWidget()) {
+    if (auto * edit = qobject_cast<QLineEdit *>(widget); edit && !edit->isReadOnly()) {return true;}
+    if (auto * edit = qobject_cast<QTextEdit *>(widget); edit && !edit->isReadOnly()) {return true;}
+    if (auto * edit = qobject_cast<QPlainTextEdit *>(widget); edit && !edit->isReadOnly()) {return true;}
+    if (qobject_cast<QAbstractSpinBox *>(widget) || qobject_cast<QComboBox *>(widget) ||
+      qobject_cast<QKeySequenceEdit *>(widget) || qobject_cast<QMenu *>(widget) ||
+      qobject_cast<QDialog *>(widget)) {return true;}
+    if (widget == rviz_window) {break;}
+  }
+  return false;
+}
+}  // namespace
+
+/** @brief 创建组件表格、按钮及诊断区，并安装窗口级过滤器。 @param[in] parent 管理控件生命周期的父窗口。 */
+TeleopPanel::TeleopPanel(QWidget * parent) : rviz_common::Panel(parent)
+{
+  setFocusPolicy(Qt::StrongFocus);
+  setMinimumWidth(520);
+  /** @brief 面板主布局。 */
+  auto * layout = new QVBoxLayout(this);
+  hint_ = new QLabel("RViz 窗口内可直接使用快捷键；输入框和对话框中不触发。\n"
+    "workspace 标定：起点 C → 向上移动 C → 向前移动 C。\n"
+    "reference_eef：跟踪稳定后按空格建立参考。", this);
+  hint_->setWordWrap(true);
+  layout->addWidget(hint_);
+  video_sources_ = new VideoSourceWidget(this);
+  layout->addWidget(video_sources_);
+  /** @brief 页签共用下方控制按钮，切换数据浏览时仍可暂停或保存。 */
+  auto * tabs = new QTabWidget(this);
+  tabs->setObjectName("teleop_tabs");
+  /** @brief 状态表格和详细诊断放在同一页签。 */
+  auto * components = new QWidget(tabs);
+  /** @brief 节点页签布局。 */
+  auto * components_layout = new QVBoxLayout(components);
+  tree_ = new QTreeWidget(components);
+  tree_->setColumnCount(6);
+  tree_->setHeaderLabels({"组件", "归属", "进程", "数据", "启动", "停止"});
+  tree_->setRootIsDecorated(false);
+  tree_->setMinimumHeight(270);
+  tree_->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+  components_layout->addWidget(tree_);
+  tabs->addTab(components, "节点状态");
+  recordings_ = new RecordingsWidget(tabs);
+  tabs->addTab(recordings_, "已保存数据");
+  layout->addWidget(tabs, 1);
+  connect(tree_, &QTreeWidget::itemSelectionChanged, this, &TeleopPanel::showDetails);
+  /** @brief 所有按钮映射到相同的操作信号。 */
+  auto * grid = new QGridLayout();
+  /** @brief 面板操作与快捷键标签。 */
+  const std::vector<std::pair<QString, QString>> actions = {
+    {"start_all", "启动全部"}, {"stop_all", "停止全部"}, {"toggle", "启用遥操（空格）"},
+    {"pause", "暂停／取消操作（S）"}, {"calibrate", "标定采样（C）"}, {"home", "回位（H）"},
+    {"record", "开始录制（A）"}, {"discard", "丢弃本轮（B）"}, {"quit", "保存并退出（Q）"}};
+  for (size_t i = 0; i < actions.size(); ++i) {
+    /** @brief 本项按钮及固定操作标识。 */
+    auto * button = new QPushButton(actions[i].second, this);
+    /** @brief 捕获值语义的操作标识，避免按钮回调引用循环变量。 */
+    const auto action = actions[i].first;
+    button->setObjectName(action);
+    buttons_[action] = button;
+    grid->addWidget(button, static_cast<int>(i / 2), static_cast<int>(i % 2));
+    connect(button, &QPushButton::clicked, this, [this, action]() {emit actionRequested(action);});
+  }
+  layout->addLayout(grid);
+  control_status_ = new QLabel("遥操：等待状态", this);
+  record_status_ = new QLabel("录制：等待状态", this);
+  request_status_ = new QLabel("等待管理节点", this);
+  for (auto * label : {control_status_, record_status_, request_status_}) {
+    label->setWordWrap(true);
+    label->setTextFormat(Qt::PlainText);
+    layout->addWidget(label);
+  }
+  details_ = new QPlainTextEdit(this);
+  details_->setReadOnly(true);
+  details_->setMaximumHeight(150);
+  details_->setPlaceholderText("选择组件查看异常、话题、消息间隔和日志路径");
+  components_layout->addWidget(details_);
+  spin_timer_ = new QTimer(this);
+  heartbeat_timer_ = new QTimer(this);
+  connect(this, &TeleopPanel::actionRequested, this, &TeleopPanel::dispatch);
+  connect(spin_timer_, &QTimer::timeout, this, [this]() {
+    if (executor_) {executor_->spin_some(std::chrono::milliseconds(5));}
+    refresh();
+  });
+  connect(heartbeat_timer_, &QTimer::timeout, this, [this]() {
+    if (heartbeat_ && component_values_.count("teleop") &&
+      component_values_.at("teleop").at("ownership") == "local" &&
+      Clock::now() - manager_seen_ < std::chrono::seconds(2)) {
+      heartbeat_->publish(std_msgs::msg::Empty());
+    }
+  });
+  qApp->installEventFilter(this);
+  refresh();
+}
+
+/** @brief 所有回调都在 GUI 线程执行，停止轮询即可同步解除生命周期。 */
+TeleopPanel::~TeleopPanel()
+{
+  qApp->removeEventFilter(this);
+  spin_timer_->stop();
+  heartbeat_timer_->stop();
+  if (executor_ && node_) {executor_->remove_node(node_);}
+  executor_.reset();
+  subscriptions_.clear();
+  triggers_.clear();
+  booleans_.clear();
+}
+
+/** @copydoc TeleopPanel::save */
+void TeleopPanel::save(rviz_common::Config config) const
+{
+  rviz_common::Panel::save(config);
+  video_sources_->save(config);
+}
+
+/** @copydoc TeleopPanel::load */
+void TeleopPanel::load(const rviz_common::Config & config)
+{
+  rviz_common::Panel::load(config);
+  video_sources_->load(config);
+}
+
+/** @copydoc TeleopPanel::onInitialize */
+void TeleopPanel::onInitialize()
+{
+  /** @brief 节点编号允许安全卸载后重新添加面板。 */
+  static std::atomic<unsigned> counter{0};
+  /** @brief 复用 RViz context，但不占用 RViz 节点的 executor。 */
+  auto context = getDisplayContext()->getRosNodeAbstraction().lock()->get_raw_node()->get_node_base_interface()->get_context();
+  /** @brief 主窗口用于限定应用级事件过滤器，包含其浮动停靠窗口。 */
+  auto * window_manager = getDisplayContext()->getWindowManager();
+  rviz_window_ = window_manager ? window_manager->getParentWindow() : window();
+  /** @brief 配置独立 ROS 节点，避免继承 RViz 的节点重命名参数。 */
+  rclcpp::NodeOptions options;
+  options.context(context);
+  options.use_global_arguments(false);
+  node_ = std::make_shared<rclcpp::Node>("tracker_teleop_panel_" + std::to_string(++counter), options);
+  video_sources_->initialize(node_, getDisplayContext());
+  /** @brief 让面板 executor 与 RViz 共用 context 的退出生命周期。 */
+  rclcpp::ExecutorOptions executor_options;
+  executor_options.context = context;
+  executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>(executor_options);
+  executor_->add_node(node_);
+  heartbeat_ = node_->create_publisher<std_msgs::msg::Empty>(prefix + "panel_heartbeat", 10);
+  record_command_ = node_->create_publisher<std_msgs::msg::String>(prefix + "record_command", 10);
+  /** @brief 业务状态支持晚加入面板；新鲜度仍由周期消息决定。 */
+  auto qos = rclcpp::QoS(1).transient_local();
+  subscriptions_.push_back(node_->create_subscription<std_msgs::msg::Bool>(prefix + "enabled", qos,
+    [this](const std_msgs::msg::Bool & m) {enabled_ = m.data; control_seen_ = Clock::now();}));
+  subscriptions_.push_back(node_->create_subscription<std_msgs::msg::String>(prefix + "status", qos,
+    [this](const std_msgs::msg::String & m) {control_status_->setText(QString::fromStdString(m.data));}));
+  subscriptions_.push_back(node_->create_subscription<std_msgs::msg::String>(prefix + "record_status", qos,
+    [this](const std_msgs::msg::String & m) {record_status_->setText(QString::fromStdString(m.data));}));
+  subscriptions_.push_back(node_->create_subscription<std_msgs::msg::String>(prefix + "record_state", qos,
+    [this](const std_msgs::msg::String & m) {
+      if (record_state_ == "saving" && m.data == "idle") {recordings_->requestRefresh();}
+      if (record_state_ != m.data) {record_pending_ = false;}
+      record_state_ = m.data;
+      record_seen_ = Clock::now();
+    }));
+  subscriptions_.push_back(node_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(prefix + "components/status", qos,
+    [this](const diagnostic_msgs::msg::DiagnosticArray & m) {updateComponents(m);}));
+  for (const auto & name : {"start_all", "stop_all", "shutdown_session", "calibrate_workspace", "return_home"}) {
+    triggers_[name] = node_->create_client<std_srvs::srv::Trigger>(prefix + name);
+  }
+  booleans_["set_enabled"] = node_->create_client<std_srvs::srv::SetBool>(prefix + "set_enabled");
+  spin_timer_->start(50);
+  heartbeat_timer_->start(100);
+}
+
+/** @copydoc TeleopPanel::eventFilter */
+bool TeleopPanel::eventFilter(QObject * watched, QEvent * event)
+{
+  if (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease &&
+    event->type() != QEvent::ShortcutOverride) {return Panel::eventFilter(watched, event);}
+  /** @brief 尚未初始化的测试面板使用自身顶层窗口作为作用域。 */
+  auto * rviz_window = rviz_window_ ? rviz_window_.data() : window();
+  /** @brief 活动窗口必须属于当前 RViz；浮动停靠窗口通过 Qt 父链识别。 */
+  auto * active = QApplication::activeWindow();
+  auto * focus = QApplication::focusWidget();
+  if (!rviz_window || !active || !belongsToRviz(active, rviz_window) ||
+    (focus && !belongsToRviz(focus, rviz_window))) {
+    return false;
+  }
+  /** @brief 模态窗口、弹出菜单及编辑控件保留原始按键行为。 */
+  if (QApplication::activeModalWidget() || QApplication::activePopupWidget() ||
+    qobject_cast<QDialog *>(active) || protectsKeyboardInput(focus, rviz_window)) {
+    return false;
+  }
+  /** @brief 只允许无修饰键或 Shift 大写输入，保留 Ctrl+C 等编辑行为。 */
+  auto * key = static_cast<QKeyEvent *>(event);
+  if (key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {return false;}
+  /** @brief 快捷键映射到与按钮相同的固定动作。 */
+  const std::map<int, QString> actions = {{Qt::Key_Space, "toggle"}, {Qt::Key_S, "pause"},
+    {Qt::Key_C, "calibrate"}, {Qt::Key_H, "home"}, {Qt::Key_A, "record"},
+    {Qt::Key_B, "discard"}, {Qt::Key_Q, "quit"}};
+  if (!actions.count(key->key())) {return false;}
+  event->accept();
+  if (event->type() == QEvent::KeyPress && !key->isAutoRepeat()) {
+    emit actionRequested(actions.at(key->key()));
+  }
+  return true;
+}
+
+/** @brief 分派可用操作，暂停可抢占普通请求。 @param action 固定操作标识。 */
+void TeleopPanel::dispatch(const QString & action)
+{
+  refresh();
+  if (!node_ || (buttons_.count(action) && !buttons_[action]->isEnabled())) {return;}
+  if (action == "toggle" || action == "pause") {
+    setBool("set_enabled", action == "toggle" && !enabled_);
+  } else if (action == "record" || action == "discard") {
+    /** @brief 兼容现有记录节点的单键消息。 */
+    std_msgs::msg::String command;
+    command.data = action == "record" ? "a" : "b";
+    record_command_->publish(command);
+    record_pending_ = true;
+    record_deadline_ = Clock::now() + std::chrono::seconds(3);
+  } else {
+    /** @brief 将用户操作映射为固定服务，避免界面拼接任意命令。 */
+    const std::map<QString, std::string> services = {{"start_all", "start_all"}, {"stop_all", "stop_all"},
+      {"quit", "shutdown_session"}, {"calibrate", "calibrate_workspace"}, {"home", "return_home"}};
+    if (services.count(action)) {trigger(services.at(action));}
+  }
+  refresh();
+}
+
+/** @brief 记录服务超时并推进请求代次。 @return 本次请求的递增序号。 */
+unsigned TeleopPanel::beginRequest()
+{
+  pending_ = true;
+  request_deadline_ = Clock::now() + std::chrono::seconds(3);
+  request_status_->setText("请求处理中…");
+  return ++sequence_;
+}
+
+/** @brief 仅最新请求更新提示。 @param sequence 请求序号。 @param success 服务是否成功。 @param message 服务端说明。 */
+void TeleopPanel::finishRequest(unsigned sequence, bool success, const std::string & message)
+{
+  if (sequence != sequence_) {return;}
+  pending_ = false;
+  request_status_->setText((success ? "" : "失败：") + QString::fromStdString(message));
+  refresh();
+}
+
+/** @brief 非阻塞调用 Trigger，失败时更新提示。 @param service 相对于控制命名空间的服务名称。 */
+void TeleopPanel::trigger(const std::string & service)
+{
+  /** @brief 保留本次异步调用的客户端。 */
+  auto client = triggers_.at(service);
+  if (!client->service_is_ready()) {request_status_->setText("服务未就绪"); return;}
+  /** @brief 请求代次用于丢弃迟到的响应。 */
+  const auto sequence = beginRequest();
+  client->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>(),
+    [this, sequence](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+      /** @brief 由 executor 确认已完成的服务响应。 */
+      const auto result = future.get();
+      finishRequest(sequence, result->success, result->message);
+    });
+}
+
+/** @brief 异步调用组件或遥操启停服务。 @param service 相对服务名称。 @param value 目标启停状态。 */
+void TeleopPanel::setBool(const std::string & service, bool value)
+{
+  if (!booleans_.count(service)) {
+    booleans_[service] = node_->create_client<std_srvs::srv::SetBool>(prefix + service);
+  }
+  /** @brief 保留本次异步调用的客户端。 */
+  auto client = booleans_.at(service);
+  if (!client->service_is_ready()) {request_status_->setText("服务未就绪，请稍后重试"); return;}
+  /** @brief 包含目标启停状态的服务请求。 */
+  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+  request->data = value;
+  /** @brief 请求代次用于丢弃迟到的响应。 */
+  const auto sequence = beginRequest();
+  client->async_send_request(request, [this, sequence](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+    /** @brief 已完成的服务响应，不会在 GUI 线程等待。 */
+    const auto result = future.get();
+    finishRequest(sequence, result->success, result->message);
+  });
+}
+
+/** @brief 消息过期后禁用运动和录制入口；暂停服务仍可用以便人工停止。 */
+void TeleopPanel::refresh()
+{
+  /** @brief 本轮统一使用的单调时刻。 */
+  const auto now = Clock::now();
+  if (pending_ && now > request_deadline_) {
+    pending_ = false;
+    ++sequence_;
+    for (auto & entry : triggers_) {entry.second->prune_pending_requests();}
+    for (auto & entry : booleans_) {entry.second->prune_pending_requests();}
+    request_status_->setText("服务响应超时，请检查节点状态");
+  }
+  if (record_pending_ && now > record_deadline_) {
+    record_pending_ = false;
+    request_status_->setText("录制状态未变化，请检查记录节点");
+  }
+  /** @brief 管理诊断必须持续更新，断连后禁止新增操作。 */
+  const bool manager = node_ && now - manager_seen_ < std::chrono::seconds(2);
+  /** @brief 暂停操作只要求本会话归属，不依赖周期状态是否新鲜。 */
+  const bool owns_control = node_ && component_values_.count("teleop") &&
+    component_values_.at("teleop").at("ownership") == "local";
+  /** @brief 启用和回位额外要求控制节点的周期状态新鲜。 */
+  const bool control = owns_control && now - control_seen_ < std::chrono::seconds(2);
+  /** @brief 只操作本会话拥有且仍发布周期状态的记录节点。 */
+  const bool record = node_ && now - record_seen_ < std::chrono::seconds(2) &&
+    component_values_.count("recorder") && component_values_.at("recorder").at("ownership") == "local";
+  /** @brief 普通操作需要管理器空闲且没有在途请求。 */
+  const bool available = manager && !pending_ && !manager_busy_;
+  if (!manager && manager_seen_ != Clock::time_point{}) {
+    request_status_->setText("管理节点状态超时，组件状态已过期");
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+      tree_->topLevelItem(i)->setText(3, "状态过期");
+      tree_->topLevelItem(i)->setForeground(3, QColor("#b07800"));
+    }
+  }
+  for (auto & entry : buttons_) {entry.second->setEnabled(false);}
+  for (const auto & action : {"start_all", "stop_all", "quit"}) {
+    buttons_[action]->setEnabled(manager && available);
+  }
+  if (node_) {
+    buttons_["pause"]->setEnabled(owns_control && booleans_.at("set_enabled")->service_is_ready());
+    buttons_["toggle"]->setEnabled(control && available && booleans_.at("set_enabled")->service_is_ready());
+    buttons_["calibrate"]->setEnabled(control && available && triggers_.at("calibrate_workspace")->service_is_ready());
+    buttons_["home"]->setEnabled(control && available && triggers_.at("return_home")->service_is_ready());
+  }
+  buttons_["record"]->setEnabled(record && available && !record_pending_ && record_state_ != "saving" &&
+    (record_state_ == "recording" || !video_sources_->wristBusy()));
+  buttons_["discard"]->setEnabled(record && available && !record_pending_ && record_state_ == "recording");
+  buttons_["toggle"]->setText(enabled_ ? "暂停遥操（空格）" : "启用遥操（空格）");
+  buttons_["record"]->setText(record_state_ == "recording" ? "停止并保存（A）" :
+    record_state_ == "saving" ? "保存中…" : "开始录制（A）");
+  for (auto & entry : component_buttons_) {
+    /** @brief 该行对应的最新归属、模式和进程状态。 */
+    const auto & values = component_values_[entry.first];
+    /** @brief 决定是否允许停止进程的归属信息。 */
+    const auto owner = values.at("ownership");
+    /** @brief 独立于数据健康的进程状态。 */
+    const auto state = values.at("process_state");
+    entry.second.first->setEnabled(manager && available && values.at("mode") == "auto" &&
+      owner != "external" && (state == "stopped" || state == "failed" || state == "exited"));
+    entry.second.second->setEnabled(manager && available && owner == "local" &&
+      (state == "starting" || state == "running"));
+  }
+}
+
+/** @brief 保留行与焦点并更新诊断快照。 @param message 管理器的完整组件诊断。 */
+void TeleopPanel::updateComponents(const diagnostic_msgs::msg::DiagnosticArray & message)
+{
+  /** @brief 管理器重新连接时清除上一轮断连提示。 */
+  const bool reconnected = Clock::now() - manager_seen_ >= std::chrono::seconds(2);
+  manager_seen_ = Clock::now();
+  for (const auto & status : message.status) {
+    /** @brief 将诊断键值字段索引化，界面不解析中文消息。 */
+    std::map<std::string, std::string> values;
+    for (const auto & value : status.values) {values[value.key] = value.value;}
+    if (status.name == "session") {
+      manager_busy_ = values["busy"] == "true";
+      if (reconnected || manager_busy_ || status.message != last_session_message_) {
+        request_status_->setText(QString::fromStdString(status.message));
+      }
+      last_session_message_ = status.message;
+      continue;
+    }
+    /** @brief 组件的稳定行标识。 */
+    const auto id = QString::fromStdString(status.name);
+    /** @brief 复用现有行，保留选择和键盘焦点。 */
+    QTreeWidgetItem * row = nullptr;
+    for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+      if (tree_->topLevelItem(i)->data(0, Qt::UserRole).toString() == id) {row = tree_->topLevelItem(i); break;}
+    }
+    if (!row) {
+      row = new QTreeWidgetItem(tree_);
+      row->setData(0, Qt::UserRole, id);
+      /** @brief 仅自动管理且未运行的组件可启动。 */
+      auto * start = new QPushButton("启动", tree_);
+      /** @brief 仅本会话拥有的运行组件可停止。 */
+      auto * stop = new QPushButton("停止", tree_);
+      tree_->setItemWidget(row, 4, start);
+      tree_->setItemWidget(row, 5, stop);
+      component_buttons_[id] = {start, stop};
+      /** @brief 组件对应的固定启停服务全名。 */
+      const auto service = "components/" + status.name + "/set_running";
+      booleans_[service] = node_->create_client<std_srvs::srv::SetBool>(prefix + service);
+      connect(start, &QPushButton::clicked, this, [this, service]() {setBool(service, true);});
+      connect(stop, &QPushButton::clicked, this, [this, service]() {setBool(service, false);});
+    }
+    if (id == "recorder") {
+      recordings_->setDirectory(QString::fromStdString(values["output_directory"]));
+    }
+    component_values_[id] = values;
+    row->setText(0, QString::fromStdString(values["label"]));
+    row->setText(1, values["ownership"] == "local" ? "本次启动" :
+      values["ownership"] == "external" ? "外部／只读" : "未管理");
+    row->setText(2, translated(values["process_state"]));
+    row->setText(3, values["mode"] == "disabled" ? "已禁用" : values["healthy"] == "true" ? "正常" : "异常／无数据");
+    row->setForeground(3, status.level == 0 ? QColor("#228b22") : status.level == 1 ? QColor("#b07800") : QColor("#c03030"));
+    /** @brief 组合可复制的异常原因与诊断字段。 */
+    QString detail = QString::fromStdString(status.message);
+    for (const auto & value : status.values) {
+      detail += "\n" + QString::fromStdString(value.key + ": " + value.value);
+    }
+    details_by_id_[id] = detail;
+    row->setToolTip(0, QString::fromStdString(status.message));
+  }
+  showDetails();
+  refresh();
+}
+
+/** @brief 显示关键话题、数据年龄、退出码和日志位置。 */
+void TeleopPanel::showDetails()
+{
+  if (tree_->currentItem()) {
+    details_->setPlainText(details_by_id_[tree_->currentItem()->data(0, Qt::UserRole).toString()]);
+  }
+}
+}  // namespace tracker_teleoperated
+PLUGINLIB_EXPORT_CLASS(tracker_teleoperated::TeleopPanel, rviz_common::Panel)

@@ -43,6 +43,7 @@ def test_calibration_defaults_to_new_user_file(tmp_path: Path, monkeypatch) -> N
     )
     assert defaults["output_path"] == str(tmp_path / "fastumi_gripper_calibration.yaml")
     assert defaults["overwrite"] == "false"
+    assert defaults["image_topic"] == "/umi_camera/image_raw"
     assert not Path(defaults["output_path"]).exists()
 
 
@@ -58,6 +59,7 @@ def test_prediction_prefers_saved_user_calibration(
     packaged = PACKAGE_ROOT / "config" / "calibration.yaml"
     before = _launch_defaults(launch_file, monkeypatch, PACKAGE_ROOT)
     assert before["gripper_calibration_path"] == str(packaged)
+    assert before["image_topic"] == "/umi_camera/image_raw"
 
     generated = tmp_path / "fastumi_gripper_calibration.yaml"
     generated.write_text("gripper_calibration: {}\n", encoding="utf-8")

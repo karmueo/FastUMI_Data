@@ -1,0 +1,45 @@
+# 本文件定义面板管理范围、双 Python 环境及启动参数；observe 仅监测外部节点。
+workspace_root: ""
+discovery_wait_s: 2.0
+startup_grace_s: 30.0
+save_timeout_s: 300.0
+components:
+  arm:
+    label: RM75 驱动
+    mode: auto
+    nodes: [/rm_driver]
+  tracker:
+    label: VIVE Tracker
+    mode: auto
+    nodes: [/vive_tracker/pose_publisher]
+    parameters: {}
+  gripper:
+    label: Unitree 夹爪
+    mode: auto
+    nodes: [/dex1_gripper_node]
+    network_interface: ""
+  umi_camera:
+    label: UMI 相机
+    health_timeout_s: 1.0
+    mode: auto
+    nodes: [/umi_camera/usb_camera_node]
+    parameters: {video_device: /dev/video0, namespace: umi_camera, frame_id: umi_camera_optical_frame, publish_compressed: 'false'}
+  estimator:
+    label: 夹爪预测
+    mode: auto
+    nodes: [/gripper_openness_estimator]
+    parameters: {image_topic: /umi_camera/image_raw}
+  wrist_camera:
+    label: 末端相机
+    health_timeout_s: 1.0
+    mode: auto
+    nodes: [/wrist_camera/usb_camera_node]
+    parameters: {video_device: /dev/video2, namespace: wrist_camera, frame_id: wrist_camera_optical_frame, publish_compressed: 'false'}
+  teleop:
+    label: 遥操控制
+    mode: auto
+    nodes: [/tracker_teleop]
+  recorder:
+    label: 数据记录
+    mode: auto
+    nodes: [/tracker_teleop_recorder]

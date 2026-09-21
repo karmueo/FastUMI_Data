@@ -27,7 +27,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，发布 RM75 Link7 扩散策略推荐序列。 |
 | [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
 | [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
-| [`tracker_teleoperated`](src/tracker_teleoperated/) | Python 遥操包 | 使用 Placo 将 Tracker 目标转换为 RM75 关节指令。 |
+| [`tracker_teleoperated`](src/tracker_teleoperated/) | Python/C++ 遥操包 | 使用 RViz2 面板管理依赖、遥操与数采，Placo 生成 RM75 关节指令。 |
 | [`ros2_rm_robot`](src/ros2_rm_robot/) | 多包机械臂项目 | 提供 RM75 驱动、接口、MoveIt2、仿真及示例。 |
 
 ## 包之间的数据关系
@@ -144,7 +144,7 @@ FFmpeg 发送端，每次仅启动一种采集节点，避免争用 USB 相机�
 
 ### `gripper_openness`
 
-该包是独立的夹爪标定与预测实现，默认订阅 `/usb_camera/image_raw`，支持当前
+该包是独立的夹爪标定与预测实现，默认订阅 `/umi_camera/image_raw`，支持当前
 USB `cam0/fisheye` 标定、Kalibr `equidistant` 标定及常见针孔畸变模型。
 
 - `gripper_calibration_node`：通过 `~/start`、`~/save`、`~/reset` 服务采集实时图像，或扫描本地视频，保存夹爪毫米距离范围和 1%/99% ROI YAML。
@@ -316,9 +316,11 @@ cd ros2_ws
 source /opt/ros/jazzy/setup.bash
 source .venv-numpy2/bin/activate
 source install/setup.bash
-python -m colcon build --build-base build \
+PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
+  python -m colcon build --build-base build \
   --symlink-install --packages-select tracker_teleoperated \
-  --allow-overriding tracker_teleoperated
+  --allow-overriding tracker_teleoperated \
+  --cmake-args -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
 head -1 install/tracker_teleoperated/lib/tracker_teleoperated/tracker_teleop_node
 head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
@@ -350,29 +352,27 @@ RM75 实机部署还需要官方驱动及接口包。只使用部分功能时，
 可在 NumPy 1 环境通过 `python -m colcon build --build-base build --packages-up-to <包名>`
 构建目标包及其工作空间内依赖；遥操包仍按上面的 NumPy 2 命令单独构建。
 
-### 分终端运行
+### 遥操与数采面板
 
-每个新终端按 ROS、对应虚拟环境、工作空间的顺序加载。相机、数据处理和
-RM75 驱动使用 NumPy 1；遥操节点使用 NumPy 2。同一台或不同主机上的
-节点通过 ROS 话题通信，按需设置相同的 `ROS_DOMAIN_ID`。
+在 NumPy 2 终端启动统一入口，管理器按组件切换运行环境：
 
 ```bash
-# NumPy 1 终端
-cd ros2_ws
-source /opt/ros/jazzy/setup.bash
-source .venv-numpy1/bin/activate
-source install/setup.bash
-ros2 launch fastumi_usb_camera usb_camera.launch.py
-```
-
-```bash
-# NumPy 2 终端
 cd ros2_ws
 source /opt/ros/jazzy/setup.bash
 source .venv-numpy2/bin/activate
 source install/setup.bash
 ros2 launch tracker_teleoperated tracker_teleoperated.launch.py
 ```
+
+默认启动 RM75 驱动、Tracker、夹爪、两路相机、预测、遥操、记录和 RViz2。
+遥操保持暂停，录制保持空闲。面板显示依赖健康、末端视频和里程计，并提供
+快捷键及逐项启停。关闭窗口前自动停止并保存录制。已有外部节点只监测，
+远程组件应在管理配置中设为 `observe`。只打开面板可加 `autostart:=false`。
+
+本包现为 CMake/Python 混合包，从旧安装迁移时仅清理
+`build/tracker_teleoperated` 和 `install/tracker_teleoperated` 后重建；构建时
+使用系统 Qt，避免其他发行版的 Qt 库影响 ROS。配置和快捷键见
+[`tracker_teleoperated/README.md`](src/tracker_teleoperated/README.md)。
 
 ```bash
 # DP 推理终端；checkpoint 与 URDF 使用训练时匹配的文件

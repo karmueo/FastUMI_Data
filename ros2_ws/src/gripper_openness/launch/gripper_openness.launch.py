@@ -22,7 +22,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     arguments = [
         DeclareLaunchArgument(
-            "image_topic", default_value="/usb_camera/image_raw", description="ROS 图像话题"
+            "image_topic", default_value="/umi_camera/image_raw", description="ROS 图像话题"
         ),
         DeclareLaunchArgument(
             "camera_calibration_path",

@@ -7,7 +7,16 @@
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rviz_common</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>qtbase5-dev</depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>rviz_default_plugins</exec_depend>
+  <exec_depend>rm_driver</exec_depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>fastumi_interfaces</exec_depend>
@@ -18,24 +27,28 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-h5py</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
-  <exec_depend>rcl_interfaces</exec_depend>
+  <depend>rcl_interfaces</depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rm_description</exec_depend>
   <exec_depend>rm_bringup</exec_depend>
   <exec_depend>rm_ros_interfaces</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <exec_depend>vive_tracker</exec_depend>
   <exec_depend>unitree_gripper</exec_depend>
 
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

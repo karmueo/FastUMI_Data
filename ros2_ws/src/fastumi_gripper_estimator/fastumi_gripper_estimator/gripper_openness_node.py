@@ -19,6 +19,8 @@ from gripper_openness.calibration import load_gripper_calibration
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.validate_full_topic_name import validate_full_topic_name
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
@@ -159,9 +161,13 @@ class GripperOpennessNode(Node):
             self._debug_publisher = self.create_publisher(
                 Image, debug_image_topic, image_qos
             )
+        # 保存 QoS 和订阅代次，用于运行时切换并排除旧回调。
+        self._image_qos = image_qos
+        self._image_generation = 0
         self._image_subscription = self.create_subscription(
-            Image, image_topic, self._image_callback, image_qos
+            Image, image_topic, lambda m: self._source_image(m, 0), image_qos
         )
+        self.add_on_set_parameters_callback(self._change_image_topic)
         self.get_logger().info(
             f"订阅原始 RGB 话题 {image_topic}，发布 {openness_topic} "
             f"和 {state_topic}；"
@@ -177,6 +183,42 @@ class GripperOpennessNode(Node):
             f"{self._calibration_resolution[0]}x"
             f"{self._calibration_resolution[1]}"
         )
+
+    def _source_image(self, message, generation):
+        """丢弃已撤销视频源的回调，避免旧预测污染新源。"""
+        if generation == self._image_generation:
+            self._image_callback(message)
+
+    def _change_image_topic(self, parameters):
+        """建立新订阅后替换旧源，并清空预测历史；失败保持原输入。"""
+        topics = [p for p in parameters if p.name == "image_topic"]
+        if not topics:
+            return SetParametersResult(successful=True)
+        if len(parameters) != 1:
+            return SetParametersResult(successful=False, reason="image_topic 必须单独更新")
+        topic = topics[0].value
+        try:
+            if not isinstance(topic, str):
+                raise ValueError("图像话题必须为字符串")
+            validate_full_topic_name(topic)
+            if topic == self.get_parameter("image_topic").value:
+                return SetParametersResult(successful=True)
+            generation = self._image_generation + 1
+            subscription = self.create_subscription(
+                Image, topic, lambda m: self._source_image(m, generation), self._image_qos,
+            )
+        except Exception as error:
+            return SetParametersResult(successful=False, reason=str(error))
+        previous = self._image_subscription
+        self._image_subscription = subscription
+        self._image_generation = generation
+        self.destroy_subscription(previous)
+        self._estimator.reset()
+        self._state_publisher.publish(GripperState(
+            valid=False, raw_openness=math.nan, filtered_openness=math.nan,
+            marker_distance_mm=math.nan,
+        ))
+        return SetParametersResult(successful=True)
 
     @staticmethod
     def _default_calibration_path() -> str:

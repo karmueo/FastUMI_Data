@@ -4,7 +4,7 @@
 
 `gripper_openness` 是 ROS 2 Jazzy Python 包。它检测夹爪两侧的
 ArUco ID 0 和 ID 1，通过相机标定后的三维标签距离得到 `[0, 1]` 开合度。
-默认图像输入为 `/usb_camera/image_raw`，内部长度单位统一为毫米。
+默认图像输入为 `/umi_camera/image_raw`，内部长度单位统一为毫米。
 
 包内包含两个可执行文件：
 
@@ -65,7 +65,7 @@ ros2 launch gripper_openness gripper_calibration.launch.py \
 ```
 
 视频逐帧读完后自动保存并退出。ROS2 bag 可通过 `source_mode:=topic` 回放，
-使用相同的 `/usb_camera/image_raw` 话题和上述服务控制采样。
+使用相同的 `/umi_camera/image_raw` 话题和上述服务控制采样。
 
 ## 开合度预测
 
@@ -75,7 +75,7 @@ ros2 launch gripper_openness gripper_calibration.launch.py \
 ros2 launch fastumi_gripper_estimator gripper_openness.launch.py
 ```
 
-该命令默认订阅 `/usb_camera/image_raw`，从本包安装目录读取
+该命令默认订阅 `/umi_camera/image_raw`，从本包安装目录读取
 `config/calib.yaml`，并优先读取 `~/fastumi_gripper_calibration.yaml` 中新生成的
 夹爪标定；该文件尚未生成时读取包内示例 `config/calibration.yaml`。
 需要先安装 `fastumi_gripper_estimator` 包；可用

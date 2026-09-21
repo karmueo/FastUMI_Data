@@ -35,10 +35,10 @@ def generate_launch_description() -> LaunchDescription:
         if user_gripper_calibration.is_file()
         else os.path.join(calibration_share, "config", "calibration.yaml")
     )
-    # 默认订阅与相机标定对应的 USB 原始图像。
+    # 默认订阅 UMI 相机命名空间中的原始图像。
     image_topic_argument = DeclareLaunchArgument(
         "image_topic",
-        default_value="/usb_camera/image_raw",
+        default_value="/umi_camera/image_raw",
         description="用于三维夹爪距离估计的原始 sensor_msgs/Image 话题",
     )
     # 调试图像开关允许通过 launch 命令行覆盖 YAML 默认值。

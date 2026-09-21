@@ -1,0 +1,6 @@
+<!-- 导出 Tracker 遥操与数采 RViz2 控制面板。 -->
+<library path="teleop_panel">
+  <class name="tracker_teleoperated/TeleopPanel" type="tracker_teleoperated::TeleopPanel" base_class_type="rviz_common::Panel">
+    <description>Tracker 遥操、数据录制和本机依赖管理面板。</description>
+  </class>
+</library>

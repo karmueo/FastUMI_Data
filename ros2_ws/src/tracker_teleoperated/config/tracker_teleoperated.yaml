@@ -67,3 +67,20 @@ tracker_teleop:
     position_jump_threshold_m: 0.30
     rotation_jump_threshold_deg: 45.0
     recovery_samples: 3
+
+# 数据记录节点与遥操控制节点使用同一配置文件，话题可分别覆盖。
+tracker_teleop_recorder:
+  ros__parameters:
+    joint_state_topic: /joint_states
+    joint_action_topic: /rm_driver/movej_canfd_cmd
+    gripper_state_topic: /motion_control/gripper_state
+    gripper_action_topic: /motion_control/gripper_command
+    tracker_odom_topic: /vive_tracker/odom
+    # 末端相机图像；与相机启动时的 namespace 保持一致。
+    image_topic: /wrist_camera/image_raw
+    # 相对路径以仓库根目录为基准；输出到 dataset/h5dy_data/test/default_test。
+    dataset_root: dataset/h5dy_data
+    dir_name: test
+    name: default_test
+    record_camera: true
+    camera_fps: 30

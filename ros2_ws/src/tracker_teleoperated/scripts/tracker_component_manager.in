@@ -1,0 +1,7 @@
+#!@Python3_EXECUTABLE@
+"""使用构建时选定的解释器启动 tracker_component_manager。"""
+
+from tracker_teleoperated.component_manager import main
+
+if __name__ == "__main__":
+    main()

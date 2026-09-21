@@ -1,4 +1,4 @@
-"""验证遥操 ROS 接口、跳变恢复状态和键盘提示契约。"""
+"""验证遥操 ROS 接口、跳变恢复状态和面板提示契约。"""
 
 from pathlib import Path
 import time
@@ -13,13 +13,6 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import SetBool, Trigger
 
-from tracker_teleoperated.keyboard import (
-    TrackerTeleopKeyboard,
-    is_calibrate_key,
-    is_home_key,
-    keyboard_instructions,
-    requested_state_for_key,
-)
 from tracker_teleoperated.core import (
     PoseStreamValidator,
     parse_home_joint_positions,
@@ -464,74 +457,8 @@ def test_home_message_rejects_invalid_speed(speed):
         build_home_command(np.zeros(7), speed)
 
 
-@pytest.mark.parametrize(
-    ("key", "enabled", "expected"),
-    [
-        (" ", False, True),
-        (" ", True, False),
-        ("s", True, False),
-        ("i", True, None),
-        ("I", True, None),
-        ("x", True, None),
-    ],
-)
-def test_keyboard_key_mapping(key, enabled, expected):
-    """验证键盘切换和显式暂停按键。"""
-    assert requested_state_for_key(key, enabled) is expected
-
-
-@pytest.mark.parametrize(
-    ("key", "expected"),
-    [("c", True), ("C", True), ("i", False), (" ", False), (None, False)],
-)
-def test_keyboard_calibrate_key_mapping(key, expected):
-    """验证大小写 c 都会触发工作空间标定采样。"""
-    assert is_calibrate_key(key) is expected
-
-
-@pytest.mark.parametrize(
-    ("key", "expected"),
-    [("h", True), ("H", True), ("i", False), (" ", False), (None, False)],
-)
-def test_keyboard_home_key_mapping(key, expected):
-    """验证大小写 h 都会触发回到启动初始位姿。"""
-    assert is_home_key(key) is expected
-
-
-def test_keyboard_instructions_cover_both_mapping_modes():
-    """验证键盘提示工作空间标定和参考末端模式的启用步骤。"""
-    instructions = keyboard_instructions()
-
-    assert "[c]" in instructions
-    assert "[i]" not in instructions
-    assert "mapping_mode=workspace" in instructions
-    assert "mapping_mode=reference_eef" in instructions
-    assert "起点" in instructions
-    assert "大致向上" in instructions
-    assert "大致向前" in instructions
-    assert "[空格]" in instructions
-
-
-def test_keyboard_displays_async_pause_and_mapping_preservation(capsys):
-    """验证未操作键盘时也会显示暂停原因和标定方向保留提示。"""
-    keyboard = SimpleNamespace(enabled=True, _last_status="")
-    paused = String(data="遥操已暂停: Tracker 位姿发生跳变")
-    preserved = String(data="标定方向已保留，待输入稳定后按空格重新启用")
-
-    TrackerTeleopKeyboard._enabled_callback(keyboard, Bool(data=False))
-    TrackerTeleopKeyboard._status_callback(keyboard, paused)
-    TrackerTeleopKeyboard._status_callback(keyboard, paused)
-    TrackerTeleopKeyboard._status_callback(keyboard, preserved)
-    output = capsys.readouterr().out
-
-    assert not keyboard.enabled
-    assert output.count("Tracker 位姿发生跳变") == 1
-    assert "标定方向已保留" in output
-    assert requested_state_for_key(" ", keyboard.enabled) is True
-
-
 def test_shutdown_request_marks_control_node_for_exit():
-    """验证键盘退出请求会让控制节点结束主循环。"""
+    """验证面板退出请求会让控制节点结束主循环。"""
     state = SimpleNamespace(_shutdown_requested=False)
 
     response = TrackerTeleopNode._shutdown_callback(
@@ -979,3 +906,23 @@ def test_failed_initialization_preserves_existing_reference():
     assert state._mapping_basis == pytest.approx(old_basis)
     assert state._reference_tracker_pose == pytest.approx(old_tracker)
     assert state._reference_eef_pose == pytest.approx(old_eef)
+
+
+def test_home_requires_panel_heartbeat():
+    """回位前必须存在面板心跳，失联时不能发出 MoveJ。"""
+    state = HomeState()
+    state._latest_heartbeat_monotonic = 0.0
+    response = call_return_home(state)
+    assert not response.success
+    assert state._home_publisher.messages == []
+
+
+def test_panel_loss_stops_active_home():
+    """回位中面板失联立即发布停止命令。"""
+    state = HomeState()
+    state._homing = True
+    state._latest_heartbeat_monotonic = 0.0
+    TrackerTeleopNode._control_tick(state)
+    assert not state._homing
+    assert len(state._move_stop_publisher.messages) == 1
+    assert "面板心跳" in state._status_publisher.messages[-1].data
