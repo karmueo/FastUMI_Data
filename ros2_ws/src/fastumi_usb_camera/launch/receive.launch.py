@@ -15,11 +15,16 @@ def generate_launch_description() -> LaunchDescription:
         "config" / "ffmpeg.yaml"
     return LaunchDescription([
         DeclareLaunchArgument("config", default_value=str(default_config)),
+        DeclareLaunchArgument("input_topic", default_value="/usb_camera/image_raw"),
+        DeclareLaunchArgument("output_topic", default_value="/usb_camera/image_decoded"),
         Node(
             package="fastumi_usb_camera",
             executable="usb_camera_receiver",
             name="usb_camera_receiver",
             output="screen",
-            parameters=[LaunchConfiguration("config")],
+            parameters=[LaunchConfiguration("config"), {
+                "input_topic": LaunchConfiguration("input_topic"),
+                "output_topic": LaunchConfiguration("output_topic"),
+            }],
         ),
     ])

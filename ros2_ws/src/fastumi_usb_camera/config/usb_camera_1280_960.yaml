@@ -1,0 +1,9 @@
+# 该文件提供 1280x960 通用配置；设备路径由启动参数显式指定。
+/**:
+  ros__parameters:
+    video_device: ""
+    width: 1280
+    height: 960
+    fps: 30
+    frame_id: usb_camera_optical_frame
+    publish_compressed: false

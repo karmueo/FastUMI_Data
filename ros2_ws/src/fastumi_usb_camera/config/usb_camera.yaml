@@ -1,10 +1,9 @@
-# 该文件保存默认 USB 相机标识、MJPEG 模式及图像输出参数。
+# 该文件提供通用 USB 相机默认值；双相机部署由 fastumi_bringup 显式传入物理端口。
 /**:
   ros__parameters:
-    vendor_id: 7119
-    product_id: 10436
-    width: 1280
-    height: 960
+    video_device: ""
+    width: 1920
+    height: 1080
     fps: 30
     frame_id: usb_camera_optical_frame
     publish_compressed: false

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# 加载工作区环境，一键启动厂商服务端与 ROS 2 控制节点。
+# 在 Jetson ROS 2 Humble 环境中启动厂商服务端与 ROS 控制节点。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-NETWORK_INTERFACE="wlP1p1s0"
+CONFIG_FILE="${SCRIPT_DIR}/config/gripper.yaml"
+NETWORK_INTERFACE=""
 
 usage() {
-    echo "用法: $0 [-n 网卡]"
+    echo "用法: $0 [-c 配置文件] [-n 网卡]"
 }
 
 fail() {
@@ -15,15 +16,40 @@ fail() {
     exit 1
 }
 
-while getopts ":n:h" option; do
+while getopts ":c:n:h" option; do
     case "${option}" in
-        n) NETWORK_INTERFACE="${OPTARG}" ;;
+        c) CONFIG_FILE="${OPTARG}" ;;
+        n)
+            [[ -n "${OPTARG}" ]] || fail "-n 指定的网卡不能为空"
+            NETWORK_INTERFACE="${OPTARG}"
+            ;;
         h) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
 [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+[[ -f "${CONFIG_FILE}" ]] || fail "夹爪配置文件不存在: ${CONFIG_FILE}"
+CONFIG_FILE="$(realpath -- "${CONFIG_FILE}")"
+
+# 厂商服务端只扫描本地串口；在启动任何控制进程前完成设备和权限检查。
+SERIAL_PORT_FOUND=false
+SERIAL_PORT_ACCESSIBLE=false
+INACCESSIBLE_PORTS=()
+for serial_port in /dev/ttyUSB* /dev/ttyCH343USB* /dev/ttyACM*; do
+    if [[ -c "${serial_port}" ]]; then
+        SERIAL_PORT_FOUND=true
+        if [[ ! -r "${serial_port}" || ! -w "${serial_port}" ]]; then
+            INACCESSIBLE_PORTS+=("${serial_port}")
+        else
+            SERIAL_PORT_ACCESSIBLE=true
+        fi
+    fi
+done
+[[ "${SERIAL_PORT_FOUND}" == true ]] \
+    || fail "未发现夹爪串口（/dev/ttyUSB*、/dev/ttyCH343USB*、/dev/ttyACM*）"
+[[ "${SERIAL_PORT_ACCESSIBLE}" == true ]] \
+    || fail "当前用户 ${USER:-$(id -un)} 无权读写任何夹爪串口: ${INACCESSIBLE_PORTS[*]}"
 
 [[ "$(uname -m)" == "aarch64" ]] || fail "厂商服务端只支持 Linux aarch64"
 [[ -f /opt/ros/humble/setup.bash ]] || fail "未找到 ROS 2 Humble"
@@ -34,8 +60,10 @@ export CYCLONEDDS_HOME="${WORKSPACE}/.deps/unitree_gripper/install/cyclonedds"
     || fail "缺少匹配的 CycloneDDS；请运行 ${SCRIPT_DIR}/setup_gripper_env.sh"
 [[ -f "${WORKSPACE}/install/setup.bash" ]] \
     || fail "工作区尚未构建；请在 NumPy 1 环境中构建 unitree_gripper"
-ip link show "${NETWORK_INTERFACE}" >/dev/null 2>&1 \
-    || fail "网卡不存在: ${NETWORK_INTERFACE}"
+if [[ -n "${NETWORK_INTERFACE}" ]]; then
+    ip link show "${NETWORK_INTERFACE}" >/dev/null 2>&1 \
+        || fail "网卡不存在: ${NETWORK_INTERFACE}"
+fi
 
 set +u
 # shellcheck disable=SC1091
@@ -55,5 +83,8 @@ PACKAGE_SHARE="${PACKAGE_PREFIX}/share/unitree_gripper"
     || fail "缺少已安装的 Unitree 动态库；请重新构建 unitree_gripper"
 [[ -f "${PACKAGE_SHARE}/launch/gripper.launch.py" ]] \
     || fail "缺少 launch 文件；请重新构建 unitree_gripper"
-exec ros2 launch unitree_gripper gripper.launch.py \
-    "network_interface:=${NETWORK_INTERFACE}"
+LAUNCH_ARGUMENTS=("config_file:=${CONFIG_FILE}")
+if [[ -n "${NETWORK_INTERFACE}" ]]; then
+    LAUNCH_ARGUMENTS+=("network_interface:=${NETWORK_INTERFACE}")
+fi
+exec ros2 launch unitree_gripper gripper.launch.py "${LAUNCH_ARGUMENTS[@]}"

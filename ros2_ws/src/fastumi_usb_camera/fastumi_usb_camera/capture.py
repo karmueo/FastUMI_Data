@@ -1,11 +1,40 @@
-"""按 USB 标识选择 UVC 相机，并在独立线程读取完整 MJPEG 帧。"""
+"""按视频设备路径或 USB 标识选择相机，并在独立线程读取 MJPEG 帧。"""
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+import re
 import threading
 import time
 from typing import Any, Callable
+
+
+BY_PATH_ROOT = Path("/dev/v4l/by-path")
+VIDEO_DEVICE_PATTERN = re.compile(r"[^/]+-video-index0")
+
+
+def is_physical_video_device_path(
+    video_device: str, by_path_root: Path = BY_PATH_ROOT,
+) -> bool:
+    """判断路径是否为主视频节点的稳定 udev 物理端口链接。"""
+    if not isinstance(video_device, str) or not video_device:
+        return False
+    path = Path(video_device)
+    return (
+        path.is_absolute()
+        and path.parent == by_path_root
+        and VIDEO_DEVICE_PATTERN.fullmatch(path.name) is not None
+    )
+
+
+def physical_port_label(video_device: str) -> str:
+    """从 by-path 文件名提取便于界面展示的 USB Hub 端口链。"""
+    match = re.search(
+        r"-usb(?:v\d+)?-\d+:([^:]+):\d+\.\d+-video-index0$",
+        Path(video_device).name,
+    )
+    return match.group(1) if match else Path(video_device).name
 
 
 def _usb_id(value: Any) -> int:
@@ -18,9 +47,45 @@ def _usb_id(value: Any) -> int:
     return int(value)
 
 
-def select_device(devices: list[dict[str, Any]], vendor_id: int,
-                  product_id: int) -> dict[str, Any]:
-    """选择唯一匹配的设备，否则提供可诊断的候选设备信息。"""
+def _usb_location_from_video_device(
+    video_device: str, sysfs_root: Path = Path("/sys/class/video4linux"),
+    device_root: Path = Path("/dev"), by_path_root: Path = BY_PATH_ROOT,
+) -> tuple[int, int]:
+    """校验稳定物理路径，并沿 sysfs 查找 USB 总线号和当前设备地址。"""
+    if not is_physical_video_device_path(video_device, by_path_root):
+        raise ValueError(
+            "视频设备必须使用 /dev/v4l/by-path/*-video-index0 物理端口路径："
+            f"{video_device}"
+        )
+    try:
+        resolved = Path(video_device).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"视频设备 {video_device} 不存在或无法解析") from error
+    if resolved.parent != device_root.resolve() or not (
+        resolved.name.startswith("video") and resolved.name[5:].isdigit()
+    ):
+        raise ValueError(f"视频设备必须指向 /dev/video*：{video_device}")
+    try:
+        usb_interface = (sysfs_root / resolved.name / "device").resolve(
+            strict=True
+        )
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"无法读取 {video_device} 的 sysfs 设备信息") from error
+    for parent in (usb_interface, *usb_interface.parents):
+        try:
+            return (int((parent / "busnum").read_text().strip()),
+                    int((parent / "devnum").read_text().strip()))
+        except (OSError, ValueError):
+            continue
+    raise ValueError(f"{video_device} 未关联 USB 设备")
+
+
+def select_device(devices: list[dict[str, Any]], vendor_id: int | None = None,
+                  product_id: int | None = None, device_uid: str = "",
+                  usb_location: tuple[int, int] | None = None) -> dict[str, Any]:
+    """按视频设备对应的 USB 地址或 VID/PID 选择唯一设备。"""
+    if usb_location is None and (vendor_id is None or product_id is None):
+        raise ValueError("未指定视频设备时必须提供 vendor_id 和 product_id")
     matches = []
     candidates = []
     for device in devices:
@@ -30,13 +95,26 @@ def select_device(devices: list[dict[str, Any]], vendor_id: int,
         except (KeyError, TypeError, ValueError):
             continue
         candidates.append(f"{vendor:04x}:{product:04x} ({device.get('uid', '?')})")
-        if (vendor, product) == (vendor_id, product_id):
+        if (usb_location is not None or
+                (vendor, product) == (vendor_id, product_id)) and (
+            not device_uid or device.get("uid") == device_uid
+        ) and (
+            usb_location is None or (
+                device.get("bus_number"), device.get("device_address")
+            ) == usb_location
+        ):
             matches.append(device)
     if len(matches) != 1:
         reason = "未找到" if not matches else "找到多个"
+        target = (
+            f"USB 地址 {usb_location}" if usb_location is not None
+            else f"USB 相机 {vendor_id:04x}:{product_id:04x}"
+        )
         raise RuntimeError(
-            f"{reason} USB 相机 {vendor_id:04x}:{product_id:04x}；"
-            f"候选设备: {', '.join(candidates) or '无'}"
+            f"{reason} {target}"
+            f"{f' (device_uid={device_uid})' if device_uid else ''}；"
+            f"候选设备: {', '.join(candidates) or '无'}；"
+            "同型号设备可指定 video_device 或 device_uid"
         )
     return matches[0]
 
@@ -44,12 +122,22 @@ def select_device(devices: list[dict[str, Any]], vendor_id: int,
 class UvcCamera:
     """持有 UVC 设备并在线程中递送 MJPEG 字节，关闭时停止 USB 采集。"""
 
-    def __init__(self, *, vendor_id: int, product_id: int, width: int,
-                 height: int, fps: int, uvc_module: Any = None) -> None:
+    def __init__(self, *, width: int, height: int, fps: int,
+                 vendor_id: int | None = None, product_id: int | None = None,
+                 device_uid: str = "", video_device: str = "",
+                 uvc_module: Any = None) -> None:
         """打开唯一相机并精确协商分辨率与帧率，失败时释放设备。"""
+        if device_uid and video_device:
+            raise ValueError("device_uid 和 video_device 只能指定其中一个")
         if uvc_module is None:
             import uvc as uvc_module
-        device = select_device(uvc_module.device_list(), vendor_id, product_id)
+        usb_location = (
+            _usb_location_from_video_device(video_device) if video_device else None
+        )
+        device = select_device(
+            uvc_module.device_list(), vendor_id, product_id, device_uid,
+            usb_location,
+        )
         capture = uvc_module.Capture(device["uid"])
         try:
             requested = (width, height, fps)

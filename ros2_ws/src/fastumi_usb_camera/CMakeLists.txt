@@ -57,6 +57,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_configuration test/test_configuration.cpp)
   target_link_libraries(test_configuration ${PROJECT_NAME}_core)
 
+  ament_add_gtest(test_physical_device test/test_physical_device.cpp)
+  target_link_libraries(test_physical_device ${PROJECT_NAME}_core)
+
   ament_add_gtest(test_latest_frame_buffer test/test_latest_frame_buffer.cpp)
   target_link_libraries(test_latest_frame_buffer ${PROJECT_NAME}_core)
 

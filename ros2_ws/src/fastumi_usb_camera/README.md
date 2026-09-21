@@ -61,6 +61,10 @@ sudo udevadm trigger
 
 ## 启动与话题
 
+同型号双相机应通过 `video_device` 指定完整的
+`/dev/v4l/by-path/*-video-index0` 物理端口。该路径同时适用于 Python 和 FFmpeg
+采集模式；路径不存在、不是主视频节点或无法关联 USB 设备时启动失败。
+
 ```bash
 # 默认启动 Python 节点，仅发布 bgr8 原始图像。
 ros2 launch fastumi_usb_camera usb_camera.launch.py
@@ -70,6 +74,10 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py publish_compressed:=true
 
 # 改为仅发布 FFmpeg H.264；与上述启动命令择一运行。
 ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true
+
+# FFmpeg 发送端同时在本机启动可选解码节点。
+ros2 launch fastumi_usb_camera usb_camera.launch.py \
+  enable_ffmpeg:=true enable_decoder:=true
 
 # 使用自定义相机参数文件；将绝对路径换成实际文件位置。
 ros2 launch fastumi_usb_camera usb_camera.launch.py config:=/absolute/path/camera.yaml
@@ -85,7 +93,9 @@ USB 标识可以用十进制
 或带 `0x` 前缀的十六进制传入。相机参数只在启动时读取，模式必须精确匹配
 设备提供的 UVC 模式。`enable_ffmpeg` 默认为 `false`；设为 `true` 时只启动
 `usb_camera_ffmpeg`，即使同时传入 `publish_compressed:=true` 也以 FFmpeg 为准，
-不会创建 raw/JPEG 发布器。两个开关均只接受 `true` 或 `false`，切换模式需重启。
+不会创建 raw/JPEG 发布器。`enable_decoder` 默认为 `false`；仅在 FFmpeg 模式下
+可设为 `true`，并把解码结果发布到 `decoded_topic`。布尔开关均只接受 `true`
+或 `false`，切换模式需重启。
 
 FFmpeg 模式先加载 `ffmpeg_config`（默认 `config/ffmpeg.yaml`），再加载 `config`，
 最后应用显式传入的相机参数；后加载的相机值覆盖先前的默认值。`config` 中供
@@ -99,8 +109,8 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
   width:=640 height:=480 fps:=30
 ```
 
-`namespace:=...` 仅作用于 Python raw/JPEG 模式；FFmpeg 输出使用
-`ffmpeg_config` 中绝对 `topic` 对应的 `/ffmpeg` 话题。
+`namespace:=...` 仅作用于 Python raw/JPEG 模式；FFmpeg 输出使用绝对基础参数
+`topic` 对应的 `/ffmpeg` 话题。launch 会为该基础话题生成匹配的编码器参数前缀。
 
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
@@ -160,7 +170,9 @@ source /path/to/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=63
 
 # 启动 FFmpeg 接收端，将 H.264 解码成本机的 bgr8 图像。
-ros2 launch fastumi_usb_camera receive.launch.py
+ros2 launch fastumi_usb_camera receive.launch.py \
+  input_topic:=/wrist_camera/image_raw \
+  output_topic:=/wrist_camera/image_decoded
 
 # 在另一个已加载相同环境的终端检查解码图像话题和 QoS。
 ros2 topic info --verbose /usb_camera/image_decoded

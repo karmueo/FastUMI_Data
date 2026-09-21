@@ -17,6 +17,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`xv_sdk_ros2`](src/xv_sdk_ros2/) | C++ 驱动包 | 将 XV 设备的 IMU、RGB、ToF 等数据发布为 ROS 2 话题，并提供图像截图功能。 |
 | [`tof_stereo_camera`](src/tof_stereo_camera/) | C++ 驱动包 | 使用随包内置的 stereo_camera SDK 发布 RGB、iTOF 深度/灰度和 IMU 数据。 |
 | [`fastumi_usb_camera`](src/fastumi_usb_camera/) | Python/C++ 相机包 | 使用 UVC 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
+| [`fastumi_bringup`](src/fastumi_bringup/) | Python 启动包 | 在 Jetson 上统一启动并回位 RM75，管理末端相机、Unitree 夹爪和录制服务。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
 | [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度。 |
@@ -247,12 +248,15 @@ uv pip install --python .venv-numpy2/bin/python -r requirements-numpy2.txt
 cd ros2_ws
 source /opt/ros/humble/setup.bash
 source .venv-numpy1/bin/activate
-rosdep install --from-paths src/fastumi_interfaces src/fastumi_usb_camera \
+git -C .. submodule update --init ros2_ws/src/ros2_rm_robot
+git -C src/ros2_rm_robot switch agx
+rosdep install --from-paths src/fastumi_usb_camera src/unitree_gripper \
+  src/fastumi_bringup src/fastumi_recorder src/fastumi_interfaces \
   src/ros2_rm_robot/rm_ros_interfaces src/ros2_rm_robot/rm_description \
-  src/ros2_rm_robot/rm_driver --ignore-src -r -y
+  src/ros2_rm_robot/rm_driver src/ros2_rm_robot/rm_bringup --ignore-src -r -y
 python -m colcon build --symlink-install --packages-select \
-  fastumi_interfaces rm_ros_interfaces rm_description rm_driver \
-  fastumi_usb_camera \
+  fastumi_interfaces rm_ros_interfaces rm_description rm_driver rm_bringup \
+  fastumi_usb_camera unitree_gripper fastumi_recorder fastumi_bringup \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
 python -m colcon build --symlink-install --packages-select fastumi_rm75 \
@@ -260,6 +264,11 @@ python -m colcon build --symlink-install --packages-select fastumi_rm75 \
 source install/setup.bash
 head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
+
+本机硬件统一启动命令、相机角色与状态话题见
+[`fastumi_bringup/README.md`](src/fastumi_bringup/README.md)。该入口不启动 Tracker、
+遥操、推理、标定或 RViz2。默认机械臂自动回位、夹爪平滑张开，回位成功后提供
+[录制服务](src/fastumi_recorder/README.md)。UMI 相机由独立入口管理。
 
 相机入口应指向 `.venv-numpy1/bin/python`。要构建其他包，仍在 NumPy 1 终端
 按实际依赖选择包。`fastumi_rm75` 的旧策略桥运行时依赖 `fastumi_data`；

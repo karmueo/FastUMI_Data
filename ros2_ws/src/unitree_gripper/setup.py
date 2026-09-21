@@ -21,6 +21,7 @@ setup(
         (f"share/{PACKAGE_NAME}/vendor/lib", glob("vendor/lib/*")),
     ],
     install_requires=["setuptools"],
+    extras_require={"test": ["pytest"]},
     zip_safe=False,
     maintainer="FastUMI Maintainer",
     maintainer_email="maintainer@example.com",

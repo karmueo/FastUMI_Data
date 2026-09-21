@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>fastumi_recorder</name><version>0.1.0</version>
+  <description>独立的 HDF5 和 MP4 硬件录制服务。</description>
+  <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>fastumi_interfaces</exec_depend>
+  <exec_depend>rm_ros_interfaces</exec_depend><exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>ffmpeg_image_transport_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend><exec_depend>nav_msgs</exec_depend>
+  <exec_depend>launch_ros</exec_depend><exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-h5py</exec_depend><exec_depend>python3-pil</exec_depend>
+  <exec_depend>ffmpeg</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>
