@@ -50,8 +50,14 @@ def _usb_id(value: Any) -> int:
 def _usb_location_from_video_device(
     video_device: str, sysfs_root: Path = Path("/sys/class/video4linux"),
     device_root: Path = Path("/dev"), by_path_root: Path = BY_PATH_ROOT,
+    usb_devices_root: Path = Path("/sys/bus/usb/devices"),
 ) -> tuple[int, int]:
-    """校验稳定物理路径，并沿 sysfs 查找 USB 总线号和当前设备地址。"""
+    """校验稳定物理路径，并沿 sysfs 查找 USB 总线号和当前设备地址。
+
+    pyuvc 通过 libusb 接管 UVC 接口时，内核可能暂时移除 ``/dev/video*``
+    及其 by-path 链接。此时仍按保存的 PCI 控制器和 USB 端口链查找物理
+    设备，使相机节点可以在同一次插拔周期内重新启动。
+    """
     if not is_physical_video_device_path(video_device, by_path_root):
         raise ValueError(
             "视频设备必须使用 /dev/v4l/by-path/*-video-index0 物理端口路径："
@@ -60,6 +66,31 @@ def _usb_location_from_video_device(
     try:
         resolved = Path(video_device).resolve(strict=True)
     except (OSError, RuntimeError) as error:
+        # by-path 在 libusb 接管后可能消失，使用路径中保存的物理拓扑恢复。
+        match = re.fullmatch(
+            r"pci-(?P<pci>.+)-usb(?:v\d+)?-\d+:"
+            r"(?P<ports>[^:]+):\d+\.\d+-video-index0",
+            Path(video_device).name,
+        )
+        candidates = []
+        if match is not None and usb_devices_root.is_dir():
+            pci = match.group("pci")
+            ports = match.group("ports")
+            for device in usb_devices_root.iterdir():
+                if not re.fullmatch(rf"\d+-{re.escape(ports)}", device.name):
+                    continue
+                try:
+                    physical_path = str(device.resolve(strict=True))
+                    if pci not in physical_path:
+                        continue
+                    candidates.append((
+                        int((device / "busnum").read_text().strip()),
+                        int((device / "devnum").read_text().strip()),
+                    ))
+                except (OSError, RuntimeError, ValueError):
+                    continue
+        if len(candidates) == 1:
+            return candidates[0]
         raise ValueError(f"视频设备 {video_device} 不存在或无法解析") from error
     if resolved.parent != device_root.resolve() or not (
         resolved.name.startswith("video") and resolved.name[5:].isdigit()

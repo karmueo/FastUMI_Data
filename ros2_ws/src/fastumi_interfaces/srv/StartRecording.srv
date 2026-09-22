@@ -1,0 +1,7 @@
+string dir_name
+string name
+---
+bool success
+string code
+string message
+string recording_id

@@ -36,13 +36,12 @@ def test_display_topics_follow_control_and_record_config(tmp_path):
     """更换配置后默认显示同步话题、固定坐标系和图像 QoS。"""
     parameters = yaml.safe_load((ROOT / "config/tracker_teleoperated.yaml").read_text())
     parameters["tracker_teleop"]["ros__parameters"].update(odom_frame="custom_odom", tracker_odom_topic="/custom/odom")
-    parameters["tracker_teleop_recorder"]["ros__parameters"]["image_topic"] = "/custom/image"
     custom = tmp_path / "config.yaml"
     custom.write_text(yaml.safe_dump(parameters))
     management = tmp_path / "manager.yaml"
     management.write_text(yaml.safe_dump({"components": {
         "umi_camera": {"parameters": {"namespace": "custom/umi"}},
-        "wrist_camera": {"parameters": {"namespace": "custom/wrist"}},
+        "wrist_decoder": {"parameters": {"output_topic": "/custom/wrist/decoded"}},
     }}))
     display = module().configured_rviz(ROOT / "config/tracker_teleoperated.rviz", custom, management)
     manager = display["Visualization Manager"]
@@ -51,7 +50,7 @@ def test_display_topics_follow_control_and_record_config(tmp_path):
     images = {item["Name"]: item for item in manager["Displays"]
               if item["Class"] == "rviz_default_plugins/Image"}
     assert set(images) == {"UMI 视频", "末端视频"}
-    assert images["末端视频"]["Topic"]["Value"] == "/custom/wrist/image_raw"
+    assert images["末端视频"]["Topic"]["Value"] == "/custom/wrist/decoded"
     assert images["UMI 视频"]["Topic"]["Value"] == "/custom/umi/image_raw"
     assert all(item["Enabled"] and item["Topic"]["Reliability Policy"] == "Best Effort"
                for item in images.values())
@@ -106,7 +105,7 @@ def test_saved_rviz_sources_initialize_manager(tmp_path, monkeypatch):
     })
     loaded._launch(context)
     assert captured[0]["parameters"][0]["umi_video_device"] == UMI_DEVICE
-    assert captured[0]["parameters"][0]["wrist_video_device"] == WRIST_DEVICE
+    assert "wrist_video_device" not in captured[0]["parameters"][0]
     assert 'umi_image_topic' not in captured[0]['parameters'][0]
 
 

@@ -73,6 +73,7 @@ VideoSourceWidget::VideoSourceWidget(
   wrist_combo_->setObjectName("wrist_video_source");
   wrist_combo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   wrist_combo_->setMinimumContentsLength(18);
+  wrist_combo_->setEnabled(false);
   umi_combo_ = new QComboBox(this);
   umi_combo_->setObjectName("umi_video_source");
   umi_combo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -100,8 +101,6 @@ VideoSourceWidget::VideoSourceWidget(
       }
       refreshSources();
     });
-  connect(wrist_combo_, QOverload<int>::of(&QComboBox::activated), this,
-    [this](int) {applySelection("末端视频", wrist_combo_);});
   connect(umi_combo_, QOverload<int>::of(&QComboBox::activated), this,
     [this](int) {applySelection("UMI 视频", umi_combo_);});
   refresh_timer_->start();
@@ -122,12 +121,6 @@ void VideoSourceWidget::initialize(
   source_status_ = node->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
     "/tracker_teleoperated/components/status", rclcpp::QoS(1).transient_local(),
     [this](const diagnostic_msgs::msg::DiagnosticArray & message) {updateSources(message);});
-  record_state_ = node->create_subscription<std_msgs::msg::String>(
-    "/tracker_teleoperated/record_state", rclcpp::QoS(1).transient_local(),
-    [this](const std_msgs::msg::String & message) {
-      recording_state_ = message.data;
-      if (message.data != "idle") {wrist_combo_->setEnabled(false); umi_combo_->setEnabled(false);}
-    });
   if (context || !topic_reader_) {topic_reader_ = [context](const QString & name) {
       /** @brief 每次重新查找显示，避免缓存被 RViz 删除的对象。 */
       auto * display = findImageDisplay(context, name);
@@ -155,8 +148,18 @@ void VideoSourceWidget::refreshSources()
   std::sort(topics.begin(), topics.end(), [&collator](const QString & left, const QString & right) {
       return collator.compare(left, right) < 0;
     });
-  /** @brief 两个显示是否仍存在于当前 RViz 配置。 */
-  const bool wrist_found = updateCombo(wrist_combo_, "末端视频", topics);
+  /** @brief 末端显示固定为管理器发布的解码话题。 */
+  const auto wrist_topic = QString::fromStdString(sources_["末端视频"].values["image_topic"]);  ///< 解码输出。
+  const bool wrist_found = topic_reader_ && !topic_reader_("末端视频").isEmpty();
+  if (wrist_found && !wrist_topic.isEmpty() && topic_reader_("末端视频") != wrist_topic && topic_writer_) {
+    topic_writer_("末端视频", wrist_topic);
+  }
+  {
+    const QSignalBlocker blocker(wrist_combo_);  ///< 阻止只读内容变化触发选择。
+    wrist_combo_->clear();
+    wrist_combo_->addItem(wrist_topic.isEmpty() ? "等待解码节点状态" : wrist_topic);
+    wrist_combo_->setEnabled(false);
+  }
   /** @brief UMI 显示查找结果。 */
   const bool umi_found = updateCombo(umi_combo_, "UMI 视频", topics);
   if (!wrist_found || !umi_found) {
@@ -170,13 +173,13 @@ void VideoSourceWidget::refreshSources()
     QStringList messages;
     for (const auto & name : {QString("UMI 视频"), QString("末端视频")}) {
       auto & source = sources_[name];  ///< 本路诊断和请求状态。
-      QString message = name + (name == "UMI 视频" ? "用于夹爪预测" : "用于数据录制");  ///< 本路输入及操作提示。
+      QString message = name + (name == "UMI 视频" ? "用于夹爪预测" : "来自远端 H.264 解码");  ///< 本路输入及操作提示。
       if (managed_) {
-        message += "：" + QString::fromStdString(source.values["video_device"]);
+        message += "：" + QString::fromStdString(
+          name == "UMI 视频" ? source.values["video_device"] : source.values["image_topic"]);
         if (source.pending || source.values["source_state"] == "pending" ||
           source.values["source_state"] == "checking") {message += "；正在切换或核对";}
         if (source.values["source_state"] == "deferred") {message += "；等待节点启动";}
-        if (name == "末端视频" && source.values["record_camera"] == "false") {message += "；已关闭图像录制";}
         if (!source.values["source_reason"].empty()) {message += "；" + QString::fromStdString(source.values["source_reason"]);}
         if (!source.values["source_error"].empty()) {message += "；" + QString::fromStdString(source.values["source_error"]);}
         if (!source.error.isEmpty()) {message += "；" + source.error;}
@@ -284,7 +287,7 @@ void VideoSourceWidget::requestSource(const QString & name, const QString & topi
   const unsigned sequence = ++source.sequence;  ///< 回调所属代次。
   auto request = std::make_shared<rcl_interfaces::srv::SetParametersAtomically::Request>();  ///< 单路更新请求。
   request->parameters.push_back(rclcpp::Parameter(
-    name == "UMI 视频" ? "umi_video_device" : "wrist_video_device", topic.toStdString()).to_parameter_msg());
+    "umi_video_device", topic.toStdString()).to_parameter_msg());
   const QPointer<VideoSourceWidget> guard(this);  ///< 卸载后不再访问控件。
   source.request_id = source_client_->async_send_request(request,
     [guard, name, sequence](rclcpp::Client<rcl_interfaces::srv::SetParametersAtomically>::SharedFuture future) {
@@ -305,15 +308,14 @@ void VideoSourceWidget::updateSources(const diagnostic_msgs::msg::DiagnosticArra
   for (const auto & status : message.status) {
     if (status.name == "recorder") {
       for (const auto & value : status.values) {
-        if (value.key == "process_state" && (value.value == "stopped" ||
-          value.value == "exited" || value.value == "failed")) {recording_state_ = "idle";}
+        if (value.key == "recording_state") {recording_state_ = value.value;}
       }
     }
     if (status.name == "session") {
       for (const auto & value : status.values) {if (value.key == "busy") {session_busy_ = value.value == "true";}}
       continue;
     }
-    if (status.name != "umi_camera" && status.name != "wrist_camera") {continue;}
+    if (status.name != "umi_camera" && status.name != "wrist_decoder") {continue;}
     auto & source = sources_[status.name == "umi_camera" ? "UMI 视频" : "末端视频"];  ///< 本路共享状态。
     const auto previous = source.values["video_device"];  ///< 其他面板也可能完成设备切换。
     source.values.clear();
@@ -327,13 +329,13 @@ void VideoSourceWidget::updateSources(const diagnostic_msgs::msg::DiagnosticArra
   refreshSources();
 }
 
-/** @copydoc VideoSourceWidget::wristBusy */
-bool VideoSourceWidget::wristBusy() const
+/** @copydoc VideoSourceWidget::umiBusy */
+bool VideoSourceWidget::umiBusy() const
 {
   if (!managed_) {return false;}
   if (session_busy_) {return true;}
   for (const auto & source : sources_) {if (source.second.pending) {return true;}}
-  const auto item = sources_.find("末端视频");  ///< 末端源的最近状态。
+  const auto item = sources_.find("UMI 视频");  ///< UMI 源的最近状态。
   if (item == sources_.end() || std::chrono::steady_clock::now() - manager_seen_ > std::chrono::seconds(2)) {return true;}
   const auto state = item->second.values.find("source_state");  ///< 输入切换状态。
   return item->second.pending || state == item->second.values.end() ||
@@ -365,24 +367,19 @@ void VideoSourceWidget::updateDevices(const diagnostic_msgs::msg::DiagnosticArra
 /** @copydoc VideoSourceWidget::save */
 void VideoSourceWidget::save(rviz_common::Config config) const
 {
-  for (const auto & name : {QString("UMI 视频"), QString("末端视频")}) {
-    const auto source = sources_.find(name);  ///< 已确认角色状态。
-    if (source == sources_.end()) {continue;}
-    const auto value = source->second.values.find("video_device");  ///< 当前设备。
-    if (value != source->second.values.end()) {
-      config.mapSetValue(name == "UMI 视频" ? "UmiVideoDevice" : "WristVideoDevice", QString::fromStdString(value->second));
-    }
+  const auto source = sources_.find("UMI 视频");  ///< 已确认 UMI 状态。
+  if (source != sources_.end()) {
+    const auto value = source->second.values.find("video_device");  ///< 当前 UMI 设备。
+    if (value != source->second.values.end()) {config.mapSetValue("UmiVideoDevice", QString::fromStdString(value->second));}
   }
 }
 
 /** @copydoc VideoSourceWidget::load */
 void VideoSourceWidget::load(const rviz_common::Config & config)
 {
-  for (const auto & name : {QString("UMI 视频"), QString("末端视频")}) {
-    QString value;  ///< 保存配置中的设备，仅作为收到管理器前的显示初值。
-    if (config.mapGetString(name == "UMI 视频" ? "UmiVideoDevice" : "WristVideoDevice", &value)) {
-      sources_[name].values["video_device"] = value.toStdString();
-    }
+  QString value;  ///< 保存配置中的 UMI 设备，仅作为收到管理器前的显示初值。
+  if (config.mapGetString("UmiVideoDevice", &value)) {
+    sources_["UMI 视频"].values["video_device"] = value.toStdString();
   }
 }
 }  // namespace tracker_teleoperated

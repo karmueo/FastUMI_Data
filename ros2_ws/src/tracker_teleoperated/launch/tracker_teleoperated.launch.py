@@ -23,17 +23,20 @@ def configured_rviz(template_path, config_path, manager_config_path=None):
     display = yaml.safe_load(Path(template_path).read_text(encoding="utf-8"))
     parameters = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     control = parameters["tracker_teleop"]["ros__parameters"]
-    # 两路固定跟随角色命名空间，设备选择不改变业务话题。
+    # UMI 使用本机原始图像，末端显示使用本机 H.264 解码输出。
     management = (yaml.safe_load(Path(manager_config_path).read_text(encoding="utf-8"))
                   if manager_config_path else {})
-    topics = {key: '/' + management.get('components', {}).get(key, {}).get(
-        'parameters', {}).get('namespace', key).strip('/') + '/image_raw'
-        for key in ('umi_camera', 'wrist_camera')}
+    umi = management.get('components', {}).get('umi_camera', {}).get('parameters', {})
+    decoder = management.get('components', {}).get('wrist_decoder', {}).get('parameters', {})
+    topics = {
+        'umi_camera': '/' + umi.get('namespace', 'umi_camera').strip('/') + '/image_raw',
+        'wrist_decoder': decoder.get('output_topic', '/wrist_camera/image_decoded'),
+    }
     manager = display["Visualization Manager"]
     manager["Global Options"]["Fixed Frame"] = control.get("odom_frame", "vive_tracker_odom")
     for item in manager["Displays"]:
         if item["Class"] == "rviz_default_plugins/Image":
-            item["Topic"]["Value"] = topics['umi_camera' if item['Name'] == 'UMI 视频' else 'wrist_camera']
+            item["Topic"]["Value"] = topics['umi_camera' if item['Name'] == 'UMI 视频' else 'wrist_decoder']
         if item["Class"] == "rviz_default_plugins/Odometry":
             item["Topic"]["Value"] = control.get("tracker_odom_topic", "/vive_tracker/odom")
     return display
@@ -50,8 +53,7 @@ def _launch(context):
         saved = yaml.safe_load(Path(rviz_config).read_text(encoding="utf-8"))
         for panel in saved.get('Panels', []):
             if panel.get('Class') == 'tracker_teleoperated/TeleopPanel':
-                for field, parameter in (('UmiVideoDevice', 'umi_video_device'),
-                                         ('WristVideoDevice', 'wrist_video_device')):
+                for field, parameter in (('UmiVideoDevice', 'umi_video_device'),):
                     if is_physical_video_device_path(panel.get(field, '')):
                         video_parameters[parameter] = panel[field]
                 break

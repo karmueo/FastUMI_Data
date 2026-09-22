@@ -1,6 +1,6 @@
 /**
  * @file video_source_widget.hpp
- * @brief 声明两路本机相机设备、管理器确认及 RViz 显示同步控件。
+ * @brief 声明本机 UMI 设备选择和远端末端视频只读状态控件。
  */
 #ifndef TRACKER_TELEOPERATED__VIDEO_SOURCE_WIDGET_HPP_
 #define TRACKER_TELEOPERATED__VIDEO_SOURCE_WIDGET_HPP_
@@ -78,8 +78,8 @@ public:
   /** @brief 读取设备显示初值，实际运行仍由管理器确认。 @param[in] config RViz 配置。 */
   void load(const rviz_common::Config & config);
 
-  /** @brief 末端切换未确认时阻止开始录制。 @return 是否正在切换或失去管理状态。 */
-  bool wristBusy() const;
+  /** @brief UMI 切换未确认时阻止开始录制。 @return 是否正在切换或失去管理状态。 */
+  bool umiBusy() const;
 
 private:
   /**
@@ -121,14 +121,13 @@ private:
   std::chrono::steady_clock::time_point manager_seen_{};  ///< 最近诊断时间。
   rclcpp::Client<rcl_interfaces::srv::SetParametersAtomically>::SharedPtr source_client_;  ///< 管理器参数客户端。
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr source_status_;  ///< 实际输入订阅。
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr record_state_;  ///< 及时锁定录制期间的切换。
   std::string recording_state_;  ///< 最近录制状态。
   std::map<QString, QString> devices_;  ///< 设备路径对应名称及访问错误。
   QString scan_error_;  ///< 最近目录扫描错误。
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr device_status_;  ///< 本机设备目录。
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr refresh_client_;  ///< 后台刷新请求。
 
-  QComboBox * wrist_combo_;  ///< 选择末端相机的本机采集设备。
+  QComboBox * wrist_combo_;  ///< 只读显示末端编码与解码链路。
   QComboBox * umi_combo_;  ///< 选择 UMI 相机的本机采集设备。
   QLabel * status_;  ///< 显示实际输入、不可操作原因及切换错误。
   QPushButton * refresh_button_;  ///< 用户主动刷新后台设备目录。

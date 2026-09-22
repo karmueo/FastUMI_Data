@@ -15,6 +15,11 @@
 #include <rviz_common/panel.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <fastumi_interfaces/msg/recording_status.hpp>
+#include <fastumi_interfaces/srv/cancel_recording.hpp>
+#include <fastumi_interfaces/srv/get_recording_status.hpp>
+#include <fastumi_interfaces/srv/start_recording.hpp>
+#include <fastumi_interfaces/srv/stop_recording.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -68,6 +73,15 @@ private:
   void trigger(const std::string & service);
   /** @brief 异步调用 SetBool。 @param service 相对服务名称。 @param value 目标启停状态。 */
   void setBool(const std::string & service, bool value);
+  /** @brief 按当前权威状态调用开始、停止或取消服务。 @param action record 或 discard。 */
+  void recordingAction(const QString & action);
+  /** @brief 查询远端权威录制状态，用于请求超时后的状态核对。 */
+  void queryRecordingStatus();
+  /** @brief 按管理器配置创建远端录制客户端。 @param prefix 服务前缀。 @param dir_name 任务目录名。 @param name 任务名。 */
+  void configureRecording(
+    const std::string & prefix, const std::string & dir_name, const std::string & name);
+  /** @brief 应用远端权威状态。 @param message 录制状态消息。 */
+  void updateRecordingStatus(const fastumi_interfaces::msg::RecordingStatus & message);
   /** @brief 根据服务、消息新鲜度及当前操作刷新按钮。 */
   void refresh();
   /** @brief 更新节点表格与诊断详情。 @param message 管理器诊断快照。 */
@@ -85,8 +99,16 @@ private:
   std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor_;
   /** @brief 面板存活心跳。 */
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr heartbeat_;
-  /** @brief 录制兼容命令发布端。 */
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr record_command_;
+  /** @brief 远端开始录制服务。 */
+  rclcpp::Client<fastumi_interfaces::srv::StartRecording>::SharedPtr recording_start_;
+  /** @brief 远端停止录制服务。 */
+  rclcpp::Client<fastumi_interfaces::srv::StopRecording>::SharedPtr recording_stop_;
+  /** @brief 远端取消录制服务。 */
+  rclcpp::Client<fastumi_interfaces::srv::CancelRecording>::SharedPtr recording_cancel_;
+  /** @brief 远端状态查询服务。 */
+  rclcpp::Client<fastumi_interfaces::srv::GetRecordingStatus>::SharedPtr recording_status_client_;
+  /** @brief 远端权威录制状态订阅。 */
+  rclcpp::Subscription<fastumi_interfaces::msg::RecordingStatus>::SharedPtr recording_status_subscription_;
   /** @brief 用基类容器保留所有订阅生命周期。 */
   std::vector<rclcpp::SubscriptionBase::SharedPtr> subscriptions_;
   /** @brief 按服务名缓存 Trigger 客户端。 */
@@ -133,10 +155,22 @@ private:
   bool record_pending_{false};
   /** @brief 最新固定录制状态。 */
   std::string record_state_;
+  /** @brief 当前远端录制 UUID。 */
+  std::string recording_id_;
+  /** @brief 最近完成的远端录制 UUID。 */
+  std::string last_completed_recording_id_;
+  /** @brief 管理器提供的远端录制服务前缀。 */
+  std::string recording_prefix_;
+  /** @brief 开始录制请求使用的可选任务目录名。 */
+  std::string recording_dir_name_;
+  /** @brief 开始录制请求使用的可选任务名。 */
+  std::string recording_name_;
   /** @brief 记录会话进度变化，避免覆盖普通服务响应。 */
   std::string last_session_message_;
   /** @brief 防止旧服务结果覆盖当前操作。 */
   unsigned sequence_{0};
+  /** @brief 防止迟到的录制服务响应覆盖当前录制操作。 */
+  unsigned recording_sequence_{0};
   /** @brief 最近管理诊断接收时间。 */
   std::chrono::steady_clock::time_point manager_seen_{};
   /** @brief 最近遥操业务心跳时间。 */

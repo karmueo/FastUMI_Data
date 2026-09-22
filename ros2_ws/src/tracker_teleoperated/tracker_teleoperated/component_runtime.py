@@ -71,7 +71,7 @@ def read_configuration(path: str) -> dict:
     for key, item in config["components"].items():
         if not isinstance(key, str) or not isinstance(item, dict):
             raise ValueError("组件标识必须为字符串，配置必须为映射")
-        if key not in {"arm", "tracker", "gripper", "umi_camera", "estimator", "wrist_camera", "teleop", "recorder"}:
+        if key not in {"arm", "tracker", "gripper", "umi_camera", "estimator", "wrist_encoder", "wrist_decoder", "teleop", "recorder"}:
             raise ValueError(f"未知组件: {key}")
         if not isinstance(item.get("parameters", {}), dict) or not isinstance(item.get("label", key), str):
             raise ValueError(f"组件标签或 parameters 无效: {key}")

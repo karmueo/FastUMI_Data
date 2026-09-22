@@ -1,0 +1,11 @@
+# 空任务字段不限制该级名称；limit=0 使用服务默认值。
+string dir_name
+string name
+uint32 offset
+uint32 limit
+---
+bool success
+string code
+string message
+fastumi_interfaces/RecordingInfo[] recordings
+uint64 total

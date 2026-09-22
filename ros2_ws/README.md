@@ -27,7 +27,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，发布 RM75 Link7 扩散策略推荐序列。 |
 | [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
 | [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
-| [`tracker_teleoperated`](src/tracker_teleoperated/) | Python/C++ 遥操包 | 使用 RViz2 面板管理依赖、遥操与数采，Placo 生成 RM75 关节指令。 |
+| [`tracker_teleoperated`](src/tracker_teleoperated/) | Python/C++ 遥操包 | 管理 Tracker、UMI、逆解和末端视频解码，监控外部硬件并调用远端录制服务。 |
 | [`ros2_rm_robot`](src/ros2_rm_robot/) | 多包机械臂项目 | 提供 RM75 驱动、接口、MoveIt2、仿真及示例。 |
 
 ## 包之间的数据关系
@@ -361,13 +361,16 @@ cd ros2_ws
 source /opt/ros/jazzy/setup.bash
 source .venv-numpy2/bin/activate
 source install/setup.bash
+export ROS_DOMAIN_ID=42
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+export RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
 ros2 launch tracker_teleoperated tracker_teleoperated.launch.py
 ```
 
-默认启动 RM75 驱动、Tracker、夹爪、两路相机、预测、遥操、记录和 RViz2。
-遥操保持暂停，录制保持空闲。面板显示依赖健康、末端视频和里程计，并提供
-快捷键及逐项启停。关闭窗口前自动停止并保存录制。已有外部节点只监测，
-远程组件应在管理配置中设为 `observe`。只打开面板可加 `autostart:=false`。
+默认启动 Tracker、UMI 相机、夹爪开合度估计、末端 H.264 解码、遥操逆解和
+RViz2。RM75 驱动、夹爪、末端编码相机及录制服务由外部入口管理，面板只监测其
+状态并通过 `/fastumi/recording` 服务录制。关闭窗口前会暂停遥操、等待远端保存，
+再停止本机组件；外部进程保持运行。只打开面板可加 `autostart:=false`。
 
 本包现为 CMake/Python 混合包，从旧安装迁移时仅清理
 `build/tracker_teleoperated` 和 `install/tracker_teleoperated` 后重建；构建时
@@ -398,6 +401,10 @@ python -m colcon test-result --test-result-base build --all --verbose
 遥操测试在 NumPy 2 终端使用 `python -m colcon test --build-base
 build --packages-select tracker_teleoperated`。构建、测试和运行节点前均需加载 ROS、对应虚拟环境与
 `install/setup.bash`。
+
+自动测试覆盖接口、组件管理、远端录制状态机和界面控制。2026-09-21 已使用上述 Fast DDS
+UDPv4 配置完成 Jazzy 主机与 Humble Jetson 的实机验收，包括两路视频、Tracker 位姿、外部
+硬件反馈、远端录制保存及退出后外部进程存活。更换网络或 DDS 配置后应重新执行硬件验收。
 
 ## 独立 Kalibr 相机内参标定
 

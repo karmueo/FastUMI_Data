@@ -14,18 +14,19 @@ import time
 
 from ament_index_python.packages import get_package_share_directory, get_package_prefix
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from fastumi_interfaces.msg import GripperState, TrackerStatus
+from fastumi_interfaces.msg import GripperState, RecordingStatus, TrackerStatus
+from fastumi_interfaces.srv import GetRecordingStatus, StopRecording
+from ffmpeg_image_transport_msgs.msg import FFMPEGPacket
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32
 from std_srvs.srv import SetBool, Trigger
 import yaml
 
-from tracker_teleoperated.recording_paths import output_directory
 from tracker_teleoperated.camera_devices import CameraDevices
 from tracker_teleoperated.component_runtime import (
     Health, ManagedProcess, process_table, read_configuration, workspace_root,
@@ -37,8 +38,10 @@ PREFIX = "/tracker_teleoperated/"
 # 显式列出可管理组件，配置不能注入任意 shell 命令。
 COMPONENT_IDS = (
     "arm", "tracker", "gripper", "umi_camera", "estimator",
-    "wrist_camera", "teleop", "recorder",
+    "wrist_encoder", "wrist_decoder", "teleop", "recorder",
 )
+# 只有这些组件允许由遥操主机创建进程。
+LOCAL_COMPONENT_IDS = ("tracker", "umi_camera", "estimator", "wrist_decoder", "teleop")
 
 
 @dataclass
@@ -88,12 +91,14 @@ class ComponentManager(Node):
         self.config_file = str(Path(self.get_parameter("config_file").value).resolve())
         raw = yaml.safe_load(Path(self.config_file).read_text())
         self.control = raw["tracker_teleop"]["ros__parameters"]
-        self.record = raw["tracker_teleop_recorder"]["ros__parameters"]
-        # 本机当前任务目录独立于记录节点是否启动，供面板浏览历史记录。
-        self.output_directory = str(output_directory(
-            self.record.get("dataset_root", "dataset/h5dy_data"),
-            self.record.get("dir_name", "test"), self.record.get("name", "default_test"),
-        ))
+        self.record = raw.get("remote_recording", {}).get("ros__parameters", {})
+        self.recording_enabled = bool(self.get_parameter("use_recorder").value)
+        self.recording_prefix = str(self.record.get("service_prefix", "/fastumi/recording")).rstrip("/")
+        self.recording_state = "unknown"
+        self.recording_id = ""
+        self.recording_last_completed = ""
+        self.recording_error = ""
+        self.recording_seen = 0.0
         # flock 只约束同主机同 ROS domain 的本应用管理器。
         ros_home = Path(os.environ.get("ROS_HOME", str(Path.home() / ".ros")))
         session_root = ros_home / "tracker_teleoperated"
@@ -119,17 +124,25 @@ class ComponentManager(Node):
         state_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status_publisher = self.create_publisher(DiagnosticArray, PREFIX + "components/status", state_qos)
         self.pause_client = self.create_client(SetBool, PREFIX + "set_enabled")
-        self.save_client = self.create_client(Trigger, PREFIX + "stop_recording")
+        self.recording_status_client = self.create_client(
+            GetRecordingStatus, self.recording_prefix + "/get_status")
+        self.recording_stop_client = self.create_client(
+            StopRecording, self.recording_prefix + "/stop")
         for key in COMPONENT_IDS:
             item = dict(self.config["components"].get(key, {"mode": "disabled"}))
-            if key == "recorder" and not self.get_parameter("use_recorder").value:
-                item["mode"] = "disabled"
+            if key not in LOCAL_COMPONENT_IDS:
+                item["mode"] = "observe"
             self.components[key] = Component(key, item, Health({}))
             self.create_service(
                 SetBool, PREFIX + f"components/{key}/set_running",
                 lambda request, response, key=key: self._set_running(key, request, response),
             )
         self._make_probes(state_qos)
+        recording_qos = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(
+            RecordingStatus, self.recording_prefix + "/status",
+            self._recording_status_callback, recording_qos)
         self.video_sources = CameraDevices(self, state_qos)
         self.create_service(Trigger, PREFIX + "start_all", self._start_all_service)
         self.create_service(Trigger, PREFIX + "stop_all", self._stop_all_service)
@@ -152,7 +165,7 @@ class ComponentManager(Node):
         self.create_subscription(message_type, topic, receive, qos)
 
     def _make_probes(self, state_qos):
-        """为八个组件配置业务有效性探针，复用控制端超时配置。"""
+        """为本机和外部组件配置数据探针，复用控制端超时配置。"""
         c = self.control
         sensor = qos_profile_sensor_data
         self._probe("arm", c["joint_state_topic"], JointState, c["feedback_timeout_s"],
@@ -169,26 +182,52 @@ class ComponentManager(Node):
         self._probe("estimator", c["gripper_estimate_topic"], GripperState,
                     c["gripper_estimate_timeout_s"],
                     lambda m: m.valid and math.isfinite(m.filtered_openness) and 0 <= m.filtered_openness <= 1, sensor)
-        # 相机进程探针固定为其输出，消费节点的可选输入另行监测。
-        for key in ("umi_camera", "wrist_camera"):
-            namespace = self.components[key].config.get("parameters", {}).get("namespace", key)
-            topic = f"/{namespace.strip('/')}/image_raw"
-            self._probe(key, topic, Image, 1.0,
-                        lambda m: m.width > 0 and m.height > 0 and m.step > 0 and len(m.data) >= m.step * m.height, sensor)
+        namespace = self.components["umi_camera"].config.get("parameters", {}).get(
+            "namespace", "umi_camera")
+        self._probe(
+            "umi_camera", f"/{namespace.strip('/')}/image_raw", Image, 1.0,
+            lambda m: m.width > 0 and m.height > 0 and m.step > 0 and
+            len(m.data) >= m.step * m.height, sensor)
+        encoder_topic = self.components["wrist_encoder"].config.get(
+            "parameters", {}).get("topic", "/wrist_camera/image_raw") + "/ffmpeg"
+        self._probe(
+            "wrist_encoder", encoder_topic, FFMPEGPacket, 1.0,
+            lambda m: bool(m.data), sensor)
+        decoded_topic = self.components["wrist_decoder"].config.get(
+            "parameters", {}).get("output_topic", "/wrist_camera/image_decoded")
+        self._probe(
+            "wrist_decoder", decoded_topic, Image, 1.0,
+            lambda m: m.width > 0 and m.height > 0 and m.step > 0 and
+            len(m.data) >= m.step * m.height, sensor)
         self._probe("teleop", PREFIX + "enabled", Bool, 2.0, lambda m: True, state_qos)
-        self._probe("recorder", PREFIX + "record_state", String, 2.0,
-                    lambda m: m.data in ("idle", "recording", "saving"), state_qos)
+        self.components["recorder"].health.deadlines[
+            self.recording_prefix + "/status"] = 2.0
+        self.probes.setdefault("recorder", []).append(
+            self.recording_prefix + "/status")
+
+    def _recording_status_callback(self, message):
+        """缓存远端录制权威状态，并更新录制组件健康。"""
+        self.recording_state = message.state
+        self.recording_id = message.recording_id
+        self.recording_last_completed = message.last_completed.recording_id
+        self.recording_error = message.last_error
+        self.recording_seen = time.monotonic()
+        self.components["recorder"].health.receive(
+            self.recording_prefix + "/status",
+            message.state in ("idle", "recording", "saving"))
 
     def _command(self, key):
-        """按组件创建参数数组和独立环境，保持 NumPy 1/2 隔离。"""
+        """只为五个本机组件创建参数数组，保持 NumPy 1/2 隔离。"""
+        if key not in LOCAL_COMPONENT_IDS:
+            raise RuntimeError(f"组件 {key} 仅允许监控，禁止本机启动")
         item = self.components[key].config
         environment = dict(os.environ)
-        venv = self.root / (".venv-numpy2" if key in ("teleop", "recorder") else ".venv-numpy1")
+        venv = self.root / (".venv-numpy2" if key == "teleop" else ".venv-numpy1")
         python = venv / "bin/python"
         if not python.is_file():
             raise RuntimeError(f"缺少 Python 环境: {python}")
         environment["VIRTUAL_ENV"] = str(venv)
-        environment["TRACKER_COMPONENT_STOP_GRACE"] = "300" if key == "recorder" else "5"
+        environment["TRACKER_COMPONENT_STOP_GRACE"] = "5"
         environment["PATH"] = str(venv / "bin") + os.pathsep + os.environ.get("PATH", "")
         # 安装入口的解释器已固定；ros2 CLI 显式使用对应环境解释器。
         ros2 = shutil.which("ros2")
@@ -196,47 +235,50 @@ class ComponentManager(Node):
             raise RuntimeError("未找到 ros2，请先加载工作区环境")
         base = [str(python), ros2]
         parameters = dict(item.get("parameters", {}))
-        if key in ("teleop", "recorder"):
-            executable = "tracker_teleop_node" if key == "teleop" else "tracker_teleop_recorder"
+        if key == "teleop":
+            executable = "tracker_teleop_node"
             entry = Path(get_package_prefix("tracker_teleoperated")) / "lib/tracker_teleoperated" / executable
             command = [str(python), str(entry), "--ros-args", "--params-file", self.config_file]
-            if key == "recorder":
-                command += ["-p", f"image_topic:={self.video_sources.launch_topic(key)}"]
             return command, environment
-        if key == "gripper":
-            script = self.root / "src/unitree_gripper/run_gripper.sh"
-            command = ["bash", str(script)]
-            if item.get("config_file"):
-                command += ["-c", item["config_file"]]
-            if item.get("network_interface"):
-                command += ["-n", item["network_interface"]]
-            return command, environment
-        if key == "arm":
-            package, launch = "rm_driver", "rm_75_driver.launch.py"
-        elif key == "tracker":
+        if key == "tracker":
             package, launch = "vive_tracker", "vive_tracker.launch.py"
             parameters["use_rviz"] = "false"
         elif key == "estimator":
             package, launch = "fastumi_gripper_estimator", "gripper_openness.launch.py"
             parameters["image_topic"] = self.video_sources.launch_topic(key)
-        else:
+        elif key == "umi_camera":
             package, launch = "fastumi_usb_camera", "usb_camera.launch.py"
-            camera_config = "usb_camera.yaml" if key == "umi_camera" else "usb_camera_1280_960.yaml"
-            parameters.setdefault("config", str(Path(get_package_share_directory(package)) / "config" / camera_config))
+            parameters.setdefault("config", str(Path(get_package_share_directory(package)) / "config/usb_camera.yaml"))
+        else:
+            package, launch = "fastumi_usb_camera", "receive.launch.py"
+            parameters.setdefault("config", str(Path(get_package_share_directory(package)) / "config/ffmpeg.yaml"))
         return base + ["launch", "--noninteractive", package, launch] + [
             f"{name}:={str(value).lower() if isinstance(value, bool) else value}"
             for name, value in parameters.items()
         ], environment
 
     def _external_present(self, component):
-        """依据配置节点名和数据发布端识别外部组件，不用订阅者误判。"""
-        return bool(set(component.config.get("nodes", [])) & self._nodes) or any(
-            self.count_publishers(topic) for topic in self.probes.get(component.key, [])
-        )
+        """依据节点名和活跃发布端识别外部组件，忽略已失效的 DDS 端点。"""
+        if set(component.config.get("nodes", [])) & self._nodes:
+            return True
+        for topic in self.probes.get(component.key, []):
+            if not self.count_publishers(topic):
+                continue
+            # 本机可管理组件可能在快速重启时短暂看到旧发布端。收到新样本后
+            # 才认定为外部实例，避免旧端点永久阻止本机会话启动组件。
+            if component.key in LOCAL_COMPONENT_IDS:
+                sample = component.health.samples.get(topic)
+                deadline = component.health.deadlines.get(topic, 1.0)
+                if sample is None or time.monotonic() - sample[0] > deadline:
+                    continue
+            return True
+        return False
 
     def _start(self, key):
         """幂等启动组件；发现外部实例时只监测，启动失败保留面板。"""
         component = self.components[key]
+        if key not in LOCAL_COMPONENT_IDS:
+            return False, "该组件由外部入口管理，本机只监测"
         mode = component.config.get("mode", "auto")
         if mode != "auto":
             return False, "该组件为仅监测或禁用模式"
@@ -280,11 +322,12 @@ class ComponentManager(Node):
 
     def _start_all_service(self, _request, response):
         """按配置顺序启动所有自动组件，并汇总启动错误。"""
-        if self.operation or self.video_sources.operation or self.video_sources.unlock:
+        if self.operation or self.video_sources.operation:
             response.success, response.message = False, "正在执行停止操作"
             return response
         errors = []
-        for key, component in self.components.items():
+        for key in LOCAL_COMPONENT_IDS:
+            component = self.components[key]
             if component.config.get("mode", "auto") == "auto":
                 ok, message = self._start(key)
                 if not ok:
@@ -295,7 +338,7 @@ class ComponentManager(Node):
 
     def _stop_all_service(self, _request, response):
         """停止本管理器拥有的全部组件，保留 RViz 与管理器。"""
-        response.success = self._begin_stop(list(reversed(COMPONENT_IDS)))
+        response.success = self._begin_stop(list(reversed(LOCAL_COMPONENT_IDS)))
         response.message = "正在暂停并保存" if response.success else "已有停止操作"
         return response
 
@@ -311,7 +354,7 @@ class ComponentManager(Node):
         if self.operation:
             if shutdown:
                 self.operation["shutdown"] = True
-                self.operation["targets"] = list(reversed(COMPONENT_IDS))
+                self.operation["targets"] = list(reversed(LOCAL_COMPONENT_IDS))
             return False
         self._autostart = False
         self.operation = {
@@ -324,7 +367,7 @@ class ComponentManager(Node):
 
     def request_shutdown(self):
         """信号与服务共用退出入口，不依赖 RViz 析构发消息。"""
-        return self._begin_stop(list(reversed(COMPONENT_IDS)), shutdown=True)
+        return self._begin_stop(list(reversed(LOCAL_COMPONENT_IDS)), shutdown=True)
 
     def _owned_alive(self, key):
         """只允许会话收尾流程调用本会话拥有的控制、记录服务。"""
@@ -353,32 +396,79 @@ class ComponentManager(Node):
                     self.get_logger().error("暂停服务超时，终止受管理控制进程")
                     self.components["teleop"].state = "stopping"
                     self.components["teleop"].process.stop()
-            op.update(phase="save", future=None,
-                      deadline=now + float(self.config.get("save_timeout_s", 300.0)))
+            op.update(
+                phase="record_query", future=None, recording_id="",
+                deadline=now + 3.0,
+                save_deadline=now + float(self.config.get("save_timeout_s", 300.0)))
             self.last_operation = "正在停止录制并等待保存"
-        if op["phase"] == "save":
-            if self._owned_alive("recorder"):
-                if op["future"] is None and self.save_client.service_is_ready() and now >= op["next_call"]:
-                    op["future"] = self.save_client.call_async(Trigger.Request())
-                if op["future"] is not None and op["future"].done():
-                    result = op["future"].result()
-                    op["future"] = None
-                    op["next_call"] = now + 0.25
-                    if result and not result.success:
-                        self.last_operation = f"保存失败: {result.message}"
-                        self.get_logger().error(self.last_operation)
-                        op["error"] = self.last_operation
-                        op["phase"] = "stop"
-                    elif result and result.message == "idle":
-                        op["phase"] = "stop"
-                if op["phase"] == "save" and now < op["deadline"]:
+        if op["phase"] == "record_query":
+            if not self.recording_enabled:
+                op["phase"] = "stop"
+            elif op["future"] is None:
+                if self.recording_status_client.service_is_ready():
+                    op["future"] = self.recording_status_client.call_async(
+                        GetRecordingStatus.Request())
+                elif now < op["deadline"]:
                     return
-                if op["phase"] == "save":
-                    if op["future"] is not None:
-                        self.save_client.remove_pending_request(op["future"])
-                    op["error"] = "保存超时，数据可能未完整写入"
-                    self.get_logger().error(op["error"])
-            op["phase"] = "stop"
+                else:
+                    op.update(phase="stop", error="录制状态服务不可用，未能确认远端保存")
+            elif op["future"].done():
+                result = op["future"].result()
+                op["future"] = None
+                if result is None:
+                    op.update(phase="stop", error="查询远端录制状态失败")
+                else:
+                    self._recording_status_callback(result.status)
+                    op["recording_id"] = result.status.recording_id
+                    if result.status.state == "recording":
+                        op.update(phase="record_stop", deadline=now + 3.0)
+                    elif result.status.state == "saving":
+                        op.update(phase="record_wait", deadline=op["save_deadline"])
+                    elif result.status.state == "idle":
+                        op["phase"] = "stop"
+                    else:
+                        op.update(
+                            phase="stop",
+                            error="远端录制错误: " + (result.status.last_error or "未知错误"))
+            elif now >= op["deadline"]:
+                self.recording_status_client.remove_pending_request(op["future"])
+                op.update(phase="stop", error="查询远端录制状态超时")
+            if op["phase"] == "record_query":
+                return
+        if op["phase"] == "record_stop":
+            if op["future"] is None:
+                if self.recording_stop_client.service_is_ready():
+                    op["future"] = self.recording_stop_client.call_async(
+                        StopRecording.Request(recording_id=op["recording_id"]))
+                elif now < op["deadline"]:
+                    return
+                else:
+                    op.update(phase="stop", error="远端停止录制服务不可用")
+            elif op["future"].done():
+                result = op["future"].result()
+                op["future"] = None
+                if result and (result.success or result.code in ("ALREADY_STOPPING", "ALREADY_SAVED")):
+                    op.update(phase="record_wait", deadline=op["save_deadline"])
+                else:
+                    op.update(
+                        phase="stop",
+                        error="停止远端录制失败: " + (result.message if result else "无响应"))
+            elif now >= op["deadline"]:
+                self.recording_stop_client.remove_pending_request(op["future"])
+                op.update(phase="stop", error="停止远端录制超时")
+            if op["phase"] == "record_stop":
+                return
+        if op["phase"] == "record_wait":
+            if self.recording_state == "error":
+                op.update(phase="stop", error="远端保存失败: " + (self.recording_error or "未知错误"))
+            elif self.recording_state == "idle" and (
+                    not op["recording_id"] or
+                    self.recording_last_completed == op["recording_id"]):
+                op["phase"] = "stop"
+            elif now >= op["deadline"]:
+                op.update(phase="stop", error="远端保存超时，数据可能未完整写入")
+            else:
+                return
         if op["phase"] == "stop":
             pending = False
             for key in op["targets"]:
@@ -392,6 +482,8 @@ class ComponentManager(Node):
             self.last_operation = op.get("error", "组件已停止")
             self.shutdown_complete = op["shutdown"]
             self.operation = None
+            if self.shutdown_complete:
+                self._publish_status(now)
 
     def _tick(self):
         """轮询进程与图发现，独立以 2 Hz 发布管理状态。"""
@@ -425,7 +517,7 @@ class ComponentManager(Node):
                 if component.config.get("mode") == "observe" or self._external_present(component):
                     component.ownership, component.state = "external", "external"
         if (self._autostart and now >= self._autostart_at and not self.operation
-                and not self.video_sources.operation and not self.video_sources.unlock):
+                and not self.video_sources.operation):
             self._autostart = False
             response = self._start_all_service(Trigger.Request(), Trigger.Response())
             self.last_operation = response.message
@@ -461,14 +553,27 @@ class ComponentManager(Node):
                 "exit_code": component.exit_code, "log_path": component.log_path,
             }
             if key == "recorder":
-                values["output_directory"] = self.output_directory
-            if key in ("umi_camera", "wrist_camera"):
+                values.update({
+                    "recording_enabled": str(self.recording_enabled).lower(),
+                    "recording_state": self.recording_state,
+                    "recording_id": self.recording_id,
+                    "recording_error": self.recording_error,
+                    "service_prefix": self.recording_prefix,
+                    "recording_dir_name": str(self.record.get("dir_name", "")),
+                    "recording_name": str(self.record.get("name", "")),
+                })
+            if key in ("umi_camera", "wrist_encoder", "wrist_decoder"):
                 values.update(self.video_sources.fields(key))
             item.values = [KeyValue(key=k, value=v) for k, v in values.items()]
             message.status.append(item)
         message.status.append(DiagnosticStatus(
             name="session", message=self.last_operation,
-            values=[KeyValue(key="busy", value=str(bool(self.operation or self.video_sources.operation or self.video_sources.unlock)).lower())],
+            values=[
+                KeyValue(key="busy", value=str(bool(
+                    self.operation or self.video_sources.operation)).lower()),
+                KeyValue(
+                    key="shutdown", value=str(self.shutdown_complete).lower()),
+            ],
         ))
         self.status_publisher.publish(message)
 
@@ -503,6 +608,11 @@ def main(args=None):
                 node.request_shutdown()
                 stop.clear()
             rclpy.spin_once(node, timeout_sec=0.05)
+        if rclpy.ok() and node.shutdown_complete:
+            # 给服务响应和 RViz 主动关闭通知留出 DDS 发送窗口。
+            deadline = time.monotonic() + 1.0
+            while rclpy.ok() and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
     finally:
         if node is not None:
             node.destroy_node()

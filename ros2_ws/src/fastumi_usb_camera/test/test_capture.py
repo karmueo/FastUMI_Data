@@ -124,6 +124,35 @@ def test_video_device_resolves_usb_bus_and_address(tmp_path):
         )
 
 
+def test_video_device_recovers_location_after_kernel_link_disappears(tmp_path):
+    """pyuvc 接管接口并移除视频链接后，仍按物理端口恢复 USB 地址。"""
+    device_root = tmp_path / "dev"
+    by_path_root = device_root / "v4l" / "by-path"
+    by_path_root.mkdir(parents=True)
+    usb_devices_root = tmp_path / "sys" / "bus" / "usb" / "devices"
+    usb_devices_root.mkdir(parents=True)
+    physical_device = (
+        tmp_path / "sys" / "devices" / "pci0000:00" / "0000:06:00.4"
+        / "usb1" / "1-2" / "1-2.2"
+    )
+    physical_device.mkdir(parents=True)
+    (physical_device / "busnum").write_text("1\n")
+    (physical_device / "devnum").write_text("84\n")
+    (usb_devices_root / "1-2.2").symlink_to(physical_device)
+    missing_alias = (
+        by_path_root
+        / "pci-0000:06:00.4-usb-0:2.2:1.0-video-index0"
+    )
+
+    assert capture._usb_location_from_video_device(
+        str(missing_alias),
+        tmp_path / "sys" / "class" / "video4linux",
+        device_root,
+        by_path_root,
+        usb_devices_root,
+    ) == (1, 84)
+
+
 def test_video_device_selects_matching_pyuvc_device(monkeypatch):
     """相同 VID/PID 的相机按视频节点对应的 USB 地址选择。"""
     devices = [

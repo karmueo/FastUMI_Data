@@ -154,6 +154,11 @@ TeleopPanel::TeleopPanel(QWidget * parent) : rviz_common::Panel(parent)
   heartbeat_timer_ = new QTimer(this);
   connect(this, &TeleopPanel::actionRequested, this, &TeleopPanel::dispatch);
   connect(spin_timer_, &QTimer::timeout, this, [this]() {
+    if (node_ && !rclcpp::ok(node_->get_node_base_interface()->get_context())) {
+      spin_timer_->stop();
+      heartbeat_timer_->stop();
+      return;
+    }
     if (executor_) {executor_->spin_some(std::chrono::milliseconds(5));}
     refresh();
   });
@@ -174,11 +179,23 @@ TeleopPanel::~TeleopPanel()
   qApp->removeEventFilter(this);
   spin_timer_->stop();
   heartbeat_timer_->stop();
-  if (executor_ && node_) {executor_->remove_node(node_);}
+  /** @brief 子控件持有 ROS 客户端和订阅，必须在面板节点与 context 之前释放。 */
+  delete recordings_;
+  recordings_ = nullptr;
+  delete video_sources_;
+  video_sources_ = nullptr;
+  if (executor_ && node_ && rclcpp::ok(node_->get_node_base_interface()->get_context())) {
+    executor_->remove_node(node_);
+  }
   executor_.reset();
   subscriptions_.clear();
   triggers_.clear();
   booleans_.clear();
+  recording_status_subscription_.reset();
+  recording_start_.reset();
+  recording_stop_.reset();
+  recording_cancel_.reset();
+  recording_status_client_.reset();
 }
 
 /** @copydoc TeleopPanel::save */
@@ -217,22 +234,12 @@ void TeleopPanel::onInitialize()
   executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>(executor_options);
   executor_->add_node(node_);
   heartbeat_ = node_->create_publisher<std_msgs::msg::Empty>(prefix + "panel_heartbeat", 10);
-  record_command_ = node_->create_publisher<std_msgs::msg::String>(prefix + "record_command", 10);
   /** @brief 业务状态支持晚加入面板；新鲜度仍由周期消息决定。 */
   auto qos = rclcpp::QoS(1).transient_local();
   subscriptions_.push_back(node_->create_subscription<std_msgs::msg::Bool>(prefix + "enabled", qos,
     [this](const std_msgs::msg::Bool & m) {enabled_ = m.data; control_seen_ = Clock::now();}));
   subscriptions_.push_back(node_->create_subscription<std_msgs::msg::String>(prefix + "status", qos,
     [this](const std_msgs::msg::String & m) {control_status_->setText(QString::fromStdString(m.data));}));
-  subscriptions_.push_back(node_->create_subscription<std_msgs::msg::String>(prefix + "record_status", qos,
-    [this](const std_msgs::msg::String & m) {record_status_->setText(QString::fromStdString(m.data));}));
-  subscriptions_.push_back(node_->create_subscription<std_msgs::msg::String>(prefix + "record_state", qos,
-    [this](const std_msgs::msg::String & m) {
-      if (record_state_ == "saving" && m.data == "idle") {recordings_->requestRefresh();}
-      if (record_state_ != m.data) {record_pending_ = false;}
-      record_state_ = m.data;
-      record_seen_ = Clock::now();
-    }));
   subscriptions_.push_back(node_->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(prefix + "components/status", qos,
     [this](const diagnostic_msgs::msg::DiagnosticArray & m) {updateComponents(m);}));
   for (const auto & name : {"start_all", "stop_all", "shutdown_session", "calibrate_workspace", "return_home"}) {
@@ -285,12 +292,7 @@ void TeleopPanel::dispatch(const QString & action)
   if (action == "toggle" || action == "pause") {
     setBool("set_enabled", action == "toggle" && !enabled_);
   } else if (action == "record" || action == "discard") {
-    /** @brief 兼容现有记录节点的单键消息。 */
-    std_msgs::msg::String command;
-    command.data = action == "record" ? "a" : "b";
-    record_command_->publish(command);
-    record_pending_ = true;
-    record_deadline_ = Clock::now() + std::chrono::seconds(3);
+    recordingAction(action);
   } else {
     /** @brief 将用户操作映射为固定服务，避免界面拼接任意命令。 */
     const std::map<QString, std::string> services = {{"start_all", "start_all"}, {"stop_all", "stop_all"},
@@ -355,6 +357,122 @@ void TeleopPanel::setBool(const std::string & service, bool value)
   });
 }
 
+/** @copydoc TeleopPanel::recordingAction */
+void TeleopPanel::recordingAction(const QString & action)
+{
+  const auto sequence = ++recording_sequence_;  ///< 当前录制操作代次。
+  record_pending_ = true;
+  record_deadline_ = Clock::now() + std::chrono::seconds(3);
+  request_status_->setText("录制请求处理中…");
+  if (action == "discard") {
+    auto request = std::make_shared<fastumi_interfaces::srv::CancelRecording::Request>();  ///< 取消请求。
+    request->recording_id = recording_id_;
+    recording_cancel_->async_send_request(request,
+      [this, sequence](rclcpp::Client<fastumi_interfaces::srv::CancelRecording>::SharedFuture future) {
+        const auto result = future.get();  ///< 取消响应。
+        if (sequence != recording_sequence_) {return;}
+        if (!result->success) {
+          record_pending_ = false;
+          request_status_->setText("取消录制失败：" + QString::fromStdString(result->message));
+        }
+      });
+    return;
+  }
+  if (record_state_ == "recording") {
+    auto request = std::make_shared<fastumi_interfaces::srv::StopRecording::Request>();  ///< 停止请求。
+    request->recording_id = recording_id_;
+    recording_stop_->async_send_request(request,
+      [this, sequence](rclcpp::Client<fastumi_interfaces::srv::StopRecording>::SharedFuture future) {
+        const auto result = future.get();  ///< 停止响应。
+        if (sequence != recording_sequence_) {return;}
+        if (!result->success && result->code != "ALREADY_STOPPING" && result->code != "ALREADY_SAVED") {
+          record_pending_ = false;
+          request_status_->setText("停止录制失败：" + QString::fromStdString(result->message));
+        }
+      });
+    return;
+  }
+  auto request = std::make_shared<fastumi_interfaces::srv::StartRecording::Request>();  ///< 开始请求。
+  request->dir_name = recording_dir_name_;
+  request->name = recording_name_;
+  recording_start_->async_send_request(request,
+    [this, sequence](rclcpp::Client<fastumi_interfaces::srv::StartRecording>::SharedFuture future) {
+      const auto result = future.get();  ///< 开始响应。
+      if (sequence != recording_sequence_) {return;}
+      if (result->success) {
+        recording_id_ = result->recording_id;
+      } else {
+        record_pending_ = false;
+        request_status_->setText("开始录制失败：" + QString::fromStdString(result->message));
+      }
+    });
+}
+
+/** @copydoc TeleopPanel::configureRecording */
+void TeleopPanel::configureRecording(
+  const std::string & prefix_value, const std::string & dir_name, const std::string & name)
+{
+  std::string prefix_value_normalized = prefix_value;  ///< 去除结尾斜杠后的服务前缀。
+  while (prefix_value_normalized.size() > 1 && prefix_value_normalized.back() == '/') {
+    prefix_value_normalized.pop_back();
+  }
+  recording_dir_name_ = dir_name;
+  recording_name_ = name;
+  if (prefix_value_normalized.empty() || prefix_value_normalized == recording_prefix_) {return;}
+  recording_prefix_ = prefix_value_normalized;
+  recording_start_ = node_->create_client<fastumi_interfaces::srv::StartRecording>(
+    recording_prefix_ + "/start");
+  recording_stop_ = node_->create_client<fastumi_interfaces::srv::StopRecording>(
+    recording_prefix_ + "/stop");
+  recording_cancel_ = node_->create_client<fastumi_interfaces::srv::CancelRecording>(
+    recording_prefix_ + "/cancel");
+  recording_status_client_ = node_->create_client<fastumi_interfaces::srv::GetRecordingStatus>(
+    recording_prefix_ + "/get_status");
+  recording_status_subscription_ = node_->create_subscription<fastumi_interfaces::msg::RecordingStatus>(
+    recording_prefix_ + "/status", rclcpp::QoS(1).reliable().transient_local(),
+    [this](const fastumi_interfaces::msg::RecordingStatus & message) {
+      updateRecordingStatus(message);
+    });
+  recordings_->initialize(node_, recording_prefix_);
+}
+
+/** @copydoc TeleopPanel::queryRecordingStatus */
+void TeleopPanel::queryRecordingStatus()
+{
+  const auto sequence = ++recording_sequence_;  ///< 当前权威状态查询代次。
+  if (!recording_status_client_ || !recording_status_client_->service_is_ready()) {
+    request_status_->setText("录制请求超时，状态查询服务未就绪");
+    return;
+  }
+  recording_status_client_->async_send_request(
+    std::make_shared<fastumi_interfaces::srv::GetRecordingStatus::Request>(),
+    [this, sequence](rclcpp::Client<fastumi_interfaces::srv::GetRecordingStatus>::SharedFuture future) {
+      if (sequence != recording_sequence_) {return;}
+      updateRecordingStatus(future.get()->status);
+      request_status_->setText("已按远端权威状态核对录制请求");
+    });
+}
+
+/** @copydoc TeleopPanel::updateRecordingStatus */
+void TeleopPanel::updateRecordingStatus(
+  const fastumi_interfaces::msg::RecordingStatus & message)
+{
+  const auto previous = record_state_;  ///< 用于识别保存完成的上一状态。
+  record_state_ = message.state;
+  recording_id_ = message.recording_id;
+  last_completed_recording_id_ = message.last_completed.recording_id;
+  record_seen_ = Clock::now();
+  if (previous != record_state_) {
+    record_pending_ = false;
+    ++recording_sequence_;
+  }
+  if (previous == "saving" && record_state_ == "idle") {recordings_->requestRefresh();}
+  record_status_->setText(QString("录制：%1，时长 %2 s，关节 %3，视频 %4，丢帧 %5%6")
+    .arg(translated(record_state_)).arg(message.duration, 0, 'f', 1)
+    .arg(message.joint_samples).arg(message.saved_frames).arg(message.dropped_frames)
+    .arg(message.last_error.empty() ? "" : "；错误：" + QString::fromStdString(message.last_error)));
+}
+
 /** @brief 消息过期后禁用运动和录制入口；暂停服务仍可用以便人工停止。 */
 void TeleopPanel::refresh()
 {
@@ -369,7 +487,8 @@ void TeleopPanel::refresh()
   }
   if (record_pending_ && now > record_deadline_) {
     record_pending_ = false;
-    request_status_->setText("录制状态未变化，请检查记录节点");
+    request_status_->setText("录制状态未变化，正在查询远端权威状态");
+    queryRecordingStatus();
   }
   /** @brief 管理诊断必须持续更新，断连后禁止新增操作。 */
   const bool manager = node_ && now - manager_seen_ < std::chrono::seconds(2);
@@ -378,9 +497,10 @@ void TeleopPanel::refresh()
     component_values_.at("teleop").at("ownership") == "local";
   /** @brief 启用和回位额外要求控制节点的周期状态新鲜。 */
   const bool control = owns_control && now - control_seen_ < std::chrono::seconds(2);
-  /** @brief 只操作本会话拥有且仍发布周期状态的记录节点。 */
+  /** @brief 远端录制只要求权威状态新鲜和相应服务可用。 */
   const bool record = node_ && now - record_seen_ < std::chrono::seconds(2) &&
-    component_values_.count("recorder") && component_values_.at("recorder").at("ownership") == "local";
+    component_values_.count("recorder") &&
+    component_values_.at("recorder").at("recording_enabled") == "true";
   /** @brief 普通操作需要管理器空闲且没有在途请求。 */
   const bool available = manager && !pending_ && !manager_busy_;
   if (!manager && manager_seen_ != Clock::time_point{}) {
@@ -400,9 +520,14 @@ void TeleopPanel::refresh()
     buttons_["calibrate"]->setEnabled(control && available && triggers_.at("calibrate_workspace")->service_is_ready());
     buttons_["home"]->setEnabled(control && available && triggers_.at("return_home")->service_is_ready());
   }
-  buttons_["record"]->setEnabled(record && available && !record_pending_ && record_state_ != "saving" &&
-    (record_state_ == "recording" || !video_sources_->wristBusy()));
-  buttons_["discard"]->setEnabled(record && available && !record_pending_ && record_state_ == "recording");
+  const bool start_ready = recording_start_ && recording_start_->service_is_ready();  ///< 开始服务发现状态。
+  const bool stop_ready = recording_stop_ && recording_stop_->service_is_ready();  ///< 停止服务发现状态。
+  const bool cancel_ready = recording_cancel_ && recording_cancel_->service_is_ready();  ///< 取消服务发现状态。
+  buttons_["record"]->setEnabled(record && available && !record_pending_ &&
+    ((record_state_ == "recording" && stop_ready) || (record_state_ == "idle" && start_ready)) &&
+    !video_sources_->umiBusy());
+  buttons_["discard"]->setEnabled(
+    record && available && !record_pending_ && record_state_ == "recording" && cancel_ready);
   buttons_["toggle"]->setText(enabled_ ? "暂停遥操（空格）" : "启用遥操（空格）");
   buttons_["record"]->setText(record_state_ == "recording" ? "停止并保存（A）" :
     record_state_ == "saving" ? "保存中…" : "开始录制（A）");
@@ -436,6 +561,11 @@ void TeleopPanel::updateComponents(const diagnostic_msgs::msg::DiagnosticArray &
         request_status_->setText(QString::fromStdString(status.message));
       }
       last_session_message_ = status.message;
+      if (values["shutdown"] == "true") {
+        spin_timer_->stop();
+        heartbeat_timer_->stop();
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+      }
       continue;
     }
     /** @brief 组件的稳定行标识。 */
@@ -461,10 +591,11 @@ void TeleopPanel::updateComponents(const diagnostic_msgs::msg::DiagnosticArray &
       connect(start, &QPushButton::clicked, this, [this, service]() {setBool(service, true);});
       connect(stop, &QPushButton::clicked, this, [this, service]() {setBool(service, false);});
     }
-    if (id == "recorder") {
-      recordings_->setDirectory(QString::fromStdString(values["output_directory"]));
-    }
     component_values_[id] = values;
+    if (id == "recorder" && values.count("service_prefix")) {
+      configureRecording(
+        values["service_prefix"], values["recording_dir_name"], values["recording_name"]);
+    }
     row->setText(0, QString::fromStdString(values["label"]));
     row->setText(1, values["ownership"] == "local" ? "本次启动" :
       values["ownership"] == "external" ? "外部／只读" : "未管理");
