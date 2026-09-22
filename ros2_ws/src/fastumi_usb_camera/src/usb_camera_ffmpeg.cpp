@@ -1,22 +1,30 @@
 /**
  * @file usb_camera_ffmpeg.cpp
- * @brief 按稳定 USB 物理端口采集 MJPEG，并通过 FFmpeg image transport 发布。
+ * @brief 按稳定 V4L2 物理端口采集 MJPEG，并通过 FFmpeg image transport 发布。
  */
 
-#include <libuvc/libuvc.h>
-
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <fcntl.h>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <iomanip>
+#include <linux/videodev2.h>
 #include <memory>
 #include <mutex>
+#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -30,7 +38,6 @@
 #include "fastumi_usb_camera/configuration.hpp"
 #include "fastumi_usb_camera/jpeg_frame.hpp"
 #include "fastumi_usb_camera/latest_frame_buffer.hpp"
-#include "fastumi_usb_camera/physical_device.hpp"
 
 namespace fastumi_usb_camera
 {
@@ -44,146 +51,365 @@ struct CapturedJpeg
   std::vector<uint8_t> data;
 };
 
-class UvcCamera
+namespace
+{
+
+constexpr int kPollTimeoutMilliseconds = 100;
+constexpr uint32_t kCaptureBufferCount = 4;
+
+/** @brief 执行可被信号中断的 V4L2 ioctl，仅对 EINTR 重试。 */
+int ioctl_retry(int file_descriptor, unsigned long request, void * argument)
+{
+  int result;
+  do {
+    result = ioctl(file_descriptor, request, argument);
+  } while (result < 0 && errno == EINTR);
+  return result;
+}
+
+/** @brief 把当前 errno 和操作名组合为运行时错误。 */
+std::runtime_error system_error(const std::string & action)
+{
+  return std::runtime_error(action + ": " + std::strerror(errno));
+}
+
+/** @brief 读取 sysfs 单词属性，失败时返回空字符串。 */
+std::string read_trimmed(const std::filesystem::path & path)
+{
+  std::ifstream stream(path);
+  std::string value;
+  stream >> value;
+  return value;
+}
+
+/** @brief 读取 sysfs 十六进制 USB 标识，失败时返回 -1。 */
+int64_t read_hex_id(const std::filesystem::path & path)
+{
+  const std::string value = read_trimmed(path);
+  if (value.empty()) {
+    return -1;
+  }
+  try {
+    return static_cast<int64_t>(std::stoul(value, nullptr, 16));
+  } catch (const std::exception &) {
+    return -1;
+  }
+}
+
+/**
+ * @brief 解析显式 by-path，或按 VID/PID 和序列号选择唯一主视频节点。
+ * @throws std::runtime_error 设备不存在或匹配数不为一。
+ */
+std::string discover_video_device(const CameraConfiguration & config)
+{
+  if (!config.video_device.empty()) {
+    if (!std::filesystem::exists(config.video_device)) {
+      throw std::runtime_error("video device does not exist: " + config.video_device);
+    }
+    return config.video_device;
+  }
+
+  std::vector<std::string> matches;
+  std::error_code error;
+  const std::filesystem::path video_class("/sys/class/video4linux");
+  for (std::filesystem::directory_iterator iterator(video_class, error), end;
+    !error && iterator != end; iterator.increment(error))
+  {
+    const auto class_entry = iterator->path();
+    if (read_trimmed(class_entry / "index") != "0") {
+      continue;
+    }
+    const auto usb_interface = std::filesystem::canonical(class_entry / "device", error);
+    if (error) {
+      error.clear();
+      continue;
+    }
+    const auto usb_device = usb_interface.parent_path();
+    if (read_hex_id(usb_device / "idVendor") != config.vendor_id ||
+      read_hex_id(usb_device / "idProduct") != config.product_id)
+    {
+      continue;
+    }
+    if (!config.serial_number.empty() &&
+      read_trimmed(usb_device / "serial") != config.serial_number)
+    {
+      continue;
+    }
+    matches.push_back("/dev/" + class_entry.filename().string());
+  }
+  if (matches.size() != 1) {
+    std::ostringstream message;
+    message << "expected exactly one V4L2 camera matching " << std::hex <<
+      std::setfill('0') << std::setw(4) << config.vendor_id << ':' <<
+      std::setw(4) << config.product_id;
+    if (!config.serial_number.empty()) {
+      message << " (serial_number=" << config.serial_number << ')';
+    }
+    message << ", found " << std::dec << matches.size();
+    throw std::runtime_error(message.str());
+  }
+  return matches.front();
+}
+
+}  // namespace
+
+/** @brief 通过 uvcvideo 的 V4L2 mmap 队列采集原生 MJPEG 帧。 */
+class V4l2Camera
 {
 public:
-  using FrameCallback = void (*)(uvc_frame_t *, void *);
+  using FrameCallback = void (*)(const uint8_t *, size_t, void *);
 
-  UvcCamera(const CameraConfiguration & config, FrameCallback callback, void * user_data)
+  /** @brief 打开设备、严格协商采集模式并启动读帧线程。 */
+  V4l2Camera(const CameraConfiguration & config, FrameCallback callback, void * user_data)
+  : device_path_(discover_video_device(config)), callback_(callback), user_data_(user_data)
   {
-    check(uvc_init(&context_, nullptr), "initialize libuvc");
-    uvc_device_t ** devices = nullptr;
-    /** @brief 物理路径存在时按其当前 USB 地址枚举，否则沿用 VID/PID/序列号。 */
-    const bool use_physical_path = !config.video_device.empty();
-    /** @brief 稳定路径当前解析出的 USB 地址。 */
-    const UsbLocation location = use_physical_path ?
-      usb_location_from_video_device(config.video_device) : UsbLocation{0, 0};
-    /** @brief 兼容模式使用的可选序列号。 */
-    const char * serial = config.serial_number.empty() ? nullptr : config.serial_number.c_str();
-    /** @brief libuvc 枚举结果。 */
-    const auto find_result = use_physical_path ? uvc_get_device_list(context_, &devices) :
-      uvc_find_devices(
-      context_, &devices, static_cast<int>(config.vendor_id),
-      static_cast<int>(config.product_id), serial);
-    if (find_result != UVC_SUCCESS) {
-      cleanup();
-      throw_uvc_error(find_result, "find UVC camera");
+    open_and_start(config);
+    running_ = true;
+    try {
+      capture_thread_ = std::thread(&V4l2Camera::capture_loop, this);
+    } catch (...) {
+      running_ = false;
+      close_resources();
+      throw;
     }
-
-    if (devices == nullptr) {
-      cleanup();
-      throw std::runtime_error("libuvc returned an empty device list");
-    }
-    /** @brief 唯一匹配的 libuvc 设备。 */
-    uvc_device_t * selected = nullptr;
-    /** @brief 符合选择条件的设备数量。 */
-    size_t count = 0;
-    for (size_t index = 0; devices[index] != nullptr; ++index) {
-      if (!use_physical_path || (
-          uvc_get_bus_number(devices[index]) == location.bus_number &&
-          uvc_get_device_address(devices[index]) == location.device_address))
-      {
-        selected = devices[index];
-        ++count;
-      }
-    }
-    if (count != 1) {
-      uvc_free_device_list(devices, 1);
-      cleanup();
-      std::ostringstream message;
-      message << "expected exactly one UVC camera matching ";
-      if (use_physical_path) {
-        message << config.video_device;
-      } else {
-        message << std::hex << std::setfill('0') << std::setw(4) << config.vendor_id << ':' <<
-          std::setw(4) << config.product_id;
-      }
-      message << ", found " << std::dec << count;
-      if (!use_physical_path && count > 1 && config.serial_number.empty()) {
-        message << "; set serial_number to select one device";
-      }
-      throw std::runtime_error(message.str());
-    }
-
-    /** @brief 打开物理端口最终对应的唯一设备。 */
-    const auto open_result = uvc_open(selected, &handle_);
-    uvc_free_device_list(devices, 1);
-    if (open_result != UVC_SUCCESS) {
-      cleanup();
-      if (open_result == UVC_ERROR_ACCESS) {
-        throw std::runtime_error(
-                "USB camera access denied; install 99-fastumi-usb-camera.rules, "
-                "reload udev rules and reconnect the camera");
-      }
-      throw_uvc_error(open_result, "open UVC camera");
-    }
-
-    uvc_stream_ctrl_t control{};
-    const auto mode_result = uvc_get_stream_ctrl_format_size(
-      handle_, &control, UVC_FRAME_FORMAT_MJPEG,
-      static_cast<int>(config.width), static_cast<int>(config.height),
-      static_cast<int>(config.fps));
-    if (mode_result != UVC_SUCCESS) {
-      cleanup();
-      std::ostringstream message;
-      message << "UVC MJPEG mode " << config.width << 'x' << config.height << '@' <<
-        config.fps << " is unavailable: " << uvc_strerror(mode_result);
-      throw std::runtime_error(message.str());
-    }
-
-    const auto start_result = uvc_start_streaming(handle_, &control, callback, user_data, 0);
-    if (start_result != UVC_SUCCESS) {
-      cleanup();
-      throw_uvc_error(start_result, "start UVC streaming");
-    }
-    streaming_ = true;
   }
 
-  UvcCamera(const UvcCamera &) = delete;
-  UvcCamera & operator=(const UvcCamera &) = delete;
+  V4l2Camera(const V4l2Camera &) = delete;
+  V4l2Camera & operator=(const V4l2Camera &) = delete;
 
-  ~UvcCamera()
+  ~V4l2Camera()
   {
-    cleanup();
+    stop();
   }
 
+  /** @brief 可重复调用地停止读帧线程并释放 V4L2 资源。 */
   void stop()
   {
-    cleanup();
+    running_ = false;
+    if (capture_thread_.joinable()) {
+      capture_thread_.join();
+    }
+    close_resources();
+  }
+
+  /** @brief 返回采集线程是否因不可恢复错误退出。 */
+  bool failed() const
+  {
+    return failed_.load();
+  }
+
+  /** @brief 返回采集线程的最后错误说明。 */
+  std::string error_message() const
+  {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    return error_message_;
+  }
+
+  /** @brief 返回驱动标记为错误或越界的帧数。 */
+  uint64_t invalid_count() const
+  {
+    return invalid_count_.load();
+  }
+
+  /** @brief 返回实际打开的 V4L2 设备路径。 */
+  const std::string & device_path() const
+  {
+    return device_path_;
   }
 
 private:
-  static void throw_uvc_error(uvc_error_t error, const std::string & action)
+  /** @brief 一个由 V4L2 驱动分配并映射到用户空间的缓冲区。 */
+  struct MappedBuffer
   {
-    throw std::runtime_error(action + " failed: " + uvc_strerror(error));
-  }
+    void * address{MAP_FAILED};
+    size_t length{0};
+  };
 
-  static void check(uvc_error_t error, const std::string & action)
+  /** @brief 配置能力、MJPEG 格式、帧率、mmap 队列并开流。 */
+  void open_and_start(const CameraConfiguration & config)
   {
-    if (error != UVC_SUCCESS) {
-      throw_uvc_error(error, action);
+    file_descriptor_ = open(device_path_.c_str(), O_RDWR | O_NONBLOCK);
+    if (file_descriptor_ < 0) {
+      throw system_error("open " + device_path_);
+    }
+    try {
+      v4l2_capability capabilities{};
+      if (ioctl_retry(file_descriptor_, VIDIOC_QUERYCAP, &capabilities) < 0) {
+        throw system_error("VIDIOC_QUERYCAP");
+      }
+      const uint32_t device_capabilities =
+        (capabilities.capabilities & V4L2_CAP_DEVICE_CAPS) != 0U ?
+        capabilities.device_caps : capabilities.capabilities;
+      if ((device_capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0U ||
+        (device_capabilities & V4L2_CAP_STREAMING) == 0U)
+      {
+        throw std::runtime_error(device_path_ + " is not a streaming V4L2 capture device");
+      }
+
+      v4l2_format format{};
+      format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      format.fmt.pix.width = static_cast<uint32_t>(config.width);
+      format.fmt.pix.height = static_cast<uint32_t>(config.height);
+      format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+      format.fmt.pix.field = V4L2_FIELD_NONE;
+      if (ioctl_retry(file_descriptor_, VIDIOC_S_FMT, &format) < 0) {
+        throw system_error("VIDIOC_S_FMT");
+      }
+      if (format.fmt.pix.width != static_cast<uint32_t>(config.width) ||
+        format.fmt.pix.height != static_cast<uint32_t>(config.height) ||
+        format.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG)
+      {
+        throw std::runtime_error("camera did not accept the requested MJPEG dimensions");
+      }
+
+      v4l2_streamparm parameters{};
+      parameters.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      parameters.parm.capture.timeperframe.numerator = 1U;
+      parameters.parm.capture.timeperframe.denominator = static_cast<uint32_t>(config.fps);
+      if (ioctl_retry(file_descriptor_, VIDIOC_S_PARM, &parameters) < 0) {
+        throw system_error("VIDIOC_S_PARM");
+      }
+      const auto numerator = parameters.parm.capture.timeperframe.numerator;
+      const auto denominator = parameters.parm.capture.timeperframe.denominator;
+      if (numerator == 0U || denominator != static_cast<uint32_t>(config.fps) * numerator) {
+        throw std::runtime_error("camera did not accept the requested frame rate");
+      }
+
+      v4l2_requestbuffers request{};
+      request.count = kCaptureBufferCount;
+      request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      request.memory = V4L2_MEMORY_MMAP;
+      if (ioctl_retry(file_descriptor_, VIDIOC_REQBUFS, &request) < 0) {
+        throw system_error("VIDIOC_REQBUFS");
+      }
+      if (request.count < 2U) {
+        throw std::runtime_error("V4L2 driver supplied fewer than two capture buffers");
+      }
+      buffers_.resize(request.count);
+      for (uint32_t index = 0; index < request.count; ++index) {
+        v4l2_buffer buffer{};
+        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buffer.memory = V4L2_MEMORY_MMAP;
+        buffer.index = index;
+        if (ioctl_retry(file_descriptor_, VIDIOC_QUERYBUF, &buffer) < 0) {
+          throw system_error("VIDIOC_QUERYBUF");
+        }
+        buffers_[index].length = buffer.length;
+        buffers_[index].address = mmap(
+          nullptr, buffer.length, PROT_READ | PROT_WRITE, MAP_SHARED,
+          file_descriptor_, buffer.m.offset);
+        if (buffers_[index].address == MAP_FAILED) {
+          throw system_error("mmap");
+        }
+      }
+      for (uint32_t index = 0; index < buffers_.size(); ++index) {
+        v4l2_buffer buffer{};
+        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buffer.memory = V4L2_MEMORY_MMAP;
+        buffer.index = index;
+        if (ioctl_retry(file_descriptor_, VIDIOC_QBUF, &buffer) < 0) {
+          throw system_error("VIDIOC_QBUF");
+        }
+      }
+      v4l2_buf_type buffer_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      if (ioctl_retry(file_descriptor_, VIDIOC_STREAMON, &buffer_type) < 0) {
+        throw system_error("VIDIOC_STREAMON");
+      }
+      streaming_ = true;
+    } catch (...) {
+      close_resources();
+      throw;
     }
   }
 
-  void cleanup() noexcept
+  /** @brief 轮询并出队最新 MJPEG 帧，回调复制完成后立即重新入队。 */
+  void capture_loop() noexcept
   {
-    if (streaming_ && handle_) {
-      uvc_stop_streaming(handle_);
+    try {
+      while (running_.load()) {
+        pollfd descriptor{};
+        descriptor.fd = file_descriptor_;
+        descriptor.events = POLLIN | POLLPRI;
+        const int poll_result = poll(&descriptor, 1, kPollTimeoutMilliseconds);
+        if (poll_result < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          throw system_error("poll");
+        }
+        if (poll_result == 0) {
+          continue;
+        }
+        if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+          throw std::runtime_error("V4L2 camera poll returned an error event");
+        }
+
+        v4l2_buffer buffer{};
+        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buffer.memory = V4L2_MEMORY_MMAP;
+        if (ioctl_retry(file_descriptor_, VIDIOC_DQBUF, &buffer) < 0) {
+          if (errno == EAGAIN) {
+            continue;
+          }
+          throw system_error("VIDIOC_DQBUF");
+        }
+        const bool valid = buffer.index < buffers_.size() && buffer.bytesused > 0U &&
+          buffer.bytesused <= buffers_[buffer.index].length &&
+          (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0U;
+        if (valid && running_.load()) {
+          callback_(
+            static_cast<const uint8_t *>(buffers_[buffer.index].address),
+            buffer.bytesused, user_data_);
+        } else if (!valid) {
+          invalid_count_.fetch_add(1);
+        }
+        if (ioctl_retry(file_descriptor_, VIDIOC_QBUF, &buffer) < 0) {
+          throw system_error("VIDIOC_QBUF");
+        }
+      }
+    } catch (const std::exception & error) {
+      {
+        std::lock_guard<std::mutex> lock(error_mutex_);
+        error_message_ = error.what();
+      }
+      failed_ = true;
+      running_ = false;
+    }
+  }
+
+  /** @brief 关流、解除映射并关闭视频节点；析构路径不抛异常。 */
+  void close_resources() noexcept
+  {
+    if (streaming_ && file_descriptor_ >= 0) {
+      v4l2_buf_type buffer_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      static_cast<void>(ioctl(file_descriptor_, VIDIOC_STREAMOFF, &buffer_type));
       streaming_ = false;
     }
-    if (handle_) {
-      uvc_close(handle_);
-      handle_ = nullptr;
+    for (auto & buffer : buffers_) {
+      if (buffer.address != MAP_FAILED) {
+        static_cast<void>(munmap(buffer.address, buffer.length));
+        buffer.address = MAP_FAILED;
+      }
     }
-    if (context_) {
-      uvc_exit(context_);
-      context_ = nullptr;
+    buffers_.clear();
+    if (file_descriptor_ >= 0) {
+      static_cast<void>(close(file_descriptor_));
+      file_descriptor_ = -1;
     }
   }
 
-  uvc_context_t * context_{nullptr};
-  uvc_device_handle_t * handle_{nullptr};
+  std::string device_path_;
+  FrameCallback callback_;
+  void * user_data_;
+  int file_descriptor_{-1};
   bool streaming_{false};
+  std::vector<MappedBuffer> buffers_;
+  std::thread capture_thread_;
+  std::atomic<bool> running_{false};
+  std::atomic<bool> failed_{false};
+  std::atomic<uint64_t> invalid_count_{0};
+  mutable std::mutex error_mutex_;
+  std::string error_message_;
 };
 
 class UsbCameraFfmpeg : public rclcpp::Node
@@ -233,7 +459,8 @@ public:
     last_frame_steady_ns_.store(steady_now_ns());
     worker_ = std::thread(&UsbCameraFfmpeg::process_frames, this);
     try {
-      camera_ = std::make_unique<UvcCamera>(config_, &UsbCameraFfmpeg::uvc_callback, this);
+      camera_ = std::make_unique<V4l2Camera>(
+        config_, &UsbCameraFfmpeg::v4l2_callback, this);
     } catch (...) {
       frame_buffer_.close();
       worker_.join();
@@ -242,8 +469,8 @@ public:
     }
     RCLCPP_INFO(
       get_logger(),
-      "Streaming UVC %s MJPEG %ldx%ld@%ld -> %s/ffmpeg",
-      (config_.video_device.empty() ? "VID/PID selection" : config_.video_device.c_str()),
+      "Streaming V4L2 %s MJPEG %ldx%ld@%ld -> %s/ffmpeg",
+      camera_->device_path().c_str(),
       config_.width, config_.height, config_.fps,
       config_.topic.c_str());
   }
@@ -279,18 +506,14 @@ private:
       SteadyClock::now().time_since_epoch()).count();
   }
 
-  static void uvc_callback(uvc_frame_t * frame, void * user_data) noexcept
+  static void v4l2_callback(const uint8_t * data, size_t size, void * user_data) noexcept
   {
-    static_cast<UsbCameraFfmpeg *>(user_data)->capture_frame(frame);
+    static_cast<UsbCameraFfmpeg *>(user_data)->capture_frame(data, size);
   }
 
-  void capture_frame(uvc_frame_t * frame) noexcept
+  void capture_frame(const uint8_t * data, size_t size) noexcept
   {
-    if (stopping_ || frame == nullptr || frame->data == nullptr || frame->data_bytes == 0 ||
-      frame->frame_format != UVC_FRAME_FORMAT_MJPEG ||
-      frame->width != static_cast<uint32_t>(config_.width) ||
-      frame->height != static_cast<uint32_t>(config_.height))
-    {
+    if (stopping_ || data == nullptr || size == 0U) {
       invalid_frame_count_.fetch_add(1);
       return;
     }
@@ -298,13 +521,12 @@ private:
       CapturedJpeg captured;
       captured.stamp = now();
       captured.queued_at = SteadyClock::now();
-      const auto * begin = static_cast<const uint8_t *>(frame->data);
-      captured.data.assign(begin, begin + frame->data_bytes);
+      captured.data.assign(data, data + size);
       captured_count_.fetch_add(1);
       last_frame_steady_ns_.store(steady_now_ns());
       frame_buffer_.push(std::move(captured));
     } catch (...) {
-      set_fatal_error("failed to copy a frame from the UVC callback");
+      set_fatal_error("failed to copy a frame from the V4L2 capture thread");
     }
   }
 
@@ -384,16 +606,21 @@ private:
       "frames captured=%lu encoded=%lu overwritten=%lu no_subscriber=%lu invalid=%lu "
       "decode_failed=%lu rate=%lu fps avg_queue=%.2f ms avg_decode=%.2f ms avg_publish=%.2f ms",
       captured, encoded, overwritten, skipped_without_subscriber_count_.load(),
-      invalid_frame_count_.load(), decode_failure_count_.load(), interval_encoded,
+      invalid_frame_count_.load() + (camera_ ? camera_->invalid_count() : 0U),
+      decode_failure_count_.load(), interval_encoded,
       interval_queue_ns / divisor / 1.0e6, interval_decode_ns / divisor / 1.0e6,
       interval_publish_ns / divisor / 1.0e6);
     previous_encoded_count_ = encoded;
 
     if (started_ && !stopping_) {
+      if (camera_ && camera_->failed()) {
+        set_fatal_error("V4L2 camera capture failed: " + camera_->error_message());
+        return;
+      }
       const auto silence_ns = steady_now_ns() - last_frame_steady_ns_.load();
       if (silence_ns > static_cast<int64_t>(config_.frame_timeout_seconds * 1.0e9)) {
         set_fatal_error(
-          "no valid UVC camera frame received for " +
+          "no valid V4L2 camera frame received for " +
           std::to_string(config_.frame_timeout_seconds) + " seconds");
       }
     }
@@ -402,7 +629,7 @@ private:
   CameraConfiguration config_;
   pluginlib::UniquePtr<image_transport::PublisherPlugin> encoder_;
   LatestFrameBuffer<CapturedJpeg> frame_buffer_;
-  std::unique_ptr<UvcCamera> camera_;
+  std::unique_ptr<V4l2Camera> camera_;
   std::thread worker_;
   rclcpp::TimerBase::SharedPtr diagnostics_timer_;
   std::atomic<bool> started_{false};

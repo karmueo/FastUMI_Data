@@ -13,7 +13,6 @@
   <depend>ffmpeg_image_transport_msgs</depend>
   <depend>image_transport</depend>
   <depend>libopencv-dev</depend>
-  <depend>libuvc-dev</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <exec_depend>ament_index_python</exec_depend>

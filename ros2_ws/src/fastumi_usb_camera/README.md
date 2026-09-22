@@ -9,7 +9,7 @@
 默认相机是
 `1bcf:28c4`，模式为 `1280x960@30`。
 
-独立的 C++ `usb_camera_ffmpeg` 节点直接采集 MJPEG，在发送端解码 JPEG，
+独立的 C++ `usb_camera_ffmpeg` 节点通过内核 V4L2 直接采集 MJPEG，在发送端解码 JPEG，
 用官方 `ffmpeg_image_transport` 编码为 H.264；`usb_camera_receiver` 在接收端
 解码并发布原始图像。两种采集节点会争用同一 USB 相机，因此每次只启动一种。
 FFmpeg 链路仍只缓存最新待处理帧，避免编码或网络变慢时积压旧画面。
@@ -27,7 +27,7 @@ FFmpeg 链路仍只缓存最新待处理帧，避免编码或网络变慢时积�
 cd ros2_ws
 source /opt/ros/humble/setup.bash
 source .venv-numpy1/bin/activate
-sudo apt install libuvc-dev libopencv-dev \
+sudo apt install libopencv-dev \
   ros-humble-ffmpeg-image-transport ros-humble-cv-bridge \
   ros-humble-ament-cmake-python ros-humble-ament-cmake-gtest \
   ros-humble-ament-cmake-pytest
@@ -41,9 +41,11 @@ head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 入口首行应指向 `ros2_ws/.venv-numpy1/bin/python`。以后运行 Python 相机节点时，
 先依次加载 Humble、`.venv-numpy1` 和 `install/setup.bash`。迁移旧构建缓存时，
 按工作区说明移走旧的 `build`、`install` 和 `log`，避免保留旧独立环境的解释器路径。
-C++ FFmpeg 节点也在 NumPy 1 构建阶段构建，但自身不导入 Python 图像库。
+C++ FFmpeg 节点也在 NumPy 1 构建阶段构建，但自身不导入 Python 图像库；它通过
+`uvcvideo` 和 V4L2 打开配置的视频节点，退出时不会解绑内核驱动。
 
-libuvc 直接访问 USB 设备。首次使用时可为这一型号安装 udev 规则：
+Python 相机节点通过 libuvc 直接访问 USB 设备。首次使用时可为这一型号安装
+udev 规则：
 
 ```bash
 # 为这款 USB 相机写入允许 video 组和当前桌面会话访问的 udev 规则。

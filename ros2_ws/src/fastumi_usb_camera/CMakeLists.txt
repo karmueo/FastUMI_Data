@@ -15,8 +15,6 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgcodecs)
-find_path(LIBUVC_INCLUDE_DIR NAMES libuvc/libuvc.h REQUIRED)
-find_library(LIBUVC_LIBRARY NAMES uvc REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 configure_file(scripts/usb_camera_node.in
@@ -30,10 +28,9 @@ target_include_directories(${PROJECT_NAME}_core INTERFACE
   "$<INSTALL_INTERFACE:include>")
 
 add_executable(usb_camera_ffmpeg src/usb_camera_ffmpeg.cpp)
-target_include_directories(usb_camera_ffmpeg PRIVATE
-  ${LIBUVC_INCLUDE_DIR} ${OpenCV_INCLUDE_DIRS})
+target_include_directories(usb_camera_ffmpeg PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(usb_camera_ffmpeg
-  ${PROJECT_NAME}_core ${LIBUVC_LIBRARY} ${OpenCV_LIBRARIES})
+  ${PROJECT_NAME}_core ${OpenCV_LIBRARIES})
 ament_target_dependencies(usb_camera_ffmpeg
   image_transport pluginlib rclcpp sensor_msgs)
 
