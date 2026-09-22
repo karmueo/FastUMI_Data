@@ -1,8 +1,0 @@
-#!@Python3_EXECUTABLE@
-"""Run the existing Python USB camera node from a CMake-installed entry point."""
-
-from fastumi_usb_camera.usb_camera_node import main
-
-
-if __name__ == "__main__":
-    main()

@@ -24,8 +24,21 @@ def test_default_config_matches_namespaced_node():
         assert node.get_parameter("video_device").value == expected["video_device"]
         assert not node.has_parameter("vendor_id")
         assert not node.has_parameter("product_id")
+        assert not node.has_parameter("serial_number")
         assert node.get_parameter("width").value == 1920
         assert node.get_parameter("publish_compressed").value is False
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_ffmpeg_config_uses_automatic_video_device_selection():
+    """FFmpeg 默认配置使用空路径，且不包含已移除的选择参数。"""
+    # 从测试目录定位 FFmpeg 默认参数文件。
+    config = Path(__file__).resolve().parents[1] / "config" / "ffmpeg.yaml"
+    # 发送节点的默认参数字典。
+    parameters = yaml.safe_load(config.read_text())["usb_camera_ffmpeg"][
+        "ros__parameters"
+    ]
+    assert parameters["video_device"] == ""
+    assert {"vendor_id", "product_id", "serial_number"}.isdisjoint(parameters)

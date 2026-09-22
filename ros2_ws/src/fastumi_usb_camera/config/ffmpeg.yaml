@@ -2,9 +2,7 @@
 # prefix is the base topic without its leading slash, with '/' changed to '.'.
 usb_camera_ffmpeg:
   ros__parameters:
-    vendor_id: 7119       # 0x1bcf
-    product_id: 10436     # 0x28c4
-    serial_number: ""
+    video_device: ""
     width: 1280
     height: 960
     fps: 30

@@ -16,7 +16,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`xv_ros2_msgs`](src/xv_ros2_msgs/) | CMake 接口包 | 定义 XV 设备驱动使用的姿态、控制器、彩色深度消息及设备查询服务。 |
 | [`xv_sdk_ros2`](src/xv_sdk_ros2/) | C++ 驱动包 | 将 XV 设备的 IMU、RGB、ToF 等数据发布为 ROS 2 话题，并提供图像截图功能。 |
 | [`tof_stereo_camera`](src/tof_stereo_camera/) | C++ 驱动包 | 使用随包内置的 stereo_camera SDK 发布 RGB、iTOF 深度/灰度和 IMU 数据。 |
-| [`fastumi_usb_camera`](src/fastumi_usb_camera/) | Python/C++ 相机包 | 使用 UVC 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
+| [`fastumi_usb_camera`](src/fastumi_usb_camera/) | C++ 相机包 | 使用 V4L2 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
 | [`gripper_openness`](src/gripper_openness/) | Python 感知包 | 独立提供夹爪范围标定节点和 USB 图像开合度预测节点。 |
@@ -117,13 +117,14 @@ RGB、iTOF 深度/灰度和原始 IMU 话题，并可选启动 Madgwick 或互�
 
 ### `fastumi_usb_camera`
 
-该包通过 `pupil-labs-uvc` 按 USB VID/PID 采集单目 MJPEG，相机默认模式为
-`1280x960@30`。默认发布 `/usb_camera/image_raw`；设置
+该包通过内核 `uvcvideo` 和共享 V4L2 mmap 核心采集单目 MJPEG。默认发布
+`/usb_camera/image_raw`；设置
 `publish_compressed=true` 时只发布 `/usb_camera/image_raw/compressed`。
 当解码或发布积压时只保留最新待处理帧。
-另有 C++ FFmpeg 发送与接收节点，分别发布 `/usb_camera/image_raw/ffmpeg` 和
+FFmpeg 发送与接收节点分别发布 `/usb_camera/image_raw/ffmpeg` 和
 `/usb_camera/image_decoded`；统一启动入口可通过 `enable_ffmpeg:=true` 选择
-FFmpeg 发送端，每次仅启动一种采集节点，避免争用 USB 相机。
+FFmpeg 发送端。raw、JPEG 和 FFmpeg 采集在退出时统一执行关流、解除映射和关闭
+视频节点，每次仅启动一种采集节点，避免争用 USB 相机。
 启动和 USB 权限配置见 [`src/fastumi_usb_camera/README.md`](src/fastumi_usb_camera/README.md)。
 
 ### `fastumi_gripper_estimator`
@@ -323,7 +324,7 @@ PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
   --cmake-args -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
 head -1 install/tracker_teleoperated/lib/tracker_teleoperated/tracker_teleop_node
-head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
+file -L install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
 
 DP 推理包单独用锁定的 `.venv-dp` 构建；`fastumi_interfaces` 已在 NumPy 1

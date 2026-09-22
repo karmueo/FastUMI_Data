@@ -42,7 +42,7 @@ def _selected_node(monkeypatch, module, **changes):
     return nodes[0]
 
 
-def test_default_mode_starts_only_python_raw_node(monkeypatch):
+def test_default_mode_starts_only_cpp_raw_node(monkeypatch):
     """缺省启动入口及命名空间仍与原始图像模式一致。"""
     module = _load_launch()
     node = _selected_node(monkeypatch, module)
@@ -51,7 +51,7 @@ def test_default_mode_starts_only_python_raw_node(monkeypatch):
     assert node["namespace"].perform(_context(module)) == "usb_camera"
 
 
-def test_jpeg_mode_starts_only_python_node(monkeypatch):
+def test_jpeg_mode_starts_only_cpp_node(monkeypatch):
     """原生 JPEG 模式沿用现有 publish_compressed 参数。"""
     module = _load_launch()
     node = _selected_node(monkeypatch, module, publish_compressed="TRUE")
@@ -59,21 +59,20 @@ def test_jpeg_mode_starts_only_python_node(monkeypatch):
     assert node["parameters"][1] == {"publish_compressed": True}
 
 
-def test_device_uid_is_passed_only_to_python_node(monkeypatch):
-    """将设备 UID 传给 Python 节点，并拒绝 FFmpeg 模式中无效的 UID。"""
+def test_removed_device_selectors_are_not_declared():
+    """旧 USB 标识和序列号参数不再出现在 launch 接口。"""
     module = _load_launch()
-    node = _selected_node(monkeypatch, module, device_uid="1:15")
-    assert node["parameters"][1] == {
-        "device_uid": "1:15", "video_device": ""
+    argument_names = {
+        action.name for action in module.generate_launch_description().entities
+        if isinstance(action, DeclareLaunchArgument)
     }
-    with pytest.raises(ValueError, match="device_uid"):
-        _selected_node(
-            monkeypatch, module, device_uid="1:15", enable_ffmpeg="true"
-        )
+    assert {"vendor_id", "product_id", "serial_number"}.isdisjoint(
+        argument_names
+    )
 
 
 def test_video_device_is_passed_to_both_camera_modes(monkeypatch):
-    """稳定物理路径传给两种节点，且不能与 UID 同时指定。"""
+    """稳定物理路径传给两种 V4L2 采集节点。"""
     module = _load_launch()
     node = _selected_node(monkeypatch, module, video_device=PHYSICAL_DEVICE)
     assert node["parameters"][1] == {"video_device": PHYSICAL_DEVICE}
@@ -82,25 +81,8 @@ def test_video_device_is_passed_to_both_camera_modes(monkeypatch):
         enable_ffmpeg="true",
     )
     assert ffmpeg["parameters"][2] == {"video_device": PHYSICAL_DEVICE}
-    with pytest.raises(ValueError, match="只能指定其中一个"):
-        _selected_node(
-            monkeypatch, module, video_device=PHYSICAL_DEVICE, device_uid="1:17"
-        )
     with pytest.raises(ValueError, match="by-path"):
         _selected_node(monkeypatch, module, video_device="/dev/video0")
-
-
-def test_explicit_usb_id_disables_default_video_device(monkeypatch):
-    """显式 VID/PID 启动时清除 YAML 中的默认视频设备路径。"""
-    module = _load_launch()
-    node = _selected_node(
-        monkeypatch, module, vendor_id="0x1bcf", product_id="0x28c4"
-    )
-    assert node["parameters"][1] == {
-        "vendor_id": 0x1BCF,
-        "product_id": 0x28C4,
-        "video_device": "",
-    }
 
 
 def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
@@ -110,7 +92,7 @@ def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
         monkeypatch, module,
         enable_ffmpeg="TRUE", publish_compressed="true",
         ffmpeg_config="/tmp/ffmpeg.yaml", config="/tmp/camera.yaml",
-        vendor_id="0x1bcf", width="640", frame_id="custom_frame",
+        width="640", frame_id="custom_frame",
         namespace="ignored_for_ffmpeg",
     )
     assert node["executable"] == "usb_camera_ffmpeg"
@@ -119,8 +101,7 @@ def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
     ) == "/tmp/ffmpeg.yaml"
     assert node["parameters"][1:] == [
         "/tmp/camera.yaml",
-        {"vendor_id": 0x1BCF, "width": 640, "frame_id": "custom_frame",
-         "video_device": ""},
+        {"width": 640, "frame_id": "custom_frame"},
     ]
     assert "namespace" not in node
     assert "publish_compressed" not in node["parameters"][2]
