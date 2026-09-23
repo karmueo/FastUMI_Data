@@ -152,6 +152,14 @@ class TrackerTeleopNode(Node):
             or self._home_timeout_s <= 0.0
         ):
             raise ValueError("home_timeout_s 必须为正有限数")
+        self._home_command_quiet_period_s = float(
+            self.get_parameter("home_command_quiet_period_s").value
+        )
+        if (
+            not np.isfinite(self._home_command_quiet_period_s)
+            or self._home_command_quiet_period_s <= 0.0
+        ):
+            raise ValueError("home_command_quiet_period_s 必须为正有限数")
         # 配置为空时延迟到首帧完整关节反馈，非空时锁定指定的回位目标。
         self._home_joint_positions = parse_home_joint_positions(
             self.get_parameter("home_joint_positions_rad").value
@@ -407,7 +415,10 @@ class TrackerTeleopNode(Node):
         self._latest_joint_positions: Optional[np.ndarray] = None
         self._latest_joint_monotonic = 0.0
         self._homing = False
+        # 待发命令存在时处于 CANFD 静默期，实际发布后才开始计算 MoveJ 超时。
         self._home_started_monotonic = 0.0
+        self._home_command_due_monotonic = 0.0
+        self._pending_home_command: Optional[Movej] = None
         self._latest_heartbeat_monotonic = 0.0
         self._mapping_basis: Optional[np.ndarray] = loaded_workspace_mapping
         self._workspace_calibration_samples: list[np.ndarray] = []
@@ -465,6 +476,7 @@ class TrackerTeleopNode(Node):
         self.declare_parameter("gripper_feedback_timeout_s", 0.25)
         self.declare_parameter("home_speed_percent", 20)
         self.declare_parameter("home_timeout_s", 30.0)
+        self.declare_parameter("home_command_quiet_period_s", 0.20)
         # ROS 的空列表可能为未设置值或字节数组，动态类型允许数值数组覆盖。
         # 参数只在启动时读取，因此禁止运行期间修改后产生配置与目标不一致。
         self.declare_parameter(
@@ -711,10 +723,15 @@ class TrackerTeleopNode(Node):
 
     def _home_result_callback(self, message: Bool) -> None:
         """处理 RM75 MoveJ 回位执行结果并解除回位状态。"""
-        if not self._homing:
+        if (
+            not self._homing
+            or self._pending_home_command is not None
+            or self._home_started_monotonic <= 0.0
+        ):
             return
         self._homing = False
         self._home_started_monotonic = 0.0
+        self._home_command_due_monotonic = 0.0
         if message.data:
             self.get_logger().info("机械臂已到达回位目标")
             self._publish_status("机械臂已到达回位目标，遥操保持暂停")
@@ -738,6 +755,8 @@ class TrackerTeleopNode(Node):
             self._move_stop_publisher.publish(Empty())
         self._homing = False
         self._home_started_monotonic = 0.0
+        self._home_command_due_monotonic = 0.0
+        self._pending_home_command = None
         self.get_logger().warning(f"机械臂回位已停止: {reason}")
         self._publish_status(f"机械臂回位已停止: {reason}；遥操保持暂停")
         return True
@@ -946,20 +965,22 @@ class TrackerTeleopNode(Node):
             return response
 
         self._cancel_workspace_calibration()
-        self._disable("收到回位请求", publish_hold=True)
+        # 回位前禁止补发旧保持点，避免它滞留到阻塞式 MoveJ 完成后执行。
+        self._disable("收到回位请求", publish_hold=False)
         self._clear_control_reference()
         home_positions = self._home_joint_positions.copy()
-        self._publish_joint_target(home_positions)
-        command = build_home_command(
+        self._pending_home_command = build_home_command(
             home_positions, self._home_speed_percent
         )
         self._homing = True
-        self._home_started_monotonic = now
-        self._home_publisher.publish(command)
+        self._home_started_monotonic = 0.0
+        self._home_command_due_monotonic = (
+            now + self._home_command_quiet_period_s
+        )
         response.success = True
         response.message = (
-            "已暂停遥操并开始回到目标位姿，"
-            f"MoveJ 速度={self._home_speed_percent}%"
+            "已暂停遥操，等待旧透传命令排空后回位，"
+            f"静默时间={self._home_command_quiet_period_s:g} 秒"
         )
         self.get_logger().warning(response.message)
         self._publish_status(response.message)
@@ -1083,6 +1104,22 @@ class TrackerTeleopNode(Node):
                 self._stop_homing("面板心跳超时")
             elif now - self._latest_joint_monotonic > self._feedback_timeout_s:
                 self._stop_homing("七轴反馈超时")
+            elif self._pending_home_command is not None:
+                if now >= self._home_command_due_monotonic:
+                    command = self._pending_home_command
+                    self._pending_home_command = None
+                    self._home_command_due_monotonic = 0.0
+                    self._home_started_monotonic = now
+                    self._publish_joint_target(
+                        np.asarray(command.joint, dtype=np.float64)
+                    )
+                    self._home_publisher.publish(command)
+                    message = (
+                        "旧透传命令静默期结束，已开始回到目标位姿，"
+                        f"MoveJ 速度={self._home_speed_percent}%"
+                    )
+                    self.get_logger().warning(message)
+                    self._publish_status(message)
             elif now - self._home_started_monotonic > self._home_timeout_s:
                 self._stop_homing("超过回位时间上限")
             return

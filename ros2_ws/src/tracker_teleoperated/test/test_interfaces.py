@@ -176,7 +176,10 @@ class HomeState:
         self._enabled = False
         self._homing = False
         self._home_started_monotonic = 0.0
+        self._home_command_due_monotonic = 0.0
+        self._pending_home_command = None
         self._home_timeout_s = 30.0
+        self._home_command_quiet_period_s = 0.20
         self._home_speed_percent = 20
         self._feedback_timeout_s = 0.25
         self._heartbeat_timeout_s = 0.50
@@ -202,6 +205,7 @@ class HomeState:
         self.joint_targets = []
         self.publish_hold = None
         self._status_publisher = FakePublisher()
+        self.commands = []
 
     def get_logger(self):
         """返回空实现日志器。"""
@@ -215,6 +219,13 @@ class HomeState:
     def _publish_joint_target(self, positions):
         """记录调试关节目标。"""
         self.joint_targets.append(np.asarray(positions).copy())
+
+    def _publish_command(self, positions):
+        """记录测试中意外发出的 CANFD 关节目标。"""
+        self.commands.append(np.asarray(positions).copy())
+
+    def _update_gripper(self, _enabled, _now):
+        """忽略回位状态测试无关的夹爪更新。"""
 
 
 class TrackerInputState(WorkspaceCalibrationState):
@@ -500,6 +511,7 @@ def test_configured_home_survives_feedback_and_is_used_for_movej():
     TrackerTeleopNode._joint_state_callback(state, make_joint_state(np.ones(7)))
 
     response = call_return_home(state)
+    send_pending_home(state)
 
     assert response.success
     assert state._home_joint_positions == pytest.approx(configured)
@@ -547,6 +559,7 @@ def test_default_yaml_uses_configured_home_target():
     assert parameters["gripper_command_topic"] == "/motion_control/gripper_command"
     assert parameters["gripper_estimate_timeout_s"] == pytest.approx(0.25)
     assert parameters["gripper_feedback_timeout_s"] == pytest.approx(0.25)
+    assert parameters["home_command_quiet_period_s"] == pytest.approx(0.20)
 
 
 def call_return_home(state):
@@ -556,8 +569,14 @@ def call_return_home(state):
     )
 
 
-def test_return_home_pauses_teleop_and_publishes_movej():
-    """验证启用状态下回位会先暂停并发送一次 MoveJ。"""
+def send_pending_home(state):
+    """越过透传静默期并执行一次控制周期。"""
+    state._home_command_due_monotonic = time.monotonic() - 1.0
+    TrackerTeleopNode._control_tick(state)
+
+
+def test_return_home_pauses_then_publishes_one_movej_after_quiet_period():
+    """验证回位先静默排空旧透传，再发送且只发送一次 MoveJ。"""
     state = HomeState()
     state._enabled = True
     state._workspace_calibration_samples.append(make_pose())
@@ -565,11 +584,24 @@ def test_return_home_pauses_teleop_and_publishes_movej():
 
     response = call_return_home(state)
 
-    assert response.success and "开始回到" in response.message
+    assert response.success and "等待旧透传命令排空" in response.message
     assert not state._enabled
     assert state._homing
-    assert state.publish_hold is True
+    assert state.publish_hold is False
+    assert state._home_started_monotonic == 0.0
+    assert state._pending_home_command is not None
     assert state._workspace_calibration_samples == []
+    assert state.joint_targets == []
+    assert state._home_publisher.messages == []
+
+    TrackerTeleopNode._control_tick(state)
+    assert state._home_publisher.messages == []
+
+    send_pending_home(state)
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._pending_home_command is None
+    assert state._home_started_monotonic > 0.0
     assert state.joint_targets[0] == pytest.approx(state._home_joint_positions)
     assert len(state._home_publisher.messages) == 1
     command = state._home_publisher.messages[0]
@@ -578,6 +610,32 @@ def test_return_home_pauses_teleop_and_publishes_movej():
     assert state._reference_tracker_pose is None
     assert state._reference_eef_pose is None
     assert state._mapping_basis == pytest.approx(original_mapping)
+
+
+def test_stale_home_result_is_ignored_during_quiet_period():
+    """验证静默排空阶段到达的旧 MoveJ 结果不会取消待发回位。"""
+    state = HomeState()
+    call_return_home(state)
+
+    TrackerTeleopNode._home_result_callback(state, Bool(data=True))
+
+    assert state._homing
+    assert state._pending_home_command is not None
+    assert state._home_publisher.messages == []
+
+
+def test_completed_home_stays_paused_without_new_canfd_commands():
+    """验证回位完成后控制周期保持暂停且不会恢复旧透传。"""
+    state = HomeState()
+    call_return_home(state)
+    send_pending_home(state)
+
+    TrackerTeleopNode._home_result_callback(state, Bool(data=True))
+    TrackerTeleopNode._control_tick(state)
+
+    assert not state._homing
+    assert not state._enabled
+    assert state.commands == []
 
 
 def test_return_home_rejects_missing_or_stale_joint_feedback():
@@ -597,9 +655,9 @@ def test_return_home_rejects_missing_or_stale_joint_feedback():
 
 
 def test_pause_stops_homing_and_enable_is_rejected_while_homing():
-    """验证回位期间禁止启用，暂停会发布规划轨迹停止命令。"""
+    """验证静默阶段禁止启用，暂停会取消待发 MoveJ 并停止运动。"""
     state = HomeState()
-    state._homing = True
+    call_return_home(state)
     enable = SetBool.Request()
     enable.data = True
     reject = TrackerTeleopNode._set_enabled_callback(
@@ -614,6 +672,8 @@ def test_pause_stops_homing_and_enable_is_rejected_while_homing():
     assert not reject.success and "正在回位" in reject.message
     assert stopped.success and "回位已停止" in stopped.message
     assert not state._homing
+    assert state._pending_home_command is None
+    assert state._home_publisher.messages == []
     assert len(state._move_stop_publisher.messages) == 1
 
 
@@ -637,10 +697,12 @@ def test_home_result_and_timeout_leave_homing_state():
     """验证驱动结果或超时都会解除回位状态，超时同时请求停止轨迹。"""
     completed = HomeState()
     completed._homing = True
+    completed._home_started_monotonic = time.monotonic()
     TrackerTeleopNode._home_result_callback(completed, Bool(data=True))
 
     failed = HomeState()
     failed._homing = True
+    failed._home_started_monotonic = time.monotonic()
     TrackerTeleopNode._home_result_callback(failed, Bool(data=False))
 
     timed_out = HomeState()
@@ -654,16 +716,47 @@ def test_home_result_and_timeout_leave_homing_state():
     assert len(timed_out._move_stop_publisher.messages) == 1
 
 
-def test_joint_feedback_loss_stops_homing():
-    """验证回位期间关节反馈中断会请求停止规划轨迹。"""
+def test_home_timeout_starts_when_movej_is_actually_published(monkeypatch):
+    """验证静默等待不占用 MoveJ 的执行超时时间。"""
+    now = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
     state = HomeState()
-    state._homing = True
-    state._home_started_monotonic = time.monotonic()
+    state._feedback_timeout_s = 100.0
+    state._heartbeat_timeout_s = 100.0
+
+    call_return_home(state)
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._homing
+    assert state._home_started_monotonic == 0.0
+    assert state._home_publisher.messages == []
+
+    now[0] = 100.21
+    TrackerTeleopNode._control_tick(state)
+    assert state._home_started_monotonic == pytest.approx(100.21)
+    assert len(state._home_publisher.messages) == 1
+
+    now[0] = 130.20
+    TrackerTeleopNode._control_tick(state)
+    assert state._homing
+
+    now[0] = 130.22
+    TrackerTeleopNode._control_tick(state)
+    assert not state._homing
+    assert len(state._move_stop_publisher.messages) == 1
+
+
+def test_joint_feedback_loss_stops_homing():
+    """验证静默阶段关节反馈中断会取消待发命令并请求停止。"""
+    state = HomeState()
+    call_return_home(state)
     state._latest_joint_monotonic = time.monotonic() - 1.0
 
     TrackerTeleopNode._control_tick(state)
 
     assert not state._homing
+    assert state._pending_home_command is None
+    assert state._home_publisher.messages == []
     assert len(state._move_stop_publisher.messages) == 1
 
 
@@ -918,11 +1011,13 @@ def test_home_requires_panel_heartbeat():
 
 
 def test_panel_loss_stops_active_home():
-    """回位中面板失联立即发布停止命令。"""
+    """静默阶段面板失联立即取消待发回位并发布停止命令。"""
     state = HomeState()
-    state._homing = True
+    call_return_home(state)
     state._latest_heartbeat_monotonic = 0.0
     TrackerTeleopNode._control_tick(state)
     assert not state._homing
+    assert state._pending_home_command is None
+    assert state._home_publisher.messages == []
     assert len(state._move_stop_publisher.messages) == 1
     assert "面板心跳" in state._status_publisher.messages[-1].data

@@ -1,7 +1,12 @@
 """验证相机帧序号 ROS 2 消息的公开字段。"""
 
 from fastumi_interfaces.msg import FrameSequence, RecordingInfo, RecordingStatus
-from fastumi_interfaces.srv import ListRecordings, StartRecording, StopRecording
+from fastumi_interfaces.srv import (
+    DeleteRecording,
+    ListRecordings,
+    StartRecording,
+    StopRecording,
+)
 
 
 def test_frame_sequence_exposes_header_and_sdk_sequence() -> None:
@@ -23,10 +28,12 @@ def test_recording_interfaces_preserve_identity_and_pagination() -> None:
         state="saving", recording_id=info.recording_id, current=info)
     start = StartRecording.Request(dir_name="task", name="sample")
     stop = StopRecording.Request(recording_id=info.recording_id)
+    delete = DeleteRecording.Request(recording_id=info.recording_id)
     page = ListRecordings.Request(offset=100, limit=100)
 
     assert status.current.relative_path == "task/sample/episode_3"
     assert status.current.image_frames == 42
     assert (start.dir_name, start.name) == ("task", "sample")
     assert stop.recording_id == status.recording_id
+    assert delete.recording_id == status.recording_id
     assert (page.offset, page.limit) == (100, 100)

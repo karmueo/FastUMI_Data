@@ -50,6 +50,24 @@ TEST(TeleopPanel, ShortcutsAndRepeat)
   EXPECT_EQ(spy.takeFirst().at(0).toString(), "calibrate");
   QTest::keyClick(&panel, Qt::Key_C, Qt::ControlModifier);
   EXPECT_EQ(spy.count(), 0);
+  QTest::keyClick(&panel, Qt::Key_Return);
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.takeFirst().at(0).toString(), "combined");
+  QTest::keyClick(&panel, Qt::Key_Enter);
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.takeFirst().at(0).toString(), "combined");
+  QKeyEvent enter_repeat(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, "\r", true);  ///< 回车长按事件。
+  QApplication::sendEvent(&panel, &enter_repeat);
+  EXPECT_EQ(spy.count(), 0);
+  QTest::keyClick(&panel, Qt::Key_Backspace);
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.takeFirst().at(0).toString(), "discard");
+  QKeyEvent backspace_repeat(
+    QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier, "", true);  ///< Backspace 长按事件。
+  QApplication::sendEvent(&panel, &backspace_repeat);
+  EXPECT_EQ(spy.count(), 0);
+  QTest::keyClick(&panel, Qt::Key_B);
+  EXPECT_EQ(spy.count(), 0);
 }
 
 /** @brief 输入框与其他顶层窗口保持原生按键行为，不触发运动或录制。 */
@@ -66,7 +84,9 @@ TEST(TeleopPanel, EditorsAndOutsideFocus)
   edit.setFocus();
   QApplication::processEvents();
   QTest::keyClicks(&edit, "ach sbq");
-  EXPECT_EQ(edit.text(), "ach sbq");
+  QTest::keyClick(&edit, Qt::Key_Backspace);
+  QTest::keyClick(&edit, Qt::Key_Return);
+  EXPECT_EQ(edit.text(), "ach sb");
   EXPECT_EQ(spy.count(), 0);
   outside.show();
   outside.activateWindow();
@@ -98,6 +118,9 @@ TEST(TeleopPanel, WholeRvizWindowAndHiddenPanel)
   QTest::keyClick(view, Qt::Key_A);
   ASSERT_EQ(spy.count(), 1);
   EXPECT_EQ(spy.takeFirst().at(0).toString(), "record");
+  QTest::keyClick(view, Qt::Key_Backspace);
+  ASSERT_EQ(spy.count(), 1);
+  EXPECT_EQ(spy.takeFirst().at(0).toString(), "discard");
 }
 
 /** @brief 浮动停靠窗口仍属于同一 RViz，其普通控件可直接使用快捷键。 */

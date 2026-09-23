@@ -94,6 +94,8 @@ TeleopPanel::TeleopPanel(QWidget * parent) : rviz_common::Panel(parent)
   /** @brief 面板主布局。 */
   auto * layout = new QVBoxLayout(this);
   hint_ = new QLabel("RViz 窗口内可直接使用快捷键；输入框和对话框中不触发。\n"
+    "回车：开始遥操和录制；再次按下则停止录制并回位。\n"
+    "Backspace：取消当前录制并回到初始位姿。\n"
     "workspace 标定：起点 C → 向上移动 C → 向前移动 C。\n"
     "reference_eef：跟踪稳定后按空格建立参考。", this);
   hint_->setWordWrap(true);
@@ -125,7 +127,7 @@ TeleopPanel::TeleopPanel(QWidget * parent) : rviz_common::Panel(parent)
   const std::vector<std::pair<QString, QString>> actions = {
     {"start_all", "启动全部"}, {"stop_all", "停止全部"}, {"toggle", "启用遥操（空格）"},
     {"pause", "暂停／取消操作（S）"}, {"calibrate", "标定采样（C）"}, {"home", "回位（H）"},
-    {"record", "开始录制（A）"}, {"discard", "丢弃本轮（B）"}, {"quit", "保存并退出（Q）"}};
+    {"record", "开始录制（A）"}, {"discard", "取消并回位（Backspace）"}, {"quit", "保存并退出（Q）"}};
   for (size_t i = 0; i < actions.size(); ++i) {
     /** @brief 本项按钮及固定操作标识。 */
     auto * button = new QPushButton(actions[i].second, this);
@@ -273,9 +275,10 @@ bool TeleopPanel::eventFilter(QObject * watched, QEvent * event)
   auto * key = static_cast<QKeyEvent *>(event);
   if (key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {return false;}
   /** @brief 快捷键映射到与按钮相同的固定动作。 */
-  const std::map<int, QString> actions = {{Qt::Key_Space, "toggle"}, {Qt::Key_S, "pause"},
+  const std::map<int, QString> actions = {{Qt::Key_Return, "combined"}, {Qt::Key_Enter, "combined"},
+    {Qt::Key_Space, "toggle"}, {Qt::Key_S, "pause"},
     {Qt::Key_C, "calibrate"}, {Qt::Key_H, "home"}, {Qt::Key_A, "record"},
-    {Qt::Key_B, "discard"}, {Qt::Key_Q, "quit"}};
+    {Qt::Key_Backspace, "discard"}, {Qt::Key_Q, "quit"}};
   if (!actions.count(key->key())) {return false;}
   event->accept();
   if (event->type() == QEvent::KeyPress && !key->isAutoRepeat()) {
@@ -289,10 +292,14 @@ void TeleopPanel::dispatch(const QString & action)
 {
   refresh();
   if (!node_ || (buttons_.count(action) && !buttons_[action]->isEnabled())) {return;}
-  if (action == "toggle" || action == "pause") {
+  if (action == "combined") {
+    combinedAction();
+  } else if (action == "toggle" || action == "pause") {
     setBool("set_enabled", action == "toggle" && !enabled_);
-  } else if (action == "record" || action == "discard") {
+  } else if (action == "record") {
     recordingAction(action);
+  } else if (action == "discard") {
+    discardCombinedAction();
   } else {
     /** @brief 将用户操作映射为固定服务，避免界面拼接任意命令。 */
     const std::map<QString, std::string> services = {{"start_all", "start_all"}, {"stop_all", "stop_all"},
@@ -408,6 +415,402 @@ void TeleopPanel::recordingAction(const QString & action)
     });
 }
 
+/** @copydoc TeleopPanel::combinedAction */
+void TeleopPanel::combinedAction()
+{
+  if (combined_operation_ != CombinedOperation::Idle) {
+    request_status_->setText("回车组合操作正在处理中，请勿重复触发");
+    return;
+  }
+  if (record_state_ == "idle") {
+    if (!buttons_["toggle"]->isEnabled() || !buttons_["record"]->isEnabled()) {
+      request_status_->setText("回车启动不可用，请检查遥操、录像、相机及管理节点状态");
+      return;
+    }
+    startCombinedAction();
+    return;
+  }
+  if (record_state_ == "recording") {
+    if (!buttons_["home"]->isEnabled() || !buttons_["record"]->isEnabled()) {
+      request_status_->setText("回车停止不可用，请检查回位、录像及管理节点状态");
+      return;
+    }
+    stopCombinedAction();
+    return;
+  }
+  request_status_->setText(record_state_ == "saving" ?
+    "录像正在保存，请等待完成后再按回车" : "录像状态未知，暂时不能执行回车组合操作");
+}
+
+/** @copydoc TeleopPanel::startCombinedAction */
+void TeleopPanel::startCombinedAction()
+{
+  const auto sequence = ++combined_sequence_;  ///< 本次组合启动代次。
+  combined_operation_ = CombinedOperation::Starting;
+  combined_control_done_ = false;
+  combined_control_success_ = false;
+  combined_record_done_ = false;
+  combined_record_success_ = false;
+  combined_fallback_done_ = false;
+  combined_fallback_started_ = false;
+  combined_fallback_success_ = false;
+  combined_message_.clear();
+  combined_recording_id_.clear();
+  record_pending_ = true;
+  record_deadline_ = Clock::now() + std::chrono::seconds(3);
+  combined_deadline_ = Clock::now() + std::chrono::seconds(5);
+  request_status_->setText("正在同时启用遥操和开始录制…");
+
+  auto enable_request = std::make_shared<std_srvs::srv::SetBool::Request>();  ///< 强制启用请求。
+  enable_request->data = true;
+  booleans_.at("set_enabled")->async_send_request(enable_request,
+    [this, sequence](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+      if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Starting) {return;}
+      const auto result = future.get();  ///< 遥操启用响应。
+      combined_control_done_ = true;
+      combined_control_success_ = result->success;
+      if (!result->success) {
+        combined_message_ = "启用遥操失败：" + QString::fromStdString(result->message);
+      }
+      evaluateCombinedStart(sequence);
+    });
+
+  auto record_request = std::make_shared<fastumi_interfaces::srv::StartRecording::Request>();  ///< 录制启动请求。
+  record_request->dir_name = recording_dir_name_;
+  record_request->name = recording_name_;
+  recording_start_->async_send_request(record_request,
+    [this, sequence](rclcpp::Client<fastumi_interfaces::srv::StartRecording>::SharedFuture future) {
+      if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Starting) {return;}
+      const auto result = future.get();  ///< 录制启动响应。
+      combined_record_done_ = true;
+      combined_record_success_ = result->success;
+      if (result->success) {
+        combined_recording_id_ = result->recording_id;
+      } else {
+        if (!combined_message_.isEmpty()) {combined_message_ += "；";}
+        combined_message_ += "开始录制失败：" + QString::fromStdString(result->message);
+      }
+      evaluateCombinedStart(sequence);
+    });
+  refresh();
+}
+
+/** @copydoc TeleopPanel::evaluateCombinedStart */
+void TeleopPanel::evaluateCombinedStart(unsigned sequence)
+{
+  if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Starting ||
+    !combined_control_done_ || !combined_record_done_) {return;}
+  if (combined_control_success_ && combined_record_success_) {
+    finishCombinedAction("遥操和录制已同时启动");
+    return;
+  }
+  beginCombinedRollback(sequence, combined_message_);
+}
+
+/** @copydoc TeleopPanel::beginCombinedRollback */
+void TeleopPanel::beginCombinedRollback(unsigned sequence, const QString & reason)
+{
+  if (sequence != combined_sequence_) {return;}
+  const bool recording_started = combined_record_success_;  ///< 启动成功且需要回滚的录像。
+  combined_operation_ = CombinedOperation::RollingBack;
+  combined_message_ = reason.isEmpty() ? "组合启动失败" : reason;
+  combined_control_done_ = false;
+  combined_control_success_ = false;
+  combined_record_done_ = !recording_started;
+  combined_record_success_ = !recording_started;
+  if (!recording_started) {record_pending_ = false;}
+  combined_deadline_ = Clock::now() + std::chrono::seconds(5);
+  request_status_->setText(combined_message_ + "；正在恢复安全状态…");
+
+  auto pause_request = std::make_shared<std_srvs::srv::SetBool::Request>();  ///< 回滚暂停请求。
+  pause_request->data = false;
+  auto pause_client = booleans_.at("set_enabled");  ///< 遥操启停客户端。
+  if (!pause_client->service_is_ready()) {
+    combined_control_done_ = true;
+    combined_message_ += "；暂停服务未就绪";
+  } else {
+    pause_client->async_send_request(pause_request,
+      [this, sequence](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+        if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::RollingBack) {return;}
+        const auto result = future.get();  ///< 回滚暂停响应。
+        combined_control_done_ = true;
+        combined_control_success_ = result->success;
+        if (!result->success) {
+          combined_message_ += "；暂停遥操失败：" + QString::fromStdString(result->message);
+        }
+        evaluateCombinedRollback(sequence);
+      });
+  }
+
+  if (recording_started) {
+    if (!recording_stop_ || !recording_stop_->service_is_ready()) {
+      combined_record_done_ = true;
+      combined_record_success_ = false;
+      record_pending_ = false;
+      combined_message_ += "；停止录像服务未就绪";
+    } else {
+      auto stop_request = std::make_shared<fastumi_interfaces::srv::StopRecording::Request>();  ///< 回滚停止请求。
+      stop_request->recording_id = combined_recording_id_;
+      recording_stop_->async_send_request(stop_request,
+        [this, sequence](rclcpp::Client<fastumi_interfaces::srv::StopRecording>::SharedFuture future) {
+          if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::RollingBack) {return;}
+          const auto result = future.get();  ///< 回滚停止响应。
+          combined_record_done_ = true;
+          combined_record_success_ = result->success || result->code == "ALREADY_STOPPING" ||
+            result->code == "ALREADY_SAVED";
+          if (!combined_record_success_) {
+            record_pending_ = false;
+            combined_message_ += "；停止录像失败：" + QString::fromStdString(result->message);
+          }
+          evaluateCombinedRollback(sequence);
+        });
+    }
+  }
+  evaluateCombinedRollback(sequence);
+}
+
+/** @copydoc TeleopPanel::evaluateCombinedRollback */
+void TeleopPanel::evaluateCombinedRollback(unsigned sequence)
+{
+  if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::RollingBack ||
+    !combined_control_done_ || !combined_record_done_) {return;}
+  QString result = "组合启动失败：" + combined_message_;  ///< 最终回滚结果。
+  result += combined_control_success_ ? "；遥操已暂停" : "；遥操暂停未确认";
+  if (!combined_recording_id_.empty()) {
+    result += combined_record_success_ ? "；本次录像已停止并进入保存" : "；本次录像停止未确认";
+  }
+  finishCombinedAction(result);
+}
+
+/** @copydoc TeleopPanel::stopCombinedAction */
+void TeleopPanel::stopCombinedAction()
+{
+  const auto sequence = ++combined_sequence_;  ///< 本次组合停止代次。
+  const auto recording_id = recording_id_;  ///< 必须停止的当前录制 UUID。
+  combined_operation_ = CombinedOperation::Stopping;
+  combined_control_done_ = false;
+  combined_control_success_ = false;
+  combined_record_done_ = false;
+  combined_record_success_ = false;
+  combined_fallback_done_ = false;
+  combined_fallback_started_ = false;
+  combined_fallback_success_ = false;
+  combined_message_.clear();
+  record_pending_ = true;
+  record_deadline_ = Clock::now() + std::chrono::seconds(3);
+  combined_deadline_ = Clock::now() + std::chrono::seconds(5);
+  request_status_->setText("正在停止录制并回到初始位姿…");
+
+  auto stop_request = std::make_shared<fastumi_interfaces::srv::StopRecording::Request>();  ///< 录像停止请求。
+  stop_request->recording_id = recording_id;
+  recording_stop_->async_send_request(stop_request,
+    [this, sequence](rclcpp::Client<fastumi_interfaces::srv::StopRecording>::SharedFuture future) {
+      if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Stopping) {return;}
+      const auto result = future.get();  ///< 录像停止响应。
+      combined_record_done_ = true;
+      combined_record_success_ = result->success || result->code == "ALREADY_STOPPING" ||
+        result->code == "ALREADY_SAVED";
+      if (!combined_record_success_) {
+        record_pending_ = false;
+        combined_message_ = "停止录像失败：" + QString::fromStdString(result->message);
+      }
+      evaluateCombinedStop(sequence);
+    });
+
+  triggers_.at("return_home")->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>(),
+    [this, sequence](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+      if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Stopping) {return;}
+      const auto result = future.get();  ///< 回位响应。
+      combined_control_done_ = true;
+      combined_control_success_ = result->success;
+      if (!result->success) {
+        if (!combined_message_.isEmpty()) {combined_message_ += "；";}
+        combined_message_ += "回位失败：" + QString::fromStdString(result->message);
+      }
+      evaluateCombinedStop(sequence);
+    });
+  refresh();
+}
+
+/** @copydoc TeleopPanel::evaluateCombinedStop */
+void TeleopPanel::evaluateCombinedStop(unsigned sequence)
+{
+  if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Stopping) {return;}
+  if (combined_control_done_ && !combined_control_success_ && !combined_fallback_started_) {
+    combined_fallback_started_ = true;
+    auto pause_client = booleans_.at("set_enabled");  ///< 回位失败后的暂停客户端。
+    if (!pause_client->service_is_ready()) {
+      combined_fallback_done_ = true;
+      combined_message_ += "；暂停兜底服务未就绪";
+    } else {
+      auto pause_request = std::make_shared<std_srvs::srv::SetBool::Request>();  ///< 暂停兜底请求。
+      pause_request->data = false;
+      pause_client->async_send_request(pause_request,
+        [this, sequence](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+          if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Stopping) {return;}
+          const auto result = future.get();  ///< 暂停兜底响应。
+          combined_fallback_done_ = true;
+          combined_fallback_success_ = result->success;
+          if (!result->success) {
+            combined_message_ += "；暂停遥操失败：" + QString::fromStdString(result->message);
+          }
+          evaluateCombinedStop(sequence);
+        });
+      return;
+    }
+  }
+  if (!combined_control_done_ || !combined_record_done_) {return;}
+  if (!combined_control_success_ && !combined_fallback_done_) {return;}
+
+  QString result;  ///< 组合停止的最终状态说明。
+  if (combined_record_success_ && combined_control_success_) {
+    result = "录像已停止并进入保存，机械臂已暂停遥操并开始回位";
+  } else {
+    result = combined_message_.isEmpty() ? "回车停止操作未完全成功" : combined_message_;
+    if (!combined_control_success_ && combined_fallback_success_) {result += "；遥操已暂停";}
+    if (combined_record_success_) {result += "；录像已停止并进入保存";}
+  }
+  finishCombinedAction(result);
+}
+
+/** @copydoc TeleopPanel::discardCombinedAction */
+void TeleopPanel::discardCombinedAction()
+{
+  if (combined_operation_ != CombinedOperation::Idle) {
+    request_status_->setText("组合操作正在处理中，请勿重复触发");
+    return;
+  }
+  if (record_state_ != "recording") {
+    request_status_->setText(record_state_ == "saving" ?
+      "录像正在保存，不能取消当前数据" : "当前没有正在录制的数据");
+    return;
+  }
+  if (!buttons_["discard"]->isEnabled()) {
+    request_status_->setText("取消并回位不可用，请检查回位、录像及管理节点状态");
+    return;
+  }
+
+  const auto sequence = ++combined_sequence_;  ///< 本次组合取消代次。
+  const auto recording_id = recording_id_;  ///< 必须取消的当前录制 UUID。
+  combined_operation_ = CombinedOperation::Discarding;
+  combined_control_done_ = false;
+  combined_control_success_ = false;
+  combined_record_done_ = false;
+  combined_record_success_ = false;
+  combined_fallback_done_ = false;
+  combined_fallback_started_ = false;
+  combined_fallback_success_ = false;
+  combined_message_.clear();
+  record_pending_ = true;
+  record_deadline_ = Clock::now() + std::chrono::seconds(3);
+  combined_deadline_ = Clock::now() + std::chrono::seconds(5);
+  request_status_->setText("正在取消当前录制并回到初始位姿…");
+
+  auto cancel_request = std::make_shared<fastumi_interfaces::srv::CancelRecording::Request>();  ///< 录像取消请求。
+  cancel_request->recording_id = recording_id;
+  recording_cancel_->async_send_request(cancel_request,
+    [this, sequence](rclcpp::Client<fastumi_interfaces::srv::CancelRecording>::SharedFuture future) {
+      if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Discarding) {return;}
+      const auto result = future.get();  ///< 录像取消响应。
+      combined_record_done_ = true;
+      combined_record_success_ = result->success;
+      if (!result->success) {
+        record_pending_ = false;
+        combined_message_ = "取消录像失败：" + QString::fromStdString(result->message);
+      }
+      evaluateCombinedDiscard(sequence);
+    });
+
+  triggers_.at("return_home")->async_send_request(std::make_shared<std_srvs::srv::Trigger::Request>(),
+    [this, sequence](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+      if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Discarding) {return;}
+      const auto result = future.get();  ///< 回位响应。
+      combined_control_done_ = true;
+      combined_control_success_ = result->success;
+      if (!result->success) {
+        if (!combined_message_.isEmpty()) {combined_message_ += "；";}
+        combined_message_ += "回位失败：" + QString::fromStdString(result->message);
+      }
+      evaluateCombinedDiscard(sequence);
+    });
+  refresh();
+}
+
+/** @copydoc TeleopPanel::evaluateCombinedDiscard */
+void TeleopPanel::evaluateCombinedDiscard(unsigned sequence)
+{
+  if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Discarding) {return;}
+  if (combined_control_done_ && !combined_control_success_ && !combined_fallback_started_) {
+    combined_fallback_started_ = true;
+    auto pause_client = booleans_.at("set_enabled");  ///< 回位失败后的暂停客户端。
+    if (!pause_client->service_is_ready()) {
+      combined_fallback_done_ = true;
+      combined_message_ += "；暂停兜底服务未就绪";
+    } else {
+      auto pause_request = std::make_shared<std_srvs::srv::SetBool::Request>();  ///< 暂停兜底请求。
+      pause_request->data = false;
+      pause_client->async_send_request(pause_request,
+        [this, sequence](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
+          if (sequence != combined_sequence_ || combined_operation_ != CombinedOperation::Discarding) {return;}
+          const auto result = future.get();  ///< 暂停兜底响应。
+          combined_fallback_done_ = true;
+          combined_fallback_success_ = result->success;
+          if (!result->success) {
+            combined_message_ += "；暂停遥操失败：" + QString::fromStdString(result->message);
+          }
+          evaluateCombinedDiscard(sequence);
+        });
+      return;
+    }
+  }
+  if (!combined_control_done_ || !combined_record_done_) {return;}
+  if (!combined_control_success_ && !combined_fallback_done_) {return;}
+
+  QString result;  ///< 组合取消的最终状态说明。
+  if (combined_record_success_ && combined_control_success_) {
+    result = "当前录像已取消，机械臂已暂停遥操并开始回位";
+  } else {
+    result = combined_message_.isEmpty() ? "取消并回位操作未完全成功" : combined_message_;
+    if (!combined_control_success_ && combined_fallback_success_) {result += "；遥操已暂停";}
+    if (combined_record_success_) {result += "；当前录像已取消";}
+    if (combined_control_success_) {result += "；机械臂已开始回位";}
+  }
+  finishCombinedAction(result);
+}
+
+/** @copydoc TeleopPanel::recoverDiscardAfterTimeout */
+void TeleopPanel::recoverDiscardAfterTimeout()
+{
+  if (!recording_status_client_ || !recording_status_client_->service_is_ready()) {
+    request_status_->setText("取消并回位响应超时；已请求暂停遥操，录制状态查询服务未就绪");
+    return;
+  }
+  const auto sequence = ++recording_sequence_;  ///< 本次超时恢复查询代次。
+  recording_status_client_->async_send_request(
+    std::make_shared<fastumi_interfaces::srv::GetRecordingStatus::Request>(),
+    [this, sequence](rclcpp::Client<fastumi_interfaces::srv::GetRecordingStatus>::SharedFuture future) {
+      if (sequence != recording_sequence_) {return;}
+      const auto status = future.get()->status;  ///< 远端权威录制状态。
+      updateRecordingStatus(status);
+      if (status.state == "recording" && recording_cancel_ && recording_cancel_->service_is_ready()) {
+        request_status_->setText("取消并回位响应超时；已暂停遥操，正在重试取消当前录像");
+        recordingAction("discard");
+      } else if (status.state == "recording") {
+        request_status_->setText("取消并回位响应超时；已暂停遥操，取消服务未就绪");
+      } else {
+        request_status_->setText("取消并回位响应超时；已暂停遥操，远端录像已不在录制状态");
+      }
+    });
+}
+
+/** @copydoc TeleopPanel::finishCombinedAction */
+void TeleopPanel::finishCombinedAction(const QString & message)
+{
+  combined_operation_ = CombinedOperation::Idle;
+  request_status_->setText(message);
+  refresh();
+}
+
 /** @copydoc TeleopPanel::configureRecording */
 void TeleopPanel::configureRecording(
   const std::string & prefix_value, const std::string & dir_name, const std::string & name)
@@ -490,6 +893,23 @@ void TeleopPanel::refresh()
     request_status_->setText("录制状态未变化，正在查询远端权威状态");
     queryRecordingStatus();
   }
+  if (combined_operation_ != CombinedOperation::Idle && now > combined_deadline_) {
+    const auto timed_out_operation = combined_operation_;  ///< 用于选择对应的安全恢复动作。
+    ++combined_sequence_;
+    combined_operation_ = CombinedOperation::Idle;
+    if (node_ && booleans_.count("set_enabled") &&
+      booleans_.at("set_enabled")->service_is_ready()) {
+      setBool("set_enabled", false);
+    }
+    if (timed_out_operation == CombinedOperation::Discarding) {
+      recoverDiscardAfterTimeout();
+    } else if (record_state_ == "recording" && recording_stop_ && recording_stop_->service_is_ready()) {
+      recordingAction("record");
+    }
+    if (timed_out_operation != CombinedOperation::Discarding) {
+      request_status_->setText("回车组合操作响应超时；已请求暂停遥操并停止当前录像，请核对状态");
+    }
+  }
   /** @brief 管理诊断必须持续更新，断连后禁止新增操作。 */
   const bool manager = node_ && now - manager_seen_ < std::chrono::seconds(2);
   /** @brief 暂停操作只要求本会话归属，不依赖周期状态是否新鲜。 */
@@ -502,7 +922,9 @@ void TeleopPanel::refresh()
     component_values_.count("recorder") &&
     component_values_.at("recorder").at("recording_enabled") == "true";
   /** @brief 普通操作需要管理器空闲且没有在途请求。 */
-  const bool available = manager && !pending_ && !manager_busy_;
+  const bool combined_idle = combined_operation_ == CombinedOperation::Idle;
+  /** @brief 普通操作在组合流程中保持禁用，避免交叉修改同一状态。 */
+  const bool available = manager && !pending_ && !manager_busy_ && combined_idle;
   if (!manager && manager_seen_ != Clock::time_point{}) {
     request_status_->setText("管理节点状态超时，组件状态已过期");
     for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
@@ -515,7 +937,8 @@ void TeleopPanel::refresh()
     buttons_[action]->setEnabled(manager && available);
   }
   if (node_) {
-    buttons_["pause"]->setEnabled(owns_control && booleans_.at("set_enabled")->service_is_ready());
+    buttons_["pause"]->setEnabled(
+      combined_idle && owns_control && booleans_.at("set_enabled")->service_is_ready());
     buttons_["toggle"]->setEnabled(control && available && booleans_.at("set_enabled")->service_is_ready());
     buttons_["calibrate"]->setEnabled(control && available && triggers_.at("calibrate_workspace")->service_is_ready());
     buttons_["home"]->setEnabled(control && available && triggers_.at("return_home")->service_is_ready());
@@ -527,7 +950,8 @@ void TeleopPanel::refresh()
     ((record_state_ == "recording" && stop_ready) || (record_state_ == "idle" && start_ready)) &&
     !video_sources_->umiBusy());
   buttons_["discard"]->setEnabled(
-    record && available && !record_pending_ && record_state_ == "recording" && cancel_ready);
+    record && control && available && !record_pending_ && record_state_ == "recording" && cancel_ready &&
+    triggers_.at("return_home")->service_is_ready());
   buttons_["toggle"]->setText(enabled_ ? "暂停遥操（空格）" : "启用遥操（空格）");
   buttons_["record"]->setText(record_state_ == "recording" ? "停止并保存（A）" :
     record_state_ == "saving" ? "保存中…" : "开始录制（A）");

@@ -67,6 +67,16 @@ protected:
   bool eventFilter(QObject * watched, QEvent * event) override;
 
 private:
+  /** @brief 回车组合操作的内部执行阶段。 */
+  enum class CombinedOperation
+  {
+    Idle,       ///< 当前没有组合操作。
+    Starting,   ///< 正在同时启用遥操和开始录制。
+    Stopping,   ///< 正在停止录制并执行回位。
+    Discarding, ///< 正在取消当前录制并执行回位。
+    RollingBack ///< 启动部分失败后正在恢复安全状态。
+  };
+
   /** @brief 在 GUI 线程处理操作意图。 @param action 固定操作标识。 */
   void dispatch(const QString & action);
   /** @brief 异步调用 Trigger。 @param service 相对服务名称。 */
@@ -75,6 +85,28 @@ private:
   void setBool(const std::string & service, bool value);
   /** @brief 按当前权威状态调用开始、停止或取消服务。 @param action record 或 discard。 */
   void recordingAction(const QString & action);
+  /** @brief 按远端录制状态启动或停止回车组合流程。 */
+  void combinedAction();
+  /** @brief 同时请求启用遥操和开始录制。 */
+  void startCombinedAction();
+  /** @brief 检查组合启动的两个响应，并在部分失败时开始回滚。 @param sequence 组合请求代次。 */
+  void evaluateCombinedStart(unsigned sequence);
+  /** @brief 暂停遥操并停止本次已启动的录像。 @param sequence 组合请求代次。 @param reason 启动失败原因。 */
+  void beginCombinedRollback(unsigned sequence, const QString & reason);
+  /** @brief 检查组合启动回滚是否完成。 @param sequence 组合请求代次。 */
+  void evaluateCombinedRollback(unsigned sequence);
+  /** @brief 同时请求停止录制和回到初始位姿。 */
+  void stopCombinedAction();
+  /** @brief 检查组合停止结果，并在回位失败时补发暂停。 @param sequence 组合请求代次。 */
+  void evaluateCombinedStop(unsigned sequence);
+  /** @brief 同时请求取消当前录制和回到初始位姿。 */
+  void discardCombinedAction();
+  /** @brief 检查组合取消结果，并在回位失败时补发暂停。 @param sequence 组合请求代次。 */
+  void evaluateCombinedDiscard(unsigned sequence);
+  /** @brief 组合取消超时后查询权威状态，并在仍录制时重试取消。 */
+  void recoverDiscardAfterTimeout();
+  /** @brief 结束当前组合操作并刷新界面。 @param message 显示给操作者的最终结果。 */
+  void finishCombinedAction(const QString & message);
   /** @brief 查询远端权威录制状态，用于请求超时后的状态核对。 */
   void queryRecordingStatus();
   /** @brief 按管理器配置创建远端录制客户端。 @param prefix 服务前缀。 @param dir_name 任务目录名。 @param name 任务名。 */
@@ -153,6 +185,22 @@ private:
   bool pending_{false};
   /** @brief 录制命令是否等待状态变化。 */
   bool record_pending_{false};
+  /** @brief 当前回车组合操作阶段。 */
+  CombinedOperation combined_operation_{CombinedOperation::Idle};
+  /** @brief 当前组合操作的遥操或回位请求是否已有响应。 */
+  bool combined_control_done_{false};
+  /** @brief 当前组合操作的遥操或回位请求是否成功。 */
+  bool combined_control_success_{false};
+  /** @brief 当前组合操作的录制请求是否已有响应。 */
+  bool combined_record_done_{false};
+  /** @brief 当前组合操作的录制请求是否成功。 */
+  bool combined_record_success_{false};
+  /** @brief 回位失败后的暂停兜底请求是否已有响应。 */
+  bool combined_fallback_done_{false};
+  /** @brief 回位失败后的暂停兜底请求是否已经发出。 */
+  bool combined_fallback_started_{false};
+  /** @brief 回位失败后的暂停兜底请求是否成功。 */
+  bool combined_fallback_success_{false};
   /** @brief 最新固定录制状态。 */
   std::string record_state_;
   /** @brief 当前远端录制 UUID。 */
@@ -171,6 +219,12 @@ private:
   unsigned sequence_{0};
   /** @brief 防止迟到的录制服务响应覆盖当前录制操作。 */
   unsigned recording_sequence_{0};
+  /** @brief 防止迟到的组合服务响应覆盖后续操作。 */
+  unsigned combined_sequence_{0};
+  /** @brief 组合操作失败及回滚结果的累计说明。 */
+  QString combined_message_;
+  /** @brief 组合启动成功后用于精确停止的远端录制 UUID。 */
+  std::string combined_recording_id_;
   /** @brief 最近管理诊断接收时间。 */
   std::chrono::steady_clock::time_point manager_seen_{};
   /** @brief 最近遥操业务心跳时间。 */
@@ -181,6 +235,8 @@ private:
   std::chrono::steady_clock::time_point request_deadline_{};
   /** @brief 录制命令的超时期限。 */
   std::chrono::steady_clock::time_point record_deadline_{};
+  /** @brief 回车组合操作的超时期限。 */
+  std::chrono::steady_clock::time_point combined_deadline_{};
 };
 }  // namespace tracker_teleoperated
 #endif
