@@ -3,6 +3,29 @@
 入口仅管理 RM75、Unitree 夹爪、末端相机和录制服务。UMI 相机、Tracker、
 遥操主机和 RViz2 均由各自的独立入口管理，缺少 UMI 或 Tracker 不影响本入口。
 
+## 构建
+
+首次构建前，按[工作区说明](../../README.md#两套共享-uv-环境humble--jetson)
+准备 `.venv-numpy1`，并按[夹爪说明](../unitree_gripper/README.md#首次准备与构建)
+运行 `setup_gripper_env.sh`。在仓库根目录执行：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+git -C .. submodule update --init ros2_ws/src/ros2_rm_robot
+rosdep install --from-paths src/fastumi_usb_camera src/unitree_gripper \
+  src/fastumi_bringup src/fastumi_recorder src/fastumi_interfaces \
+  src/ros2_rm_robot/rm_ros_interfaces src/ros2_rm_robot/rm_description \
+  src/ros2_rm_robot/rm_driver src/ros2_rm_robot/rm_bringup --ignore-src -r -y
+python -m colcon build --symlink-install --packages-select \
+  fastumi_interfaces rm_ros_interfaces rm_description rm_driver rm_bringup \
+  fastumi_usb_camera unitree_gripper fastumi_recorder fastumi_bringup \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+```
+
+构建完成后，启动终端按下节顺序加载 Humble、虚拟环境和 `install/setup.bash`。
+
 ## 启动
 
 从仓库根目录执行：
