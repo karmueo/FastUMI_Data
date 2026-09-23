@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Optional, Protocol
 
 from fastumi_interfaces.msg import GripperState, TrackerStatus
+from fastumi_interfaces.srv import GetTeleopGeneration, SetTeleopGeneration
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 import numpy as np
@@ -50,6 +52,7 @@ from tracker_teleoperated.kinematics import (
     load_joint_velocity_limits,
     resolve_rm75_urdf,
 )
+from tracker_teleoperated.teleop_generation import TeleopGenerationStore
 
 
 class Kinematics(Protocol):
@@ -137,6 +140,11 @@ class TrackerTeleopNode(Node):
         """加载参数、创建 ROS 接口并保持初始暂停状态。"""
         super().__init__("tracker_teleop")
         self._declare_parameters()
+        generation_path = str(self.get_parameter("teleop_generation_file").value)
+        self._generation_store = TeleopGenerationStore(
+            generation_path or Path.home() / ".ros/tracker_teleoperated/teleop_generation.json"
+        )
+        self._generation_fault = False
         self._base_frame = str(self.get_parameter("base_frame").value)
         self._odom_frame = str(self.get_parameter("odom_frame").value)
         self._home_speed_percent = int(
@@ -383,6 +391,21 @@ class TrackerTeleopNode(Node):
             self._set_enabled_callback,
         )
         self.create_service(
+            SetTeleopGeneration,
+            "/tracker_teleoperated/enable",
+            self._enable_generation_callback,
+        )
+        self.create_service(
+            SetTeleopGeneration,
+            "/tracker_teleoperated/disable",
+            self._disable_generation_callback,
+        )
+        self.create_service(
+            GetTeleopGeneration,
+            "/tracker_teleoperated/get_generation",
+            self._get_generation_callback,
+        )
+        self.create_service(
             Trigger,
             "/tracker_teleoperated/initialize",
             self._initialize_callback,
@@ -477,6 +500,7 @@ class TrackerTeleopNode(Node):
         self.declare_parameter("home_speed_percent", 20)
         self.declare_parameter("home_timeout_s", 30.0)
         self.declare_parameter("home_command_quiet_period_s", 0.20)
+        self.declare_parameter("teleop_generation_file", "")
         # ROS 的空列表可能为未设置值或字节数组，动态类型允许数值数组覆盖。
         # 参数只在启动时读取，因此禁止运行期间修改后产生配置与目标不一致。
         self.declare_parameter(
@@ -966,7 +990,7 @@ class TrackerTeleopNode(Node):
 
         self._cancel_workspace_calibration()
         # 回位前禁止补发旧保持点，避免它滞留到阻塞式 MoveJ 完成后执行。
-        self._disable("收到回位请求", publish_hold=False)
+        self._disable("收到回位请求", publish_hold=False, force_fence=True)
         self._clear_control_reference()
         home_positions = self._home_joint_positions.copy()
         self._pending_home_command = build_home_command(
@@ -998,11 +1022,90 @@ class TrackerTeleopNode(Node):
     def _set_enabled_callback(
         self, request: SetBool.Request, response: SetBool.Response
     ) -> SetBool.Response:
-        """处理人工启停请求，并在启用时建立新的相对位姿零点。"""
+        """兼容旧暂停接口，并拒绝无代次的启用请求。"""
+        if request.data:
+            response.success = False
+            response.message = "启用遥操必须使用带代次的 enable 服务"
+            return response
+        try:
+            generation = self._generation_store.record["generation"] + 1
+            self._generation_store.begin(generation, "disable")
+            result = TrackerTeleopNode._apply_enabled_callback(self, request, response)
+            self._generation_store.finish(result.success, "DISABLED", result.message)
+            return result
+        except (OSError, ValueError) as error:
+            self._generation_fault = True
+            TrackerTeleopNode._apply_enabled_callback(self, request, response)
+            response.success = False
+            response.message = f"遥操已暂停，但代次持久化失败: {error}"
+            return response
+
+    def _generation_operation(self, request, response, operation: str):
+        """持久化请求代次后执行启停，并返回节点权威状态。"""
+        response.operation_generation = self._generation_store.record["generation"]
+        response.enabled = self._enabled
+        generation = int(request.operation_generation)
+        if generation == 0:
+            response.code, response.message = "INVALID_ARGUMENT", "操作代次必须大于零"
+            return response
+        if operation == "enable" and self._generation_fault:
+            response.code, response.message = "IO_ERROR", "代次持久化故障，拒绝启用"
+            return response
+        try:
+            decision = self._generation_store.begin(generation, operation)
+        except (OSError, ValueError) as error:
+            self._generation_fault = True
+            if operation == "disable":
+                pause = SetBool.Request(data=False)
+                TrackerTeleopNode._apply_enabled_callback(self, pause, SetBool.Response())
+            response.code, response.message = "IO_ERROR", str(error)
+            response.enabled = self._enabled
+            return response
+        response.operation_generation = self._generation_store.record["generation"]
+        if decision == "stale":
+            response.code, response.message = "STALE_GENERATION", "操作代次已过期"
+        elif decision == "duplicate":
+            record = self._generation_store.record
+            response.success = record["success"]
+            response.code, response.message = record["code"], record["message"]
+        else:
+            action = SetBool.Request(data=operation == "enable")
+            result = TrackerTeleopNode._apply_enabled_callback(self, action, SetBool.Response())
+            response.success, response.message = result.success, result.message
+            code = ("ENABLED" if operation == "enable" else "DISABLED") if result.success else "REJECTED"
+            try:
+                self._generation_store.finish(result.success, code, result.message)
+                response.code = code
+            except (OSError, ValueError) as error:
+                self._generation_fault = True
+                pause = SetBool.Request(data=False)
+                TrackerTeleopNode._apply_enabled_callback(self, pause, SetBool.Response())
+                response.success, response.code, response.message = False, "IO_ERROR", str(error)
+        response.enabled = self._enabled
+        return response
+
+    def _enable_generation_callback(self, request, response):
+        """执行带持久化代次的遥操启用。"""
+        return TrackerTeleopNode._generation_operation(self, request, response, "enable")
+
+    def _disable_generation_callback(self, request, response):
+        """执行带持久化代次的遥操暂停。"""
+        return TrackerTeleopNode._generation_operation(self, request, response, "disable")
+
+    def _get_generation_callback(self, _request, response):
+        """返回最高代次和当前启用状态。"""
+        response.operation_generation = self._generation_store.record["generation"]
+        response.enabled = self._enabled
+        return response
+
+    def _apply_enabled_callback(
+        self, request: SetBool.Request, response: SetBool.Response
+    ) -> SetBool.Response:
+        """应用已通过代次门控的启停请求。"""
         if not request.data:
             homing_stopped = self._stop_homing("收到人工暂停请求")
             calibration_cancelled = self._cancel_workspace_calibration()
-            self._disable("收到人工暂停请求", publish_hold=True)
+            self._disable("收到人工暂停请求", publish_hold=True, fenced=True)
             response.success = True
             details = []
             if homing_stopped:
@@ -1062,8 +1165,19 @@ class TrackerTeleopNode(Node):
         self._publish_joint_target(positions)
         self._command_publisher.publish(build_joint_command(positions))
 
-    def _disable(self, reason: str, publish_hold: bool) -> None:
+    def _disable(
+        self, reason: str, publish_hold: bool, *, force_fence: bool = False,
+        fenced: bool = False,
+    ) -> None:
         """停止当前跟随、按条件发送一次保持点并清除控制参考。"""
+        if not fenced and (self._enabled or force_fence):
+            try:
+                generation = self._generation_store.record["generation"] + 1
+                self._generation_store.begin(generation, "disable")
+                self._generation_store.finish(True, "DISABLED", reason)
+            except (OSError, ValueError) as error:
+                self._generation_fault = True
+                self.get_logger().error(f"遥操代次持久化失败，保持禁用: {error}")
         if not self._enabled:
             return
         now = time.monotonic()
@@ -1206,6 +1320,7 @@ def main(args=None) -> None:
         if node is not None:
             node._stop_homing("控制节点退出")
             node._disable("控制节点退出", publish_hold=True)
+            node._generation_store.close()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

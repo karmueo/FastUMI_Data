@@ -20,13 +20,17 @@ rosidl_generate_interfaces(
   "msg/RecordingStatus.msg"
   "msg/TrackerStatus.msg"
   "srv/CancelRecording.srv"
+  "srv/CancelRecordingRequest.srv"
   "srv/DeleteRecording.srv"
   "srv/DeleteEpisodeAnnotation.srv"
+  "srv/GetRecordingRequest.srv"
   "srv/GetRecordingStatus.srv"
+  "srv/GetTeleopGeneration.srv"
   "srv/ListRecordings.srv"
   "srv/ListEpisodeAnnotations.srv"
   "srv/StartRecording.srv"
   "srv/StopRecording.srv"
+  "srv/SetTeleopGeneration.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
 )
 

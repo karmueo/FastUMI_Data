@@ -2,8 +2,12 @@
 
 from fastumi_interfaces.msg import FrameSequence, RecordingInfo, RecordingStatus
 from fastumi_interfaces.srv import (
+    CancelRecordingRequest,
     DeleteRecording,
+    GetRecordingRequest,
+    GetTeleopGeneration,
     ListRecordings,
+    SetTeleopGeneration,
     StartRecording,
     StopRecording,
 )
@@ -26,7 +30,10 @@ def test_recording_interfaces_preserve_identity_and_pagination() -> None:
         relative_path="task/sample/episode_3", image_frames=42)
     status = RecordingStatus(
         state="saving", recording_id=info.recording_id, current=info)
-    start = StartRecording.Request(dir_name="task", name="sample")
+    start = StartRecording.Request(
+        request_id="11111111-1111-4111-8111-111111111111", dir_name="task", name="sample")
+    cancel_request = CancelRecordingRequest.Request(request_id=start.request_id)
+    get_request = GetRecordingRequest.Request(request_id=start.request_id)
     stop = StopRecording.Request(recording_id=info.recording_id)
     delete = DeleteRecording.Request(recording_id=info.recording_id)
     page = ListRecordings.Request(offset=100, limit=100)
@@ -34,6 +41,17 @@ def test_recording_interfaces_preserve_identity_and_pagination() -> None:
     assert status.current.relative_path == "task/sample/episode_3"
     assert status.current.image_frames == 42
     assert (start.dir_name, start.name) == ("task", "sample")
+    assert cancel_request.request_id == get_request.request_id == start.request_id
     assert stop.recording_id == status.recording_id
     assert delete.recording_id == status.recording_id
     assert (page.offset, page.limit) == (100, 100)
+
+
+def test_teleop_generation_interfaces_share_highest_generation() -> None:
+    """遥操启停和查询接口均使用无符号 64 位代次。"""
+    set_request = SetTeleopGeneration.Request(operation_generation=(1 << 64) - 1)
+    get_response = GetTeleopGeneration.Response(
+        operation_generation=set_request.operation_generation, enabled=False)
+
+    assert get_response.operation_generation == (1 << 64) - 1
+    assert not get_response.enabled

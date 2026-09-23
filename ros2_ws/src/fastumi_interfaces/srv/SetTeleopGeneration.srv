@@ -1,0 +1,7 @@
+uint64 operation_generation
+---
+bool success
+string code
+string message
+uint64 operation_generation
+bool enabled

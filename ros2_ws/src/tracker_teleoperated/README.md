@@ -68,14 +68,17 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 
 面板使用 `/fastumi/recording` 下的强类型服务和状态话题：
 
-- `start`、`stop`、`cancel` 控制当前录制；
-- `get_status` 在超时后核对状态；
+- `start` 必须携带面板生成的标准 UUID `request_id`，`stop`、`cancel` 控制当前录制；
+- `cancel_request` 按请求 UUID 撤销尚未确认的启动，`get_request` 查询其终态；
+- `get_status` 核对当前录制状态；
 - `list` 每页读取 100 条已保存记录；
 - `/fastumi/recording/status` 使用 Reliable、Transient Local、Depth 1。
 
 A 开始录制或停止并保存，Backspace 取消当前录制并回到初始位姿。取消与回位并行执行，其中一项失败不会阻止另一项。`stop` 响应只表示保存请求已接受；面板会继续等待相同 `recording_id` 出现在 `last_completed`。
 
-回车以录像状态为准执行一键流程：录像空闲时同时启用遥操并开始录制；正在录制时立即停止并保存，同时暂停遥操并执行 H 回位。组合启动部分失败时，面板会自动暂停遥操，并停止本次已经启动的录像。
+回车以录像状态为准执行一键流程：录像空闲时同时启用遥操并开始录制；正在录制时立即停止并保存，同时暂停遥操并执行 H 回位。组合启动部分失败或超时后，面板按 `request_id` 撤销启动，并等待录制请求终态及遥操暂停代次确认；服务暂时离线时保持恢复中，禁止重新启动。已经保存完成的记录会保留并显示 UUID，供操作者人工核对。
+
+本机遥操使用 `/tracker_teleoperated/enable`、`disable` 和 `get_generation` 管理持久化操作代次。旧 `set_enabled` 只接受暂停请求，启用须使用新接口；回位及安全自动暂停也会提升代次，以拒绝迟到的启用请求。代次文件默认位于 `~/.ros/tracker_teleoperated/teleop_generation.json`，可通过 `teleop_generation_file` 配置。
 
 历史记录页显示远端任务、相对路径、时长、样本数和视频帧数。右键选中一条记录可调用远端删除服务，确认不可撤销提示后删除该条数据并自动刷新列表。
 

@@ -114,6 +114,23 @@ class CommandPublishingState:
         self.joint_targets.append(np.asarray(positions).copy())
 
 
+class FakeGenerationStore:
+    """在原有控制回归测试中记录代次，不访问文件系统。"""
+
+    def __init__(self):
+        """创建初始代次。"""
+        self.record = {"generation": 0, "success": False, "code": "", "message": ""}
+
+    def begin(self, generation, _operation):
+        """记录新代次。"""
+        self.record["generation"] = generation
+        return "new"
+
+    def finish(self, success, code, message):
+        """记录服务响应。"""
+        self.record.update(success=success, code=code, message=message)
+
+
 class WorkspaceCalibrationState:
     """承载三点工作空间标定回调需要的最小节点状态。"""
 
@@ -128,6 +145,8 @@ class WorkspaceCalibrationState:
         self._mapping_mode = "workspace"
         self._workspace_minimum_angle_deg = 60.0
         self._enabled = False
+        self._generation_store = FakeGenerationStore()
+        self._generation_fault = False
         self._homing = False
         self._latest_tracker_pose = make_pose()
         self._workspace_calibration_samples = []
@@ -149,7 +168,7 @@ class WorkspaceCalibrationState:
         """返回空实现日志器。"""
         return self._logger
 
-    def _disable(self, _reason, publish_hold):
+    def _disable(self, _reason, publish_hold, **_kwargs):
         """模拟暂停节点并记录是否请求保持指令。"""
         self._enabled = False
         self.publish_hold = publish_hold
@@ -174,6 +193,8 @@ class HomeState:
     def __init__(self):
         """创建具有新鲜反馈和已记录初始位姿的暂停状态。"""
         self._enabled = False
+        self._generation_store = FakeGenerationStore()
+        self._generation_fault = False
         self._homing = False
         self._home_started_monotonic = 0.0
         self._home_command_due_monotonic = 0.0
@@ -211,7 +232,7 @@ class HomeState:
         """返回空实现日志器。"""
         return self._logger
 
-    def _disable(self, _reason, publish_hold):
+    def _disable(self, _reason, publish_hold, **_kwargs):
         """模拟暂停遥操。"""
         self._enabled = False
         self.publish_hold = publish_hold
@@ -660,12 +681,12 @@ def test_pause_stops_homing_and_enable_is_rejected_while_homing():
     call_return_home(state)
     enable = SetBool.Request()
     enable.data = True
-    reject = TrackerTeleopNode._set_enabled_callback(
+    reject = TrackerTeleopNode._apply_enabled_callback(
         state, enable, SetBool.Response()
     )
     pause = SetBool.Request()
     pause.data = False
-    stopped = TrackerTeleopNode._set_enabled_callback(
+    stopped = TrackerTeleopNode._apply_enabled_callback(
         state, pause, SetBool.Response()
     )
 
@@ -897,11 +918,11 @@ def test_workspace_mode_rejects_enable_during_or_before_calibration():
     state = WorkspaceCalibrationState()
     request = SetBool.Request()
     request.data = True
-    missing = TrackerTeleopNode._set_enabled_callback(
+    missing = TrackerTeleopNode._apply_enabled_callback(
         state, request, SetBool.Response()
     )
     state._workspace_calibration_samples.append(make_pose())
-    in_progress = TrackerTeleopNode._set_enabled_callback(
+    in_progress = TrackerTeleopNode._apply_enabled_callback(
         state, request, SetBool.Response()
     )
 
@@ -918,7 +939,7 @@ def test_pause_cancels_pending_workspace_calibration():
     request = SetBool.Request()
     request.data = False
 
-    response = TrackerTeleopNode._set_enabled_callback(
+    response = TrackerTeleopNode._apply_enabled_callback(
         state, request, SetBool.Response()
     )
 

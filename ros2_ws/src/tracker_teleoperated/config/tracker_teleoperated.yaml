@@ -31,6 +31,8 @@ tracker_teleop:
     home_timeout_s: 30.0
     # 停止 CANFD 透传后等待旧回调排空，再发送阻塞式 MoveJ。
     home_command_quiet_period_s: 0.20
+    # 空值使用 ~/.ros/tracker_teleoperated/teleop_generation.json；持久化最高启停代次。
+    teleop_generation_file: ""
 
     # RM75 模型坐标系；空 urdf_path 表示从 rm_description 包查找模型。
     base_frame: base_link

@@ -6,6 +6,8 @@
 #define TRACKER_TELEOPERATED__TELEOP_PANEL_HPP_
 
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -17,7 +19,11 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <fastumi_interfaces/msg/recording_status.hpp>
 #include <fastumi_interfaces/srv/cancel_recording.hpp>
+#include <fastumi_interfaces/srv/cancel_recording_request.hpp>
+#include <fastumi_interfaces/srv/get_recording_request.hpp>
 #include <fastumi_interfaces/srv/get_recording_status.hpp>
+#include <fastumi_interfaces/srv/get_teleop_generation.hpp>
+#include <fastumi_interfaces/srv/set_teleop_generation.hpp>
 #include <fastumi_interfaces/srv/start_recording.hpp>
 #include <fastumi_interfaces/srv/stop_recording.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -41,6 +47,7 @@ class VideoSourceWidget;
 class TeleopPanel : public rviz_common::Panel
 {
   Q_OBJECT
+  friend class TeleopPanelRecoveryHarness;
 public:
   /** @brief 构造界面并安装 RViz 窗口级快捷键过滤器。 @param[in] parent RViz 提供的父控件。 */
   explicit TeleopPanel(QWidget * parent = nullptr);
@@ -81,8 +88,14 @@ private:
   void dispatch(const QString & action);
   /** @brief 异步调用 Trigger。 @param service 相对服务名称。 */
   void trigger(const std::string & service);
-  /** @brief 异步调用 SetBool。 @param service 相对服务名称。 @param value 目标启停状态。 */
+  /** @brief 异步调用组件 SetBool。 @param service 相对服务名称。 @param value 目标启停状态。 */
   void setBool(const std::string & service, bool value);
+  /** @brief 查询最高代次后执行遥操启停，暂停时可覆盖已发出的启用代次。 */
+  void requestControl(bool enable,
+    const std::function<void(bool, std::uint64_t, const std::string &)> & done,
+    const std::function<bool()> & allowed = []() {return true;},
+    const std::function<void(std::uint64_t)> & sent = [](std::uint64_t) {},
+    std::uint64_t generation_floor = 0);
   /** @brief 按当前权威状态调用开始、停止或取消服务。 @param action record 或 discard。 */
   void recordingAction(const QString & action);
   /** @brief 按远端录制状态启动或停止回车组合流程。 */
@@ -91,10 +104,12 @@ private:
   void startCombinedAction();
   /** @brief 检查组合启动的两个响应，并在部分失败时开始回滚。 @param sequence 组合请求代次。 */
   void evaluateCombinedStart(unsigned sequence);
-  /** @brief 暂停遥操并停止本次已启动的录像。 @param sequence 组合请求代次。 @param reason 启动失败原因。 */
+  /** @brief 进入按请求 UUID 撤销录制及暂停遥操的恢复流程。 @param sequence 组合请求代次。 @param reason 启动失败原因。 */
   void beginCombinedRollback(unsigned sequence, const QString & reason);
   /** @brief 检查组合启动回滚是否完成。 @param sequence 组合请求代次。 */
   void evaluateCombinedRollback(unsigned sequence);
+  /** @brief 周期查询并撤销本次启动请求，直到录像和遥操恢复安全状态。 */
+  void advanceCombinedRecovery();
   /** @brief 同时请求停止录制和回到初始位姿。 */
   void stopCombinedAction();
   /** @brief 检查组合停止结果，并在回位失败时补发暂停。 @param sequence 组合请求代次。 */
@@ -137,6 +152,14 @@ private:
   rclcpp::Client<fastumi_interfaces::srv::StopRecording>::SharedPtr recording_stop_;
   /** @brief 远端取消录制服务。 */
   rclcpp::Client<fastumi_interfaces::srv::CancelRecording>::SharedPtr recording_cancel_;
+  /** @brief 按请求 UUID 撤销尚未完成的启动。 */
+  rclcpp::Client<fastumi_interfaces::srv::CancelRecordingRequest>::SharedPtr recording_cancel_request_;
+  /** @brief 查询请求 UUID 的权威终态。 */
+  rclcpp::Client<fastumi_interfaces::srv::GetRecordingRequest>::SharedPtr recording_get_request_;
+  /** @brief 本机遥操的启用、暂停和最高代次客户端。 */
+  rclcpp::Client<fastumi_interfaces::srv::SetTeleopGeneration>::SharedPtr control_enable_;
+  rclcpp::Client<fastumi_interfaces::srv::SetTeleopGeneration>::SharedPtr control_disable_;
+  rclcpp::Client<fastumi_interfaces::srv::GetTeleopGeneration>::SharedPtr control_get_generation_;
   /** @brief 远端状态查询服务。 */
   rclcpp::Client<fastumi_interfaces::srv::GetRecordingStatus>::SharedPtr recording_status_client_;
   /** @brief 远端权威录制状态订阅。 */
@@ -201,6 +224,27 @@ private:
   bool combined_fallback_started_{false};
   /** @brief 回位失败后的暂停兜底请求是否成功。 */
   bool combined_fallback_success_{false};
+  /** @brief 正在等待撤销的启动请求 UUID。 */
+  std::string combined_request_id_;
+  /** @brief 上次回车启用请求的代次；恢复时必须由更高或同代次暂停覆盖。 */
+  std::uint64_t combined_enable_generation_{0};
+  /** @brief 启动恢复期间录像和遥操是否确认安全。 */
+  bool recovery_record_done_{false};
+  bool recovery_control_done_{false};
+  /** @brief 单独按 A 超时恢复时不改变遥操启停。 */
+  bool recovery_pause_control_{true};
+  /** @brief 组合恢复中的已保存记录 UUID，需人工决定是否删除。 */
+  std::string recovery_completed_id_;
+  /** @brief 避免周期恢复请求密集重发。 */
+  std::chrono::steady_clock::time_point recovery_next_{};
+  /** @brief 单独按 A 启动请求的 UUID。 */
+  std::string manual_request_id_;
+  /** @brief 最近普通录制操作是否正在启动。 */
+  bool manual_start_pending_{false};
+  /** @brief 普通遥操启用请求是否等待响应。 */
+  bool manual_enable_pending_{false};
+  /** @brief 普通启用超时后暂停必须覆盖的代次。 */
+  std::uint64_t manual_enable_generation_{0};
   /** @brief 最新固定录制状态。 */
   std::string record_state_;
   /** @brief 当前远端录制 UUID。 */
