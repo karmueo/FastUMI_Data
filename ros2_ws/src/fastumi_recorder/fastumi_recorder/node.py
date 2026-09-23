@@ -22,8 +22,7 @@ from fastumi_interfaces.srv import (
 )
 
 from fastumi_recorder.catalog import RecordingError, default_dataset_root
-from fastumi_recorder.core import JOINT_NAMES
-from fastumi_recorder.engine import RecorderEngine, ffmpeg_packet_to_h264
+from fastumi_recorder.engine import DEFAULT_TOPICS, IMAGE_TYPES, RecorderEngine
 
 
 PREFIX = '/fastumi/recording'
@@ -35,13 +34,13 @@ def info_message(info):
 
 
 class RecorderNode(Node):
-    """单 executor 接收 ROS 请求，后台线程只负责编码和文件写入。"""
+    """单 executor 接收 ROS 请求，后台线程顺序写入 MCAP。"""
 
     def __init__(self, parameter_overrides=None):
         """初始化配置和本实例持有的资源。"""
         super().__init__('fastumi_recorder', parameter_overrides=parameter_overrides)
         defaults = dict(
-            dataset_root='', dir_name='test', name='default_test', camera_fps=30,
+            dataset_root='', dir_name='test', name='default_test',
             record_camera=True, input_freshness=2.0, shutdown_save_timeout=120.0,
             joint_state_topic='/joint_states', joint_action_topic='/rm_driver/movej_canfd_cmd',
             gripper_state_topic='/motion_control/gripper_state',
@@ -58,10 +57,21 @@ class RecorderNode(Node):
         image_transport = str(values['image_transport']).strip().lower()
         if image_transport not in ('raw', 'jpeg', 'ffmpeg'):
             raise ValueError('image_transport 必须是 raw、jpeg 或 ffmpeg')
+        topics = {
+            stream: (values[parameter], message_type)
+            for stream, parameter, message_type in (
+                ('joint_state', 'joint_state_topic', DEFAULT_TOPICS['joint_state'][1]),
+                ('joint_action', 'joint_action_topic', DEFAULT_TOPICS['joint_action'][1]),
+                ('gripper_state', 'gripper_state_topic', DEFAULT_TOPICS['gripper_state'][1]),
+                ('gripper_action', 'gripper_action_topic', DEFAULT_TOPICS['gripper_action'][1]),
+                ('tracker_pose', 'tracker_odom_topic', DEFAULT_TOPICS['tracker_pose'][1]),
+            )
+        }
+        if values['record_camera']:
+            topics['image'] = (values['image_topic'], IMAGE_TYPES[image_transport])
         self.engine = RecorderEngine(
             root or default_dataset_root(), dir_name=values['dir_name'], name=values['name'],
-            fps=values['camera_fps'], record_camera=values['record_camera'],
-            image_transport=image_transport,
+            record_camera=values['record_camera'], image_transport=image_transport, topics=topics,
             freshness=values['input_freshness'], shutdown_timeout=values['shutdown_save_timeout'],
         )
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
@@ -97,14 +107,13 @@ class RecorderNode(Node):
         self.publish_status()
         self.get_logger().info(f'录制服务就绪，输出: {self.engine.catalog.root}')
 
+    def _now_ns(self):
+        """返回当前 ROS 接收时间，单位为纳秒。"""
+        return self.get_clock().now().nanoseconds
+
     def _now(self):
         """返回当前 ROS 时钟的浮点秒。"""
         return self.get_clock().now().nanoseconds * 1e-9
-
-    def _stamp(self, message):
-        """优先使用有效消息时间，否则使用本机 ROS 时间。"""
-        value = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
-        return value if value > 0 else self._now()
 
     def _status_message(self):
         """将引擎快照转换为强类型 ROS 状态。"""
@@ -203,63 +212,55 @@ class RecorderNode(Node):
         return response
 
     def _joint_state(self, message):
-        """按 joint1 至 joint7 顺序记录有限弧度值。"""
-        if len(message.name) != len(message.position):
-            return
+        """保存原始关节消息，七轴有效性仅用于启动就绪门控。"""
         positions = dict(zip(message.name, message.position))
-        if any(name not in positions for name in JOINT_NAMES):
-            return
-        values = [float(positions[name]) for name in JOINT_NAMES]
-        if all(math.isfinite(value) for value in values):
-            self.engine.add('joint_state', self._stamp(message), values)
+        valid = (len(message.name) == len(message.position)
+                 and all(f'joint{i}' in positions for i in range(1, 8))
+                 and all(math.isfinite(positions[f'joint{i}']) for i in range(1, 8)))
+        self.engine.record('joint_state', message, self._now_ns(), valid_for_readiness=valid)
 
     def _joint_action(self, message):
-        """只记录合法七轴 CANFD 目标。"""
-        if message.dof == 7 and len(message.joint) == 7 and all(math.isfinite(v) for v in message.joint):
-            self.engine.add('joint_action', self._now(), list(message.joint))
+        """保存未经筛选的关节指令。"""
+        self.engine.record('joint_action', message, self._now_ns())
 
     def _gripper_state(self, message):
-        """记录零至一范围内的真实夹爪开度。"""
-        if math.isfinite(message.data) and 0 <= message.data <= 1:
-            self.engine.add('gripper_state', self._now(), float(message.data))
+        """保存原始夹爪状态；有效范围仅用于就绪门控。"""
+        valid = math.isfinite(message.data) and 0 <= message.data <= 1
+        self.engine.record('gripper_state', message, self._now_ns(), valid_for_readiness=valid)
 
     def _gripper_action(self, message):
-        """记录合法的归一化夹爪目标。"""
-        if math.isfinite(message.data) and 0 <= message.data <= 1:
-            self.engine.add('gripper_action', self._now(), float(message.data))
+        """保存原始夹爪指令。"""
+        self.engine.record('gripper_action', message, self._now_ns())
 
     def _tracker(self, message):
-        """记录可选远端位姿，保留米和 xyzw 四元数语义。"""
+        """保存原始 Tracker odom；有效位姿用于输入 age。"""
         pose = message.pose.pose
         position = [pose.position.x, pose.position.y, pose.position.z]
         orientation = [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
-        if all(math.isfinite(v) for v in position + orientation) and any(orientation):
-            self.engine.add('tracker_pose', self._stamp(message), position,
-                            orientation=orientation, frame_id=message.header.frame_id)
+        valid = all(math.isfinite(v) for v in position + orientation) and any(orientation)
+        self.engine.record('tracker_pose', message, self._now_ns(), valid_for_readiness=valid)
 
     def _image(self, message):
-        """验证图像布局后入队，避免无效输入刷新就绪时间。"""
+        """原样保存图像，布局校验仅影响启动就绪。"""
         channels = {'rgb8': 3, 'bgr8': 3, 'mono8': 1}.get(message.encoding.lower())
-        if (channels and message.width > 0 and message.height > 0
-                and message.step >= message.width * channels
-                and len(message.data) >= message.step * message.height):
-            self.engine.image(self._stamp(message), message)
+        valid = bool(channels and message.width > 0 and message.height > 0
+                     and message.step >= message.width * channels
+                     and len(message.data) >= message.step * message.height)
+        self.engine.record('image', message, self._now_ns(), valid_for_readiness=valid)
 
     def _compressed_image(self, message):
-        """验证相机原生 JPEG 后直接入队，不执行解码或重复编码。"""
+        """原样保存 JPEG 消息，检查仅用于启动就绪。"""
         image_format = message.format.lower()
         data = bytes(message.data)
-        if ('jpeg' in image_format or 'jpg' in image_format) and len(data) >= 4 \
-                and data[:2] == b'\xff\xd8' and data[-2:] == b'\xff\xd9':
-            self.engine.image(self._stamp(message), message)
+        valid = (('jpeg' in image_format or 'jpg' in image_format) and len(data) >= 4
+                 and data[:2] == b'\xff\xd8' and data[-2:] == b'\xff\xd9')
+        self.engine.record('image', message, self._now_ns(), valid_for_readiness=valid)
 
     def _ffmpeg_image(self, message):
-        """验证 H.264 transport 包后入队，并保留采集时间戳和关键帧标志。"""
-        try:
-            ffmpeg_packet_to_h264(message)
-        except (TypeError, ValueError):
-            return
-        self.engine.image(self._stamp(message), message)
+        """原样保存 H.264 transport 包。"""
+        valid = (str(message.encoding).split(';', 1)[0].strip().lower() == 'h264'
+                 and message.width > 0 and message.height > 0 and bool(message.data))
+        self.engine.record('image', message, self._now_ns(), valid_for_readiness=valid)
 
     def close(self):
         """等待保存并报告退出时未完成的数据。"""

@@ -1,4 +1,4 @@
-# 已保存条目的持久化摘要；relative_path 相对于 Jetson 数据根目录。
+# MCAP 条目的持久化摘要；relative_path 相对于 Jetson 数据根目录。
 string recording_id
 string dir_name
 string name

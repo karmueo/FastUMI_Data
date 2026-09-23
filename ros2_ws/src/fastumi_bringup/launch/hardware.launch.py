@@ -101,7 +101,7 @@ def _launch_hardware(context):
     if _enabled(context, 'start_recorder'):
         recorder_arguments = {
             name: LaunchConfiguration(name) for name in
-            ('dataset_root', 'dir_name', 'name', 'camera_fps', 'record_camera',
+            ('dataset_root', 'dir_name', 'name', 'record_camera',
              'shutdown_save_timeout')
         }
         recorder_arguments.update(image_topic=image_topic, image_transport=image_transport)

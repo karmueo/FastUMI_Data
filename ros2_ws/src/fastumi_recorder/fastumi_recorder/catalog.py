@@ -71,7 +71,10 @@ class Catalog:
                 info = json.loads(meta.read_text())
                 uuid.UUID(info['recording_id'])
                 expected = meta.parent.relative_to(self.root).as_posix()
-                if info['relative_path'] != expected or not (meta.parent / 'proprio.hdf5').is_file():
+                bag = meta.parent / 'bag'
+                if (info['relative_path'] != expected or bag.is_symlink()
+                        or not (bag / 'metadata.yaml').is_file()
+                        or not any(bag.glob('*.mcap')) or any(p.is_symlink() for p in bag.rglob('*'))):
                     continue
                 self.entries[info['recording_id']] = info
             except (OSError, ValueError, KeyError, TypeError):
@@ -119,10 +122,10 @@ class Catalog:
         if target.exists():
             raise RecordingError('IO_ERROR', '目标 episode 已存在')
         (temporary / 'pending.json').unlink(missing_ok=True)
-        # 元数据也计入大小；字段位数稳定后即得到实际目录文件总字节数。
+        # 计入嵌套 bag 和元数据；字段位数稳定后得到实际目录文件总字节数。
         for _ in range(4):
             atomic_json(temporary / 'recording.json', info)
-            size = sum(p.stat().st_size for p in temporary.iterdir() if p.is_file())
+            size = sum(p.stat().st_size for p in temporary.rglob('*') if p.is_file())
             if info['size_bytes'] == size:
                 break
             info['size_bytes'] = size

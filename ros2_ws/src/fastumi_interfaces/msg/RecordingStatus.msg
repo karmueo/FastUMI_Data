@@ -9,6 +9,7 @@ uint64 action_samples
 uint64 gripper_samples
 uint64 tracker_samples
 uint64 received_frames
+# 兼容字段：已写入 MCAP 的原始图像消息数。
 uint64 encoded_frames
 uint64 saved_frames
 uint64 dropped_frames

@@ -10,14 +10,13 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     """提供本地存储、任务和主要采集参数。"""
     defaults = dict(dataset_root='', dir_name='test', name='default_test',
-                    camera_fps='30', record_camera='true',
+                    record_camera='true',
                     image_topic='/wrist_camera/image_raw/ffmpeg',
                     image_transport='ffmpeg', shutdown_save_timeout='120.0')
     parameters = {key: ParameterValue(LaunchConfiguration(key), value_type=str)
                   for key in ('dataset_root', 'dir_name', 'name', 'image_topic',
                               'image_transport')}
     parameters.update(
-        camera_fps=ParameterValue(LaunchConfiguration('camera_fps'), value_type=int),
         record_camera=ParameterValue(LaunchConfiguration('record_camera'), value_type=bool),
         shutdown_save_timeout=ParameterValue(LaunchConfiguration('shutdown_save_timeout'), value_type=float),
     )

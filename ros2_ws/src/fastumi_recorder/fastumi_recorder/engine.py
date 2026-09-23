@@ -1,4 +1,4 @@
-"""与 ROS 无关的录制状态机、后台编码和服务事务。"""
+"""Recording services and an ordered, bounded MCAP writer queue."""
 
 from copy import deepcopy
 import queue
@@ -8,132 +8,57 @@ import threading
 import time
 import uuid
 
-import numpy as np
+from rclpy.serialization import serialize_message
 
+from fastumi_recorder.bag_writer import BagWriter
 from fastumi_recorder.catalog import Catalog, RecordingError, atomic_json
-from fastumi_recorder.core import RecordingSession
 from fastumi_recorder.request_ledger import RequestLedger, canonical_request_id
-from fastumi_recorder.storage import write_episode
 
 
-class Encoder:
-    """持有 FFmpeg 子进程，退出超时时主动中断管道写入。"""
-
-    def __init__(self):
-        """初始化配置和本实例持有的资源。"""
-        self.executable = shutil.which('ffmpeg')
-        if not self.executable:
-            raise RecordingError('NOT_READY', '找不到系统 ffmpeg')
-        self._lock = threading.Lock()
-        self._process = None
-        self._aborted = False
-        self._cancel_current = False
-
-    def register(self, process):
-        """登记编码进程，已中止时立即终止新进程。"""
-        with self._lock:
-            self._process = process
-            if self._aborted or self._cancel_current:
-                process.kill()
-
-    def unregister(self, process):
-        """清除已结束编码进程的引用。"""
-        with self._lock:
-            if self._process is process:
-                self._process = None
-
-    def abort(self):
-        """中止当前及后续编码，解除阻塞的输入管道。"""
-        with self._lock:
-            self._aborted = True
-            if self._process is not None and self._process.poll() is None:
-                self._process.kill()
-
-    def abort_current(self):
-        """Interrupt this save without disabling future encoding."""
-        with self._lock:
-            self._cancel_current = True
-            if self._process is not None and self._process.poll() is None:
-                self._process.kill()
-
-    def reset_cancel(self):
-        """Allow encoding for a newly accepted recording."""
-        with self._lock:
-            self._cancel_current = False
-
-
-def image_to_jpeg(message):
-    """返回已校验的相机原生 JPEG 字节。"""
-    if hasattr(message, 'format') and not hasattr(message, 'encoding'):
-        image_format = str(message.format).lower()
-        data = bytes(message.data)
-        if 'jpeg' not in image_format and 'jpg' not in image_format:
-            raise ValueError(f'不支持的压缩图像格式: {message.format}')
-        if len(data) < 4 or data[:2] != b'\xff\xd8' or data[-2:] != b'\xff\xd9':
-            raise ValueError('JPEG 数据不完整')
-        return data
-    raise ValueError('JPEG 模式需要 sensor_msgs/msg/CompressedImage')
-
-
-def image_to_bgr24(message):
-    """按 ROS 行跨度将 bgr8/rgb8/mono8 转成连续 BGR24 字节及宽高。"""
-    channels = {'bgr8': 3, 'rgb8': 3, 'mono8': 1}.get(
-        str(message.encoding).lower())
-    if channels is None:
-        raise ValueError(f'不支持的图像编码: {message.encoding}')
-    width, height, step = int(message.width), int(message.height), int(message.step)
-    if width <= 0 or height <= 0 or step < width * channels:
-        raise ValueError('图像尺寸或行跨度无效')
-    data = bytes(message.data)
-    if len(data) < step * height:
-        raise ValueError('图像数据不足')
-    if channels == 3 and step == width * 3 and message.encoding.lower() == 'bgr8':
-        return data[:step * height], (width, height)
-    rows = np.frombuffer(data, dtype=np.uint8, count=step * height).reshape(height, step)
-    pixels = rows[:, :width * channels].reshape(height, width, channels)
-    if channels == 1:
-        bgr = np.repeat(pixels, 3, axis=2)
-    elif message.encoding.lower() == 'rgb8':
-        bgr = pixels[:, :, ::-1]
-    else:
-        bgr = pixels
-    return bgr.tobytes(), (width, height)
-
-
-def ffmpeg_packet_to_h264(message):
-    """校验 FFmpeg transport 的 H.264 包并返回内容及关键帧标志。"""
-    codec = str(message.encoding).split(';', 1)[0].strip().lower()
-    if codec != 'h264':
-        raise ValueError(f'不支持的 FFmpeg 编码: {message.encoding}')
-    if int(message.width) <= 0 or int(message.height) <= 0:
-        raise ValueError('FFmpeg 视频尺寸无效')
-    data = bytes(message.data)
-    if not data:
-        raise ValueError('FFmpeg 视频包为空')
-    return data, bool(int(message.flags) & 0x01)
+MAX_QUEUED_BYTES = 256 * 1024 * 1024
+IMAGE_TYPES = {
+    'raw': 'sensor_msgs/msg/Image',
+    'jpeg': 'sensor_msgs/msg/CompressedImage',
+    'ffmpeg': 'ffmpeg_image_transport_msgs/msg/FFMPEGPacket',
+}
+DEFAULT_TOPICS = {
+    'joint_state': ('/joint_states', 'sensor_msgs/msg/JointState'),
+    'joint_action': ('/rm_driver/movej_canfd_cmd', 'rm_ros_interfaces/msg/Jointpos'),
+    'gripper_state': ('/motion_control/gripper_state', 'std_msgs/msg/Float32'),
+    'gripper_action': ('/motion_control/gripper_command', 'std_msgs/msg/Float32'),
+    'tracker_pose': ('/vive_tracker/odom', 'nav_msgs/msg/Odometry'),
+}
+SAMPLE_FIELDS = {
+    'joint_state': 'joint_samples', 'joint_action': 'action_samples',
+    'gripper_state': 'gripper_samples', 'tracker_pose': 'tracker_samples',
+}
 
 
 class RecorderEngine:
-    """通过单一事务锁串行化服务；耗时保存不占用事务锁。"""
+    """Serialize service transitions while a worker writes original ROS messages."""
 
-    def __init__(self, root, *, dir_name='test', name='default_test', fps=30,
-                 record_camera=True, image_transport='ffmpeg', freshness=2.0,
-                 shutdown_timeout=120.0):
-        """初始化配置和本实例持有的资源。"""
-        if fps <= 0 or freshness <= 0 or shutdown_timeout <= 0:
-            raise ValueError('帧率和超时时间必须大于零')
-        if image_transport not in ('raw', 'jpeg', 'ffmpeg'):
+    def __init__(self, root, *, dir_name='test', name='default_test',
+                 record_camera=True, image_transport='ffmpeg', topics=None,
+                 freshness=2.0, shutdown_timeout=120.0,
+                 max_queued_bytes=MAX_QUEUED_BYTES, writer_factory=BagWriter):
+        if freshness <= 0 or shutdown_timeout <= 0 or max_queued_bytes <= 0:
+            raise ValueError('超时和队列容量必须大于零')
+        if image_transport not in IMAGE_TYPES:
             raise ValueError('image_transport 必须是 raw、jpeg 或 ffmpeg')
-        self.encoder = Encoder()
         self.catalog = Catalog(root)
         self.requests = RequestLedger(self.catalog.root)
         self.requests.recover(self.catalog)
         self.dir_name, self.name = dir_name, name
-        self.fps, self.record_camera = fps, record_camera
-        self.image_transport = image_transport
+        self.record_camera = record_camera
+        self.topics = dict(topics or DEFAULT_TOPICS)
+        if record_camera:
+            self.topics.setdefault('image',
+                                   ('/wrist_camera/image_raw/ffmpeg', IMAGE_TYPES[image_transport]))
+        else:
+            self.topics.pop('image', None)
         self.freshness, self.shutdown_timeout = freshness, shutdown_timeout
+        self.max_queued_bytes, self.writer_factory = max_queued_bytes, writer_factory
         self.lock = threading.RLock()
-        self.session = RecordingSession()
         self.state = 'idle'
         self.current = {}
         saved = self.catalog.list(limit=1)[0]
@@ -142,31 +67,48 @@ class RecorderEngine:
         self._temporary = None
         self._current_request_id = None
         self._save_cancel_requested = False
-        self._image_spool_error = ''
+        self._writer = None
+        self._writer_active = False
+        self._writer_error = ''
+        self._finalize_queued = False
+        self._generation = 0
         self._seen = {}
         self._cancelled = set()
         self._counts = {}
         self._reset_counts()
         self._queue = queue.Queue()
-        self._queued_images = 0
+        self._queued_bytes = 0
         self._closing = False
         self._closed = False
-        self._worker = threading.Thread(target=self._work, name='fastumi-recorder-writer', daemon=True)
+        self._worker = threading.Thread(target=self._work, name='fastumi-mcap-writer', daemon=True)
         self._worker.start()
 
     def _reset_counts(self):
-        """重置本轮采样与图像计数。"""
         self._counts = dict(joint_samples=0, action_samples=0, gripper_samples=0,
                             tracker_samples=0, received_frames=0, encoded_frames=0,
                             saved_frames=0, dropped_frames=0)
 
     def _check_id(self, recording_id):
-        """验证请求指向当前录制条目。"""
         if not recording_id or recording_id != self.current.get('recording_id'):
             raise RecordingError('NOT_FOUND', '录制 ID 不是当前条目')
 
+    def _fail(self, error):
+        """Mark this episode failed and enqueue one writer-close barrier."""
+        self._writer_error = str(error)
+        self.last_error = f'{error}；未完成目录: {self._temporary}'
+        self.state = 'error'
+        if self._current_request_id:
+            try:
+                self.requests.put(self._current_request_id, state='failed',
+                                  code='SAVE_FAILED', message=self.last_error)
+            except sqlite3.Error as ledger_error:
+                self.last_error += f'；台账更新失败: {ledger_error}'
+        if not self._finalize_queued:
+            self._finalize_queued = True
+            self._queue.put(('finalize', self._generation, 'error', None))
+
     def start(self, dir_name='', name='', timestamp=None, request_id=None):
-        """就绪检查及编号分配完成后才进入 recording。"""
+        """Open and register all MCAP topics before acknowledging the start."""
         with self.lock:
             try:
                 request_id = canonical_request_id(request_id or str(uuid.uuid4()))
@@ -184,8 +126,10 @@ class RecorderEngine:
                     raise RecordingError('CANCELLED', '启动请求已撤销')
             else:
                 self.requests.put(request_id, state='pending')
+            temporary = None
+            writer = None
             try:
-                if self._closing or self.state in ('recording', 'saving'):
+                if self._closing or self._writer_active or self.state in ('recording', 'saving'):
                     raise RecordingError('BUSY', '录制器正在录制、保存或退出')
                 required = ['joint', 'gripper'] + (['image'] if self.record_camera else [])
                 now = time.monotonic()
@@ -194,32 +138,42 @@ class RecorderEngine:
                 if missing:
                     raise RecordingError('NOT_READY', '缺少最近有效输入: ' + ', '.join(missing))
                 stamp = time.time() if timestamp is None else timestamp
-                info, temporary = self.catalog.allocate(dir_name or self.dir_name, name or self.name, stamp)
+                info, temporary = self.catalog.allocate(dir_name or self.dir_name,
+                                                        name or self.name, stamp)
+                writer = self.writer_factory(temporary / 'bag', self.topics)
                 self.requests.put(request_id, state='recording', recording_id=info['recording_id'],
                                   start_success=1, start_code='STARTED', start_message='STARTED',
                                   code='STARTED', message='录制已启动')
-                self.session.command('a', stamp, temporary)
+                self._writer = writer
+                self._writer_active = True
+                self._generation += 1
                 self.current, self._temporary = info, temporary
                 self._current_request_id = request_id
-                self.encoder.reset_cancel()
+                self._save_cancel_requested = False
+                self._writer_error = ''
+                self._finalize_queued = False
                 self._reset_counts()
-                self._image_spool_error = ''
                 self.last_error = ''
                 self.state = 'recording'
                 return info['recording_id'], 'STARTED'
-            except RecordingError as error:
+            except Exception as error:
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                if temporary is not None:
+                    shutil.rmtree(temporary, ignore_errors=True)
+                code = error.code if isinstance(error, RecordingError) else 'IO_ERROR'
                 self.requests.put(request_id, state='failed', start_success=0,
-                                  start_code=error.code, start_message=str(error),
-                                  code=error.code, message=str(error))
-                raise
-            except (OSError, ValueError) as error:
-                self.requests.put(request_id, state='failed', start_success=0,
-                                  start_code='IO_ERROR', start_message=str(error),
-                                  code='IO_ERROR', message=str(error))
-                raise
+                                  start_code=code, start_message=str(error),
+                                  code=code, message=str(error))
+                if isinstance(error, RecordingError):
+                    raise
+                raise RecordingError(code, str(error)) from error
 
     def stop(self, recording_id, timestamp=None):
-        """停止只排入保存屏障；不等待视频编码结束。"""
+        """Queue a barrier after every message accepted before this call."""
         with self.lock:
             if recording_id in self.catalog.entries:
                 return recording_id, 'ALREADY_SAVED'
@@ -236,14 +190,14 @@ class RecorderEngine:
             if self._current_request_id:
                 self.requests.put(self._current_request_id, state='saving',
                                   code='SAVING', message='正在保存')
-            _, episode, generation = self.session.command('stop', stamp)
             self.current.update(stopped_at=stamp, duration=stamp - self.current['started_at'])
             self.state = 'saving'
-            self._queue.put(('save', generation, episode, dict(self.current), self._temporary))
+            self._finalize_queued = True
+            self._queue.put(('finalize', self._generation, 'save', None))
             return recording_id, 'STOP_ACCEPTED'
 
     def cancel(self, recording_id):
-        """取消仅适用于尚未保存的本轮，旧图像由代次门控丢弃。"""
+        """Close and remove an active bag before acknowledging cancellation."""
         with self.lock:
             if recording_id in self._cancelled:
                 return recording_id, 'ALREADY_CANCELLED'
@@ -252,26 +206,23 @@ class RecorderEngine:
                 raise RecordingError('BUSY', '保存阶段不能取消')
             if self.state != 'recording':
                 raise RecordingError('NOT_RECORDING', '当前条目没有在录制')
+            done = threading.Event()
+            self.state = 'saving'
+            self._save_cancel_requested = True
+            self._finalize_queued = True
             if self._current_request_id:
                 self.requests.put(self._current_request_id, cancel_requested=1,
                                   code='CANCEL_ACCEPTED', message='正在撤销录制')
-            self.session.command('b', time.time())
-            self.state = 'idle'
-            try:
-                shutil.rmtree(self._temporary)
-            except OSError as error:
-                if self._current_request_id:
-                    self.requests.put(self._current_request_id, state='failed',
-                                      code='IO_ERROR', message=str(error))
-                raise
-            if self._current_request_id:
-                self.requests.put(self._current_request_id, state='cancelled',
-                                  code='CANCELLED', message='录制已撤销')
-            self._cancelled.add(recording_id)
+            self._queue.put(('finalize', self._generation, 'cancel', done))
+        if not done.wait(self.shutdown_timeout):
+            raise RecordingError('IO_ERROR', '等待 MCAP 关闭超时')
+        with self.lock:
+            if self.state == 'error':
+                raise RecordingError('IO_ERROR', self.last_error)
             return recording_id, 'CANCELLED'
 
     def cancel_request(self, request_id):
-        """Tombstone unknown starts or cancel an active recording by request identity."""
+        """Tombstone unknown starts or cancel by durable request identity."""
         try:
             request_id = canonical_request_id(request_id)
         except ValueError as error:
@@ -288,28 +239,18 @@ class RecorderEngine:
                 return row['recording_id'], row['code'], row['state']
             if request_id != self._current_request_id:
                 raise RecordingError('NOT_FOUND', '请求不是当前录制')
-            if self.state == 'recording':
-                self.requests.put(request_id, state='cancelled', code='CANCELLED',
-                                  message='录制已撤销', cancel_requested=1)
-                self.session.command('b', time.time())
-                self._cancelled.add(row['recording_id'])
-                self.state = 'idle'
-                try:
-                    shutil.rmtree(self._temporary)
-                except OSError as error:
-                    self.requests.put(request_id, state='failed', code='IO_ERROR', message=str(error))
-                    raise
-                return row['recording_id'], 'CANCELLED', 'cancelled'
             if self.state == 'saving':
                 self.requests.put(request_id, code='CANCEL_ACCEPTED',
                                   message='保存中止已请求', cancel_requested=1)
                 self._save_cancel_requested = True
-                self.encoder.abort_current()
                 return row['recording_id'], 'CANCEL_ACCEPTED', 'saving'
-            raise RecordingError('NOT_RECORDING', '请求没有活动录制')
+            if self.state != 'recording':
+                raise RecordingError('NOT_RECORDING', '请求没有活动录制')
+            recording_id = row['recording_id']
+        self.cancel(recording_id)
+        return recording_id, 'CANCELLED', 'cancelled'
 
     def get_request(self, request_id):
-        """Return the durable request result and current state."""
         try:
             request_id = canonical_request_id(request_id)
         except ValueError as error:
@@ -321,58 +262,49 @@ class RecorderEngine:
             return row
 
     def delete(self, recording_id):
-        """在事务锁内回收已完成条目。"""
         with self.lock:
-            if recording_id == self.current.get('recording_id') and self.state in ('recording', 'saving'):
+            if recording_id == self.current.get('recording_id') and self._writer_active:
                 raise RecordingError('BUSY', '不能删除正在录制或保存的条目')
             return recording_id, self.catalog.delete(recording_id)
 
     def list(self, **kwargs):
-        """返回任务过滤后的录制摘要分页。"""
         with self.lock:
             return self.catalog.list(**kwargs)
 
-    def add(self, stream, timestamp, value, *, orientation=None, frame_id=''):
-        """有效样本刷新本机接收新鲜度，消息时间用于数据时间轴。"""
+    def record(self, stream, message, timestamp_ns, *, valid_for_readiness=False):
+        """Queue original CDR; validity affects readiness only, never bag content."""
         with self.lock:
-            aliases = {'joint_state': 'joint', 'gripper_state': 'gripper', 'tracker_pose': 'tracker'}
-            if stream in aliases:
-                self._seen[aliases[stream]] = time.monotonic()
-            if stream == 'gripper_action':
-                self.session.add_gripper_action(value)
-            elif stream == 'gripper_state':
-                self.session.add_gripper_state(timestamp, value)
-            elif stream == 'tracker_pose':
-                self.session.add_tracker(timestamp, value, orientation, frame_id)
-            else:
-                self.session.add(stream, timestamp, value)
-            if self.state == 'recording':
-                key = {'joint_state': 'joint_samples', 'joint_action': 'action_samples',
-                       'gripper_state': 'gripper_samples', 'tracker_pose': 'tracker_samples'}.get(stream)
-                if key:
-                    self._counts[key] += 1
-
-    def image(self, timestamp, message):
-        """最多排队八帧；由节点预先校验消息结构。"""
-        with self.lock:
-            self._seen['image'] = time.monotonic()
-            accepting, generation = self.session.accepts_image()
-            if not accepting or not self.record_camera:
+            readiness = {'joint_state': 'joint', 'gripper_state': 'gripper',
+                         'tracker_pose': 'tracker', 'image': 'image'}.get(stream)
+            if valid_for_readiness and readiness:
+                self._seen[readiness] = time.monotonic()
+            if self.state != 'recording' or stream not in self.topics:
                 return
-            self._counts['received_frames'] += 1
-            if self._queued_images >= 8:
-                self._counts['dropped_frames'] += 1
+            if stream == 'image':
+                self._counts['received_frames'] += 1
+            try:
+                serialized = serialize_message(message)
+            except Exception as error:
+                if stream == 'image':
+                    self._counts['dropped_frames'] += 1
+                self._fail(f'ROS 消息序列化失败: {error}')
                 return
-            self._queued_images += 1
-            self._queue.put(('image', generation, timestamp, message))
+            if self._queued_bytes + len(serialized) > self.max_queued_bytes:
+                if stream == 'image':
+                    self._counts['dropped_frames'] += 1
+                self._fail('MCAP 写入队列已满')
+                return
+            self._queued_bytes += len(serialized)
+            self._queue.put(('write', self._generation, stream,
+                             self.topics[stream][0], serialized, int(timestamp_ns)))
 
     def status(self, timestamp=None):
-        """返回线程安全状态快照，时间和输入 age 单位为秒。"""
         with self.lock:
             now = time.monotonic()
             duration = self.current.get('duration', 0.0)
             if self.state == 'recording':
-                duration = max(0.0, (time.time() if timestamp is None else timestamp) - self.current['started_at'])
+                duration = max(0.0, (time.time() if timestamp is None else timestamp)
+                               - self.current['started_at'])
             return dict(state=self.state, recording_id=self.current.get('recording_id', ''),
                         current=deepcopy(self.current), last_completed=deepcopy(self.last_completed),
                         duration=duration, last_error=self.last_error, **self._counts,
@@ -380,108 +312,99 @@ class RecorderEngine:
                            for s in ('joint', 'gripper', 'image', 'tracker')})
 
     def _work(self):
-        """按队列顺序编码图像并执行保存屏障。"""
+        """Write messages and process ordered close/publish barriers."""
         while True:
             task = self._queue.get()
             if task[0] == 'shutdown':
                 return
-            if task[0] == 'image':
-                _, generation, timestamp, message = task
+            if task[0] == 'write':
+                _, generation, stream, topic, serialized, timestamp_ns = task
                 try:
-                    if self.image_transport == 'ffmpeg':
-                        data, keyframe = ffmpeg_packet_to_h264(message)
-                        codec = 'h264'
-                        dimensions = None
-                    elif self.image_transport == 'raw':
-                        data, dimensions = image_to_bgr24(message)
-                        codec, keyframe = 'bgr24', True
-                    else:
-                        data = image_to_jpeg(message)
-                        codec, keyframe = 'mjpeg', True
-                        dimensions = None
                     with self.lock:
-                        if (generation == self.session.generation and
-                                self.state in ('recording', 'saving') and
-                                not self._image_spool_error):
-                            try:
-                                self.session.append_image(
-                                    generation, timestamp, data, codec=codec,
-                                    keyframe=keyframe, dimensions=dimensions)
-                            except OSError as error:
-                                if codec == 'bgr24':
-                                    self._image_spool_error = f'raw 临时缓存写入失败: {error}'
-                                    self.last_error = self._image_spool_error
-                                raise
-                            self._counts['encoded_frames'] += 1
-                except Exception:
+                        should_write = generation == self._generation and not self._writer_error
+                    if should_write:
+                        self._writer.write(topic, serialized, timestamp_ns)
+                        with self.lock:
+                            field = SAMPLE_FIELDS.get(stream)
+                            if field:
+                                self._counts[field] += 1
+                            elif stream == 'image':
+                                self._counts['encoded_frames'] += 1
+                except Exception as error:
                     with self.lock:
-                        if generation == self.session.generation:
-                            self._counts['dropped_frames'] += 1
+                        self._fail(f'MCAP 写入失败: {error}')
                 finally:
                     with self.lock:
-                        self._queued_images -= 1
+                        self._queued_bytes -= len(serialized)
                 continue
-            _, generation, episode, info, temporary = task
+            _, generation, mode, done = task
             try:
-                if self._image_spool_error:
-                    raise RuntimeError(self._image_spool_error)
-                stats = write_episode(temporary, episode, self.fps, self.encoder)
-                info.update(stats)
-                info['size_bytes'] = sum(p.stat().st_size for p in temporary.iterdir() if p.is_file())
+                writer, self._writer = self._writer, None
+                close_error = None
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception as error:
+                        close_error = error
                 with self.lock:
-                    if self.encoder._aborted:
-                        raise RuntimeError('退出等待超时，编码已中止')
-                    if self._save_cancel_requested:
-                        raise RuntimeError('保存已由请求撤销')
-                    self.catalog.publish(info, temporary)
-                    if self._current_request_id:
-                        try:
-                            self.requests.put(self._current_request_id, state='completed',
-                                              code='COMPLETED', message='录制已保存')
-                        except sqlite3.Error as error:
-                            # The catalog commit is authoritative; query and restart reconcile it.
-                            self.last_error = f'录制已保存，但请求台账更新失败: {error}'
-                    self.last_completed = dict(info)
-                    self.current = dict(info)
-                    self._counts['saved_frames'] = stats['image_frames']
-                    self.session.finish_save()
-                    self.state = 'idle'
-            except Exception as error:
-                with self.lock:
-                    if self._save_cancel_requested:
-                        try:
-                            shutil.rmtree(temporary)
+                    cancel = mode == 'cancel' or self._save_cancel_requested
+                    failed = bool(self._writer_error) or mode == 'error'
+                    if cancel:
+                        shutil.rmtree(self._temporary)
+                        if self._current_request_id:
                             self.requests.put(self._current_request_id, state='cancelled',
-                                              code='CANCELLED', message='保存已中止并丢弃')
-                            self.state = 'idle'
-                        except Exception as cleanup_error:
-                            self.last_error = str(cleanup_error)
-                            try:
-                                self.requests.put(self._current_request_id, state='failed',
-                                                  code='IO_ERROR', message=self.last_error)
-                            except sqlite3.Error as ledger_error:
-                                self.last_error += f'；台账更新失败: {ledger_error}'
-                            self.state = 'error'
-                    else:
-                        self.last_error = f'{error}；未完成目录: {temporary}'
+                                              code='CANCELLED', message='录制已撤销')
+                        self._cancelled.add(self.current['recording_id'])
+                        self.state = 'idle'
+                    elif close_error is not None:
+                        raise close_error
+                    elif failed:
+                        atomic_json(self._temporary / 'error.json',
+                                    {'error': self._writer_error,
+                                     'recording_id': self.current['recording_id']})
                         self.state = 'error'
+                    else:
+                        info = dict(self.current)
+                        info.update(image_frames=self._counts['encoded_frames'],
+                                    has_joint_action=self._counts['action_samples'] > 0,
+                                    joint_samples=self._counts['joint_samples'],
+                                    action_samples=self._counts['action_samples'],
+                                    gripper_samples=self._counts['gripper_samples'],
+                                    tracker_samples=self._counts['tracker_samples'])
+                        self.catalog.publish(info, self._temporary)
                         if self._current_request_id:
                             try:
-                                self.requests.put(self._current_request_id, state='failed',
-                                                  code='SAVE_FAILED', message=self.last_error)
-                            except sqlite3.Error as ledger_error:
-                                self.last_error += f'；台账更新失败: {ledger_error}'
+                                self.requests.put(self._current_request_id, state='completed',
+                                                  code='COMPLETED', message='录制已保存')
+                            except sqlite3.Error as error:
+                                self.last_error = f'录制已保存，但请求台账更新失败: {error}'
+                        self.current = self.last_completed = dict(info)
+                        self._counts['saved_frames'] = info['image_frames']
+                        self.state = 'idle'
+            except Exception as error:
+                with self.lock:
+                    self.last_error = f'{error}；未完成目录: {self._temporary}'
+                    self.state = 'error'
+                    if self._current_request_id:
                         try:
-                            atomic_json(temporary / 'error.json', {'error': str(error), 'recording_id': info['recording_id']})
-                        except OSError:
+                            self.requests.put(self._current_request_id, state='failed',
+                                              code='SAVE_FAILED', message=self.last_error)
+                        except sqlite3.Error:
                             pass
-                    self.session.finish_save()
-                    self._save_cancel_requested = False
+                    try:
+                        atomic_json(self._temporary / 'error.json',
+                                    {'error': str(error), 'recording_id': self.current['recording_id']})
+                    except OSError:
+                        pass
             finally:
-                episode.close()
+                with self.lock:
+                    self._writer_active = False
+                    self._save_cancel_requested = False
+                if done is not None:
+                    done.set()
 
     def close(self, timestamp=None):
-        """正常退出自动保存；超时中止 FFmpeg 并保留临时现场。"""
+        """Auto-stop an active episode and wait for its MCAP writer."""
         with self.lock:
             if self._closed:
                 return not self._worker.is_alive()
@@ -492,13 +415,10 @@ class RecorderEngine:
         self._worker.join(self.shutdown_timeout)
         completed = not self._worker.is_alive()
         if not completed:
-            self.encoder.abort()
-            self._worker.join(5.0)
             with self.lock:
-                self.last_error = '退出保存超时；未完成数据保留在隐藏临时目录'
+                self.last_error = '退出保存超时；未完成 MCAP 保留在隐藏临时目录'
                 self.state = 'error'
-        if not self._worker.is_alive():
-            self.session.close()
+        else:
             self.requests.close()
             self.catalog.close()
         return completed

@@ -64,12 +64,12 @@ ros2 launch fastumi_bringup hardware.launch.py "${launch_args[@]}"
 
 | `wrist_camera_mode` | 相机话题 | 消息类型 | Recorder 处理 |
 |---|---|---|---|
-| `raw` | `/wrist_camera/image_raw` | `sensor_msgs/msg/Image` (`bgr8`) | 连续 BGR24 经 FFmpeg 编码 H.264 MP4 |
-| `jpeg`（默认） | `/wrist_camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | 相机原生 JPEG 缓存，保存时编码 MP4 |
-| `h264` | `/wrist_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | H.264 包直接封装 MP4 |
+| `raw` | `/wrist_camera/image_raw` | `sensor_msgs/msg/Image` (`bgr8`) | 原始消息写入 MCAP |
+| `jpeg`（默认） | `/wrist_camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | 相机 JPEG 消息写入 MCAP |
+| `h264` | `/wrist_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | H.264 包消息写入 MCAP |
 
 一次模式选择会同时设置相机和 Recorder。末端相机开启时，显式设置的 `image_topic`、`image_transport` 必须与该模式一致；关闭末端相机后可用它们订阅外部源。`enable_decoder:=true` 只允许 `h264`。
-raw 临时缓存与该轮数据集临时目录同盘；1280×960@30 约占 **6.6 GB/分钟**。此前本机短测 raw 接收约 25.4 FPS，JPEG 约 30 FPS；采集性能需按实际设备再次评估。三种模式均原样保存相机消息时间戳；旧 H.264 数据中的时间戳回退仍需单独定位。
+raw 1280×960@30 的未压缩数据约 **6.6 GB/分钟**；MCAP 的 Zstd 压缩率取决于画面内容。此前本机短测 raw 接收约 25.4 FPS，JPEG 约 30 FPS；采集性能需按实际设备再次评估。三种模式均保留原始相机消息及其 header 时间戳；MCAP 记录时间采用 Jetson 接收时间。
 
 **启动会产生硬件动作**，机械臂等待有效反馈后。
 夹爪控制节点按 `startup_openness=1.0` 平滑张开。
@@ -122,7 +122,7 @@ raw 临时缓存与该轮数据集临时目录同盘；1280×960@30 约占 **6.6
 | `enable_decoder` | false | 是否在 Jetson 本地把 H.264 解码到 `/wrist_camera/image_decoded` |
 | `h264_encoder` | hardware | 仅 `h264` 模式使用；`hardware` 使用 NVIDIA GStreamer，`software` 使用 libx264 |
 | `wrist_video_device` | 空，必须填写 | 完整物理端口路径 |
-| `wrist_width` / `wrist_height` / `camera_fps` | 1280 / 960 / 30 | 采集模式；FPS 同时用于录制视频 |
+| `wrist_width` / `wrist_height` / `camera_fps` | 1280 / 960 / 30 | 相机采集模式 |
 | `gripper_config_file` | 已安装 `unitree_gripper` 包的 `config/gripper.yaml` | 夹爪 ROS 参数 YAML |
 | `gripper_network_interface` | 配置中的值 | 同时覆盖厂商服务端和 ROS 节点网卡 |
 | `dataset_root` | 仓库 dataset/h5dy_data | 覆盖时使用绝对路径 |
@@ -135,8 +135,8 @@ raw 临时缓存与该轮数据集临时目录同盘；1280×960@30 约占 **6.6
 相机与夹爪的独立入口保持不变。录制接口、单独启动与远端接入见
 [fastumi_recorder](../fastumi_recorder/README.md)。
 
-Ctrl+C 自动停止当前录制并等待后台保存，然后释放进程。
-超时会终止 FFmpeg，未完成目录不进入正式列表；日志明确提示保留位置。
+每轮录制保存至 `<dataset_root>/<dir_name>/<name>/episode_N/`，其中 `bag/` 是使用原生 `zstd_fast` 块压缩的 ROS 2 MCAP bag；`recording.json` 用于列表服务。不会生成 HDF5 或 MP4。旧条目保留在磁盘，但不进入新列表。
+Ctrl+C 自动停止当前录制并等待 MCAP 写入完成；超时或写入失败时，未完成目录不进入正式列表，日志提示保留位置。
 查看画面时可以设置 `DISPLAY=:10.0`。
 
 遥操端与 Jetson 使用相同 `ROS_DOMAIN_ID` 后执行：
