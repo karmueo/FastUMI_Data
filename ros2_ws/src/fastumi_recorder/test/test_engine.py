@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -14,10 +15,10 @@ import pytest
 
 from fastumi_recorder.catalog import Catalog, RecordingError
 from fastumi_recorder.engine import (
-    RecorderEngine, ffmpeg_packet_to_h264, image_to_jpeg,
+    RecorderEngine, ffmpeg_packet_to_h264, image_to_bgr24, image_to_jpeg,
 )
 from fastumi_recorder.request_ledger import RequestLedger
-from fastumi_recorder.core import EpisodeBuffer
+from fastumi_recorder.core import CameraFrameSpool, EpisodeBuffer
 from fastumi_recorder.storage import select_video_samples
 import fastumi_recorder.engine as engine_module
 
@@ -45,6 +46,104 @@ def test_compressed_jpeg_is_forwarded_without_reencoding():
     jpeg = b'\xff\xd8native-camera-jpeg\xff\xd9'
     message = SimpleNamespace(format='jpeg', data=jpeg)
     assert image_to_jpeg(message) is jpeg
+
+
+@pytest.mark.parametrize('encoding, data, expected', [
+    ('bgr8', bytes([1, 2, 3, 4, 5, 6, 99, 99]), bytes([1, 2, 3, 4, 5, 6])),
+    ('rgb8', bytes([1, 2, 3, 4, 5, 6, 99, 99]), bytes([3, 2, 1, 6, 5, 4])),
+    ('mono8', bytes([7, 8, 99, 99]), bytes([7, 7, 7, 8, 8, 8])),
+])
+def test_raw_image_colors_and_row_padding(encoding, data, expected):
+    step = 8 if encoding != 'mono8' else 4
+    message = SimpleNamespace(width=2, height=1, step=step,
+                              encoding=encoding, data=data)
+    assert image_to_bgr24(message) == (expected, (2, 1))
+
+
+def test_raw_padding_is_skipped_between_rows():
+    message = SimpleNamespace(width=1, height=2, step=5, encoding='bgr8',
+                              data=bytes([1, 2, 3, 99, 99, 4, 5, 6, 88, 88]))
+    assert image_to_bgr24(message) == (bytes([1, 2, 3, 4, 5, 6]), (1, 2))
+
+
+def test_raw_frame_saves_decodable_mp4_without_jpeg(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_module, 'image_to_jpeg', lambda _: pytest.fail('raw 调用了 JPEG'))
+    instance = RecorderEngine(tmp_path, image_transport='raw')
+    try:
+        ready(instance)
+        rid, _ = instance.start(timestamp=11.)
+        # 16x16 纯红、纯蓝实帧；第二帧带行填充。
+        red = bytes([0, 0, 255]) * 16
+        blue = bytes([255, 0, 0]) * 16
+        instance.image(11.2, SimpleNamespace(
+            width=16, height=16, step=48, encoding='bgr8', data=red * 16))
+        instance.image(11.3, SimpleNamespace(
+            width=16, height=16, step=50, encoding='bgr8',
+            data=(blue + b'xx') * 16))
+        instance.stop(rid, 12.)
+        wait_for(lambda: instance.state != 'saving')
+        assert instance.state == 'idle', instance.last_error
+        path = tmp_path / instance.list()[0][0]['relative_path']
+        with h5py.File(path / 'proprio.hdf5') as data:
+            assert data['observations/images/cam_gripper_timestamp'][:].tolist() == [11.2, 11.3]
+        probe = subprocess.run([
+            'ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_name,nb_frames',
+            '-of', 'default=noprint_wrappers=1', str(path / 'gripper.mp4'),
+        ], check=True, capture_output=True, text=True).stdout
+        assert 'codec_name=h264' in probe and 'nb_frames=2' in probe
+        decoded = subprocess.run([
+            'ffmpeg', '-v', 'error', '-i', str(path / 'gripper.mp4'),
+            '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'
+        ], check=True, capture_output=True).stdout
+        assert len(decoded) == 2 * 16 * 16 * 3
+        assert decoded[2] > 200 and decoded[0] < 60
+        assert decoded[16 * 16 * 3] > 200 and decoded[16 * 16 * 3 + 2] < 60
+    finally:
+        instance.close()
+
+
+def test_raw_size_change_drops_frame(tmp_path):
+    instance = RecorderEngine(tmp_path, image_transport='raw')
+    try:
+        ready(instance)
+        rid, _ = instance.start(timestamp=11.)
+        instance.image(11.2, frame())
+        instance.image(11.3, SimpleNamespace(
+            width=32, height=16, step=96, encoding='rgb8', data=bytes(32*16*3)))
+        instance.stop(rid, 12.)
+        wait_for(lambda: instance.state != 'saving')
+        assert instance.state == 'idle', instance.last_error
+        assert instance.status()['dropped_frames'] == 1
+        path = tmp_path / instance.list()[0][0]['relative_path']
+        with h5py.File(path / 'proprio.hdf5') as data:
+            assert len(data['observations/images/cam_gripper_timestamp']) == 1
+    finally:
+        instance.close()
+
+
+def test_raw_spool_uses_dataset_disk_and_failure_blocks_publish(tmp_path, monkeypatch):
+    instance = RecorderEngine(tmp_path, image_transport='raw')
+    try:
+        ready(instance)
+        rid, _ = instance.start(timestamp=11.)
+        spool = instance.session._episode.images
+        spool._file.rollover()
+        assert os.fstat(spool._file.fileno()).st_dev == os.stat(instance._temporary).st_dev
+        real_append = CameraFrameSpool.append
+        def fail_append(self, *args, **kwargs):
+            if self is spool:
+                raise OSError('spool full')
+            return real_append(self, *args, **kwargs)
+        monkeypatch.setattr(CameraFrameSpool, 'append', fail_append)
+        instance.image(11.2, frame())
+        wait_for(lambda: 'spool full' in instance.status()['last_error'])
+        instance.stop(rid, 12.)
+        wait_for(lambda: instance.state == 'error')
+        assert instance.list()[1] == 0
+        assert (instance._temporary / 'error.json').exists()
+    finally:
+        instance.close()
 
 
 def test_ffmpeg_packet_validation_and_keyframe_flag():
@@ -438,12 +537,12 @@ def test_close_timeout_aborts_encoder(engine, monkeypatch):
 def test_cancelled_image_cannot_leak_into_next_episode(engine, monkeypatch, tmp_path):
     """取消时已排队的编码回调不能污染下一轮录制。"""
     entered, release = threading.Event(), threading.Event()
-    real_encode = engine_module.image_to_jpeg
+    real_encode = engine_module.image_to_bgr24
     def delayed(message):
         entered.set()
         assert release.wait(3.)
         return real_encode(message)
-    monkeypatch.setattr(engine_module, 'image_to_jpeg', delayed)
+    monkeypatch.setattr(engine_module, 'image_to_bgr24', delayed)
     ready(engine)
     first, _ = engine.start(timestamp=11.)
     engine.image(11.1, frame())

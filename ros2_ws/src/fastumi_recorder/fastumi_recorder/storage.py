@@ -115,8 +115,9 @@ def write_hdf5(path: Path, episode: EpisodeBuffer, bounds, camera_times) -> int:
     return len(camera_times)
 
 
-def write_video(path: Path, video_samples, fps: int, encoder) -> int:
-    """将 JPEG 编码为 H.264，或把已有 H.264 无重编码封装为 MP4。"""
+def write_video(path: Path, video_samples, fps: int, encoder,
+                image_size: tuple[int, int] | None = None) -> int:
+    """将 JPEG/BGR24 编码为 MP4，或把已有 H.264 无重编码封装。"""
     frames = iter(video_samples)
     first = next(frames, None)
     if first is None:
@@ -135,6 +136,20 @@ def write_video(path: Path, video_samples, fps: int, encoder) -> int:
             "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(path),
         ]
+    elif codec == "bgr24":
+        if image_size is None or any(value <= 0 for value in image_size):
+            raise ValueError("raw 视频缺少有效尺寸")
+        width, height = image_size
+        if len(first[1]) != width * height * 3:
+            raise ValueError("raw 视频帧字节数与尺寸不符")
+        command = [
+            encoder.executable, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "rawvideo", "-pixel_format", "bgr24",
+            "-video_size", f"{width}x{height}", "-framerate", str(fps),
+            "-i", "pipe:0", "-an", "-c:v", "libx264", "-preset", "fast",
+            "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(path),
+        ]
     else:
         raise ValueError(f"不支持的视频编码: {codec}")
     with tempfile.TemporaryFile() as errors:
@@ -146,7 +161,11 @@ def write_video(path: Path, video_samples, fps: int, encoder) -> int:
         count = 0
         try:
             assert process.stdin is not None
-            for _, data, _, _ in chain((first,), frames):
+            for _, data, sample_codec, _ in chain((first,), frames):
+                if sample_codec != codec:
+                    raise ValueError("单轮录制包含多种视频编码")
+                if codec == "bgr24" and len(data) != width * height * 3:
+                    raise ValueError("raw 视频帧字节数与尺寸不符")
                 process.stdin.write(data)
                 count += 1
             process.stdin.close()
@@ -175,7 +194,7 @@ def write_episode(temporary: Path, episode: EpisodeBuffer, fps: int, encoder):
     )
     actual = write_video(
         temporary / f"{CAMERA_NAME}.mp4",
-        select_video_samples(episode, bounds), fps, encoder
+        select_video_samples(episode, bounds), fps, encoder, episode.image_size
     )
     if actual != expected:
         raise RuntimeError("视频帧数与 HDF5 相机时间戳数量不一致")

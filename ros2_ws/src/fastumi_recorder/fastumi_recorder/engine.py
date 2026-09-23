@@ -1,7 +1,6 @@
 """与 ROS 无关的录制状态机、后台编码和服务事务。"""
 
 from copy import deepcopy
-from io import BytesIO
 import queue
 import shutil
 import sqlite3
@@ -9,7 +8,7 @@ import threading
 import time
 import uuid
 
-from PIL import Image as PillowImage
+import numpy as np
 
 from fastumi_recorder.catalog import Catalog, RecordingError, atomic_json
 from fastumi_recorder.core import RecordingSession
@@ -64,7 +63,7 @@ class Encoder:
 
 
 def image_to_jpeg(message):
-    """把 ROS 原始图像转换为 JPEG，或直接返回已校验的压缩 JPEG。"""
+    """返回已校验的相机原生 JPEG 字节。"""
     if hasattr(message, 'format') and not hasattr(message, 'encoding'):
         image_format = str(message.format).lower()
         data = bytes(message.data)
@@ -73,21 +72,32 @@ def image_to_jpeg(message):
         if len(data) < 4 or data[:2] != b'\xff\xd8' or data[-2:] != b'\xff\xd9':
             raise ValueError('JPEG 数据不完整')
         return data
-    formats = {'bgr8': ('RGB', 'BGR', 3), 'rgb8': ('RGB', 'RGB', 3),
-               'mono8': ('L', 'L', 1)}
-    if message.encoding.lower() not in formats:
+    raise ValueError('JPEG 模式需要 sensor_msgs/msg/CompressedImage')
+
+
+def image_to_bgr24(message):
+    """按 ROS 行跨度将 bgr8/rgb8/mono8 转成连续 BGR24 字节及宽高。"""
+    channels = {'bgr8': 3, 'rgb8': 3, 'mono8': 1}.get(
+        str(message.encoding).lower())
+    if channels is None:
         raise ValueError(f'不支持的图像编码: {message.encoding}')
-    mode, raw_mode, channels = formats[message.encoding.lower()]
     width, height, step = int(message.width), int(message.height), int(message.step)
     if width <= 0 or height <= 0 or step < width * channels:
         raise ValueError('图像尺寸或行跨度无效')
     data = bytes(message.data)
     if len(data) < step * height:
         raise ValueError('图像数据不足')
-    image = PillowImage.frombytes(mode, (width, height), data[:step * height], 'raw', raw_mode, step)
-    with BytesIO() as output:
-        image.save(output, format='JPEG', quality=90)
-        return output.getvalue()
+    if channels == 3 and step == width * 3 and message.encoding.lower() == 'bgr8':
+        return data[:step * height], (width, height)
+    rows = np.frombuffer(data, dtype=np.uint8, count=step * height).reshape(height, step)
+    pixels = rows[:, :width * channels].reshape(height, width, channels)
+    if channels == 1:
+        bgr = np.repeat(pixels, 3, axis=2)
+    elif message.encoding.lower() == 'rgb8':
+        bgr = pixels[:, :, ::-1]
+    else:
+        bgr = pixels
+    return bgr.tobytes(), (width, height)
 
 
 def ffmpeg_packet_to_h264(message):
@@ -132,6 +142,7 @@ class RecorderEngine:
         self._temporary = None
         self._current_request_id = None
         self._save_cancel_requested = False
+        self._image_spool_error = ''
         self._seen = {}
         self._cancelled = set()
         self._counts = {}
@@ -187,11 +198,12 @@ class RecorderEngine:
                 self.requests.put(request_id, state='recording', recording_id=info['recording_id'],
                                   start_success=1, start_code='STARTED', start_message='STARTED',
                                   code='STARTED', message='录制已启动')
-                self.session.command('a', stamp)
+                self.session.command('a', stamp, temporary)
                 self.current, self._temporary = info, temporary
                 self._current_request_id = request_id
                 self.encoder.reset_cancel()
                 self._reset_counts()
+                self._image_spool_error = ''
                 self.last_error = ''
                 self.state = 'recording'
                 return info['recording_id'], 'STARTED'
@@ -379,14 +391,27 @@ class RecorderEngine:
                     if self.image_transport == 'ffmpeg':
                         data, keyframe = ffmpeg_packet_to_h264(message)
                         codec = 'h264'
+                        dimensions = None
+                    elif self.image_transport == 'raw':
+                        data, dimensions = image_to_bgr24(message)
+                        codec, keyframe = 'bgr24', True
                     else:
                         data = image_to_jpeg(message)
                         codec, keyframe = 'mjpeg', True
+                        dimensions = None
                     with self.lock:
-                        if generation == self.session.generation and self.state in ('recording', 'saving'):
-                            self.session.append_image(
-                                generation, timestamp, data, codec=codec,
-                                keyframe=keyframe)
+                        if (generation == self.session.generation and
+                                self.state in ('recording', 'saving') and
+                                not self._image_spool_error):
+                            try:
+                                self.session.append_image(
+                                    generation, timestamp, data, codec=codec,
+                                    keyframe=keyframe, dimensions=dimensions)
+                            except OSError as error:
+                                if codec == 'bgr24':
+                                    self._image_spool_error = f'raw 临时缓存写入失败: {error}'
+                                    self.last_error = self._image_spool_error
+                                raise
                             self._counts['encoded_frames'] += 1
                 except Exception:
                     with self.lock:
@@ -398,6 +423,8 @@ class RecorderEngine:
                 continue
             _, generation, episode, info, temporary = task
             try:
+                if self._image_spool_error:
+                    raise RuntimeError(self._image_spool_error)
                 stats = write_episode(temporary, episode, self.fps, self.encoder)
                 info.update(stats)
                 info['size_bytes'] = sum(p.stat().st_size for p in temporary.iterdir() if p.is_file())

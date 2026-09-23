@@ -10,7 +10,7 @@
   <exec_depend>ffmpeg_image_transport_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend><exec_depend>nav_msgs</exec_depend>
   <exec_depend>launch_ros</exec_depend><exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-h5py</exec_depend><exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-h5py</exec_depend>
   <exec_depend>ffmpeg</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>

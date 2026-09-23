@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import struct
 import tempfile
 import threading
+from pathlib import Path
 from typing import Iterator
 
 
@@ -13,16 +14,18 @@ JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 8))
 CAMERA_NAME = "gripper"
 CAMERA_SPOOL_MEMORY_LIMIT = 8 * 1024 * 1024
 _FRAME_HEADER = struct.Struct("<dQBB")
-_CODEC_IDS = {"mjpeg": 1, "h264": 2}
+_CODEC_IDS = {"mjpeg": 1, "h264": 2, "bgr24": 3}
 _CODECS = {value: key for key, value in _CODEC_IDS.items()}
 
 
 class CameraFrameSpool:
-    """按时间顺序缓存压缩视频帧，超过阈值后自动转入临时文件。"""
+    """按时间顺序缓存视频帧，超过阈值后转入数据集所在磁盘。"""
 
-    def __init__(self, memory_limit: int = CAMERA_SPOOL_MEMORY_LIMIT) -> None:
+    def __init__(self, memory_limit: int = CAMERA_SPOOL_MEMORY_LIMIT,
+                 directory: Path | None = None) -> None:
         """创建可回放的临时帧缓存。"""
-        self._file = tempfile.SpooledTemporaryFile(max_size=memory_limit, mode="w+b")
+        self._file = tempfile.SpooledTemporaryFile(
+            max_size=memory_limit, mode="w+b", dir=directory)
         self._count = 0
 
     def append(
@@ -83,6 +86,7 @@ class EpisodeBuffer:
     )
     tracker_frame_id: str = ""
     images: CameraFrameSpool = field(default_factory=CameraFrameSpool)
+    image_size: tuple[int, int] | None = None
 
     def close(self) -> None:
         """释放该轮录制的相机缓存。"""
@@ -104,7 +108,7 @@ class RecordingSession:
         self._latest_gripper_action: float | None = None
 
     def command(
-        self, key: str, timestamp: float
+        self, key: str, timestamp: float, spool_dir: Path | None = None
     ) -> tuple[str, EpisodeBuffer | None, int]:
         """处理单键命令并返回结果、待保存数据和录制代数。"""
         with self._lock:
@@ -112,7 +116,8 @@ class RecordingSession:
                 return "busy", None, self.generation
             if key == "a" and self.state == "idle":
                 self.generation += 1
-                self._episode = EpisodeBuffer(started_at=timestamp)
+                self._episode = EpisodeBuffer(
+                    started_at=timestamp, images=CameraFrameSpool(directory=spool_dir))
                 self.started_at = timestamp
                 self.state = "recording"
                 return "started", None, self.generation
@@ -186,6 +191,7 @@ class RecordingSession:
     def append_image(
         self, generation: int, timestamp: float, data: bytes, *,
         codec: str = "mjpeg", keyframe: bool = True,
+        dimensions: tuple[int, int] | None = None,
     ) -> None:
         """接受属于本轮录制且位于按键时间范围内的图像。"""
         with self._lock:
@@ -199,9 +205,16 @@ class RecordingSession:
                 self.stopped_at if self.state == "saving" else float("inf")
             ):
                 return
+            if codec == "bgr24":
+                if dimensions is None:
+                    raise ValueError("raw 图像缺少尺寸")
+                if episode.image_size is not None and episode.image_size != dimensions:
+                    raise ValueError("同一轮录制的 raw 图像尺寸发生变化")
             episode.images.append(
                 timestamp, data, codec=codec, keyframe=keyframe
             )
+            if codec == "bgr24":
+                episode.image_size = dimensions
 
     def finish_save(self) -> None:
         """由后台线程完成落盘后恢复空闲状态。"""

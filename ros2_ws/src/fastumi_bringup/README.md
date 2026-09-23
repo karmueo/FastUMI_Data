@@ -40,21 +40,36 @@ source install/setup.bash
 cp -n src/fastumi_bringup/config/hardware.env.example hardware.local.env
 
 source hardware.local.env
-ros2 launch fastumi_bringup hardware.launch.py \
-  wrist_video_device:="$WRIST_VIDEO_DEVICE" \
-  gripper_network_interface:="$GRIPPER_NETWORK_INTERFACE" \
-  gripper_config_file:="$GRIPPER_CONFIG_FILE" \
-  dataset_root:="$DATASET_ROOT" \
-  h264_encoder:="${H264_ENCODER:-hardware}" \
-  enable_decoder:=true
+launch_args=(
+  "wrist_video_device:=$WRIST_VIDEO_DEVICE"
+  "wrist_camera_mode:=${WRIST_CAMERA_MODE:-jpeg}"
+  "h264_encoder:=${H264_ENCODER:-hardware}"
+)
+if [[ -n "${GRIPPER_NETWORK_INTERFACE:-}" ]]; then
+  launch_args+=("gripper_network_interface:=$GRIPPER_NETWORK_INTERFACE")
+fi
+if [[ -n "${GRIPPER_CONFIG_FILE:-}" ]]; then
+  launch_args+=("gripper_config_file:=$GRIPPER_CONFIG_FILE")
+fi
+if [[ -n "${DATASET_ROOT:-}" ]]; then
+  launch_args+=("dataset_root:=$DATASET_ROOT")
+fi
+ros2 launch fastumi_bringup hardware.launch.py "${launch_args[@]}"
 ```
 
 `hardware.local.env` 被 Git 忽略。
-末端相机填写 USB 4.2 对应的完整`/dev/v4l/by-path/*-video-index0`，可以通过命令`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS，并在
-`/wrist_camera/image_raw/ffmpeg` 发布约 4 Mbps 的低延迟 H.264。Jetson 默认不启动
-解码节点，遥操端负责解码显示。默认使用 NVIDIA GStreamer 硬件编解码；只有
-排障或非 Jetson 环境才显式设置 `h264_encoder:=software`。
+末端相机填写 USB 4.2 对应的完整`/dev/v4l/by-path/*-video-index0`，可以通过命令`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS。默认 `jpeg` 发布相机原生 JPEG。
+选择 `h264` 时约 4 Mbps，Jetson 默认使用 NVIDIA GStreamer 硬件编码；排障或非 Jetson 环境才设置 `h264_encoder:=software`。本地解码仅在 `h264` 模式下可开启，例如 `wrist_camera_mode:=h264 enable_decoder:=true`。
 模板不含本机绝对路径；本机设备缺失时启动明确报错。
+
+| `wrist_camera_mode` | 相机话题 | 消息类型 | Recorder 处理 |
+|---|---|---|---|
+| `raw` | `/wrist_camera/image_raw` | `sensor_msgs/msg/Image` (`bgr8`) | 连续 BGR24 经 FFmpeg 编码 H.264 MP4 |
+| `jpeg`（默认） | `/wrist_camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | 相机原生 JPEG 缓存，保存时编码 MP4 |
+| `h264` | `/wrist_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | H.264 包直接封装 MP4 |
+
+一次模式选择会同时设置相机和 Recorder。末端相机开启时，显式设置的 `image_topic`、`image_transport` 必须与该模式一致；关闭末端相机后可用它们订阅外部源。`enable_decoder:=true` 只允许 `h264`。
+raw 临时缓存与该轮数据集临时目录同盘；1280×960@30 约占 **6.6 GB/分钟**。此前本机短测 raw 接收约 25.4 FPS，JPEG 约 30 FPS；采集性能需按实际设备再次评估。三种模式均原样保存相机消息时间戳；旧 H.264 数据中的时间戳回退仍需单独定位。
 
 **启动会产生硬件动作**，机械臂等待有效反馈后。
 夹爪控制节点按 `startup_openness=1.0` 平滑张开。
@@ -79,7 +94,7 @@ ros2 launch fastumi_bringup hardware.launch.py \
 | RM75 驱动 | `/rm_driver/udp_arm_position` | `geometry_msgs/msg/Pose` | 当前末端位姿 |
 | RM75 驱动 | `/rm_driver/movej_result` | `std_msgs/msg/Bool` | MoveJ 命令结果，回位节点据此判断结果 |
 | Unitree 夹爪 | `/motion_control/gripper_state` | `std_msgs/msg/Float32` | 实际开度，0 为闭合、1 为张开；名称可由夹爪配置修改 |
-| 末端相机 | `/wrist_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | H.264 图像包，录制器直接订阅 |
+| 末端相机 | 上表所选话题 | 上表所选类型 | 默认 JPEG；录制器订阅相同输出 |
 | 本地解码节点 | `/wrist_camera/image_decoded` | `sensor_msgs/msg/Image` | 解码画面，仅在 `enable_decoder:=true` 时发布 |
 | 录制器 | `/fastumi/recording/status` | `fastumi_interfaces/msg/RecordingStatus` | 录制状态，定期及状态变化时发布 |
 
@@ -103,8 +118,9 @@ ros2 launch fastumi_bringup hardware.launch.py \
 |---|---|---|
 | `start_arm` / `start_gripper` / `start_wrist_camera` / `start_recorder` | true | 独立组件开关 |
 | `move_to_initial_pose` | true | 启动机械臂时执行一次回位；false 用于维护 |
+| `wrist_camera_mode` | jpeg | `raw`、`jpeg` 或 `h264`；同时选择相机发布和录制器输入 |
 | `enable_decoder` | false | 是否在 Jetson 本地把 H.264 解码到 `/wrist_camera/image_decoded` |
-| `h264_encoder` | hardware | `hardware` 使用 NVIDIA GStreamer；`software` 使用 libx264 |
+| `h264_encoder` | hardware | 仅 `h264` 模式使用；`hardware` 使用 NVIDIA GStreamer，`software` 使用 libx264 |
 | `wrist_video_device` | 空，必须填写 | 完整物理端口路径 |
 | `wrist_width` / `wrist_height` / `camera_fps` | 1280 / 960 / 30 | 采集模式；FPS 同时用于录制视频 |
 | `gripper_config_file` | 已安装 `unitree_gripper` 包的 `config/gripper.yaml` | 夹爪 ROS 参数 YAML |
@@ -112,7 +128,7 @@ ros2 launch fastumi_bringup hardware.launch.py \
 | `dataset_root` | 仓库 dataset/h5dy_data | 覆盖时使用绝对路径 |
 | `dir_name` / `name` | test / default_test | 默认录制任务 |
 | `record_camera` | true | 是否把末端图像写入录制 |
-| `image_topic` / `image_transport` | `/wrist_camera/image_raw/ffmpeg` / ffmpeg | 录制器直接订阅 H.264 包并无重编码封装 MP4 |
+| `image_topic` / `image_transport` | 由 `wrist_camera_mode` 决定 | 使用本地相机时，显式覆盖必须匹配所选模式；关闭本地相机时可指定外部源 |
 | `shutdown_save_timeout` | 120 秒 | Ctrl+C 等待保存的上限 |
 
 机械臂可用 `ros2 launch rm_driver rm_75_driver.launch.py` 单独启动；

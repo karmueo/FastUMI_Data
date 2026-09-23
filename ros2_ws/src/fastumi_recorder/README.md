@@ -1,9 +1,9 @@
 # FastUMI Jetson 录制服务
 
 独立的 Humble / Python 3.10 / NumPy 1 包。选择性迁移 `scl_dev` 的录制核心，
-不依赖 Tracker 启动、遥操会话、推理或 RViz。默认接收 FFmpeg image transport
-的 H.264 包，并使用系统 ARM64 `ffmpeg` 无重编码封装 MP4；
-Python 依赖为 h5py、NumPy 和 Pillow；使用工作区 `.venv-numpy1` 构建和运行。
+不依赖 Tracker 启动、遥操会话、推理或 RViz。单独启动时默认接收 FFmpeg image transport
+的 H.264 包，并使用系统 ARM64 `ffmpeg` 无重编码封装 MP4；bringup 默认改为相机原生 JPEG。
+Python 依赖为 h5py 和 NumPy；使用工作区 `.venv-numpy1` 构建和运行。
 
 ```bash
 ros2 launch fastumi_recorder recorder.launch.py dir_name:=test name:=default_test
@@ -78,7 +78,7 @@ episode 编号持久化递增，取消、回收和重启不会复用编号。
 | gripper_state_topic | /motion_control/gripper_state | 真实开度，0 闭合、1 张开 |
 | gripper_action_topic | /motion_control/gripper_command | 目标开度 |
 | image_topic | /wrist_camera/image_raw/ffmpeg | FFmpeg image transport 的实际包话题 |
-| image_transport | ffmpeg | `ffmpeg`、`jpeg` 或 `raw`；后两种兼容旧 `CompressedImage` 和 `Image` 输入 |
+| image_transport | ffmpeg | `ffmpeg` 接收 H.264 包，`jpeg` 接收原生 `CompressedImage`，`raw` 接收 `Image` 并转连续 BGR24 |
 | tracker_odom_topic | /vive_tracker/odom | 可选 Tracker odom，位置 m、四元数 xyzw |
 
 start 要求关节、夹爪及启用的图像输入在最近 2 秒有效；可通过 `input_freshness`
@@ -102,8 +102,8 @@ GOP 为 10，最坏会延迟约 0.33 秒。有效窗口内没有关键帧时沿�
 不生成 MP4。MP4 帧数与 `observations/images/cam_gripper_timestamp`
 条目数严格一致；采样不足时不补帧，精确时序以 HDF5 时间戳为准。
 
-图像队列上限八帧，压缩视频缓存超过 8 MiB 转入系统临时文件；处理积压会计入
-`dropped_frames`。数值样本暂存在内存，应按 episode 结束录制，避免无限持续录制。
+图像队列上限八帧，视频缓存超过 8 MiB 转入该轮数据集隐藏临时目录所在磁盘；处理积压会计入
+`dropped_frames`。raw 支持 `bgr8`、`rgb8`、`mono8` 与行填充，尺寸变化的帧被丢弃；直接以 BGR24 输入 FFmpeg 编码 H.264 MP4，不经中间 JPEG。1280×960@30 raw 临时数据约 6.6 GB/分钟，录制前需确认数据集磁盘空间。raw 缓存写入失败会写入状态 `last_error`，该轮保存失败并保留临时目录，不发布部分 episode。数值样本暂存在内存，应按 episode 结束录制，避免无限持续录制。
 保存先写隐藏 `.recording-<UUID>`，成功后原子更名；失败目录和 error.json 留供排查。
 正在录制时 Ctrl+C 会自动提交保存，默认最多等待 120 秒，再终止编码进程。
 进程异常终止或断电不承诺恢复尚未写出的缓冲数据。
