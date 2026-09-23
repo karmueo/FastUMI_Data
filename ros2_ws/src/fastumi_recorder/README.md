@@ -24,14 +24,20 @@ ros2 run fastumi_recorder recorder --ros-args \
 
 | 名称 | 类型 | 请求与响应语义 |
 |---|---|---|
-| start | StartRecording | dir_name、name；空值使用配置。返回 recording_id；录制或保存中返回 BUSY。 |
+| start | StartRecording | 必填标准 UUID `request_id`，`dir_name`、`name` 空值使用配置；同 ID 重试返回首次启动结果与同一 recording_id。 |
+| cancel_request | CancelRecordingRequest | 按 request_id 撤销；先到时持久化撤销标记，保存中返回 CANCEL_ACCEPTED。 |
+| get_request | GetRecordingRequest | 按 request_id 查询请求状态和 recording_id，未见过的 ID 返回 found=false。 |
 | stop | StopRecording | recording_id；STOP_ACCEPTED 表示异步保存已开始；重复返回 ALREADY_STOPPING 或 ALREADY_SAVED。 |
-| cancel | CancelRecording | recording_id；只丢弃当前尚未停止的录制，保存中返回 BUSY。重复取消在本次进程内幂等。 |
+| cancel | CancelRecording | recording_id；只丢弃当前尚未停止的录制，保存中返回 BUSY。 |
 | get_status | GetRecordingStatus | 空请求；返回完整 RecordingStatus。 |
 | list | ListRecordings | dir_name、name 可留空；offset 默认 0，limit=0 使用 100，上限 1000；返回 recordings 和过滤后的 total。 |
 | delete | DeleteRecording | recording_id；回收完整条目。重复返回 ALREADY_DELETED；正在录制或保存时返回 BUSY。 |
 
 操作响应统一含 `success`、`code`、`message`、`recording_id`。
+请求状态为 pending、recording、saving、cancelled、failed 或 completed。撤销保存
+返回 CANCEL_ACCEPTED 后，须等待 get_request 返回 cancelled 或 failed；正式 episode
+一经发布便返回 completed，需通过 delete 显式回收。请求台账保存在数据根目录的
+`.recording_requests.sqlite3`，不自动清除；重启后未完成请求不会重新执行。
 错误码包括 INVALID_ARGUMENT、NOT_READY、BUSY、NOT_FOUND、NOT_RECORDING、SAVE_FAILED、IO_ERROR。
 返回 `success=true` 的 stop 不能作为“文件已保存”的依据；应观察状态恢复 idle 且
 `last_completed.recording_id` 匹配本次 ID，或查询 list 确认。保存失败为 error，
@@ -45,7 +51,11 @@ age 使用 Jetson 单调时钟计算，-1 表示未收到数据；duration 单�
 
 ```bash
 ros2 service call /fastumi/recording/start fastumi_interfaces/srv/StartRecording \
-  '{dir_name: test, name: example}'
+  '{request_id: "11111111-1111-4111-8111-111111111111", dir_name: test, name: example}'
+ros2 service call /fastumi/recording/get_request fastumi_interfaces/srv/GetRecordingRequest \
+  '{request_id: "11111111-1111-4111-8111-111111111111"}'
+ros2 service call /fastumi/recording/cancel_request fastumi_interfaces/srv/CancelRecordingRequest \
+  '{request_id: "11111111-1111-4111-8111-111111111111"}'
 ros2 service call /fastumi/recording/get_status fastumi_interfaces/srv/GetRecordingStatus '{}'
 # 将下面的 UUID 替换为 start 返回值。
 ros2 service call /fastumi/recording/stop fastumi_interfaces/srv/StopRecording \

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from fastumi_data.pose_math import (
@@ -20,9 +21,11 @@ from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Bool, Empty
 from std_srvs.srv import Trigger
+from fastumi_interfaces.srv import GetTeleopGeneration, SetTeleopGeneration
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from fastumi_rm75.safety import SafetyGate, SafetyLimits
+from fastumi_rm75.teleop_generation import TeleopGenerationStore
 
 
 try:
@@ -85,6 +88,9 @@ class Rm75PolicyBridge(Node):
             raise ValueError("joint_names 必须包含七个唯一 RM75 关节名")
         self._require_robot_error_state = bool(
             self.get_parameter("require_robot_error_state").value
+        )
+        self._generation_store = TeleopGenerationStore(
+            str(self.get_parameter('teleop_generation_file').value)
         )
         policy_rate_hz = float(self.get_parameter("policy_rate_hz").value)
         servo_rate_hz = float(self.get_parameter("servo_rate_hz").value)
@@ -185,10 +191,13 @@ class Rm75PolicyBridge(Node):
                 10,
             )
         self._enable_service = self.create_service(
-            Trigger, "/fastumi/rm75/enable", self._enable
+            SetTeleopGeneration, "/fastumi/rm75/enable", self._enable
         )
         self._disable_service = self.create_service(
-            Trigger, "/fastumi/rm75/disable", self._disable
+            SetTeleopGeneration, "/fastumi/rm75/disable", self._disable
+        )
+        self._generation_service = self.create_service(
+            GetTeleopGeneration, '/fastumi/rm75/get_generation', self._get_generation
         )
         self._emergency_stop_service = self.create_service(
             Trigger,
@@ -221,6 +230,8 @@ class Rm75PolicyBridge(Node):
     def _declare_parameters(self) -> None:
         """声明运行、坐标系和安全门限参数。"""
         self.declare_parameter("dry_run", True)
+        self.declare_parameter('teleop_generation_file',
+                               str(Path.home() / '.local/state/fastumi/rm75_teleop.json'))
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("tcp_frame", "fastumi_tcp")
         self.declare_parameter("relative_frame", "episode_start_tcp")
@@ -389,11 +400,8 @@ class Rm75PolicyBridge(Node):
         self._interpolation_start_ns = now_ns
         self._previous_policy_target = absolute_target
 
-    def _enable(
-        self, request: Trigger.Request, response: Trigger.Response
-    ) -> Trigger.Response:
+    def _enable_operation(self, response):
         """记录当前 RM75 TCP 为 episode 起点并允许发送命令。"""
-        del request
         now_ns = self.get_clock().now().nanoseconds
         if self._latest_joint_state_ns is None or (
             now_ns - self._latest_joint_state_ns
@@ -438,14 +446,66 @@ class Rm75PolicyBridge(Node):
         self.get_logger().warning(response.message)
         return response
 
-    def _disable(
-        self, request: Trigger.Request, response: Trigger.Response
-    ) -> Trigger.Response:
+    def _disable_operation(self, response):
         """停止轨迹并关闭策略桥。"""
-        del request
         self._stop_motion("操作员禁用")
         response.success = True
         response.message = "RM75 策略桥已禁用"
+        return response
+
+    def _generation_operation(self, request, response, operation):
+        """Persist the ordering barrier before applying an operation."""
+        generation = int(request.operation_generation)
+        response.operation_generation = self._generation_store.record['generation']
+        if generation == 0:
+            response.code, response.message = 'INVALID_ARGUMENT', 'operation_generation 必须大于零'
+            response.enabled = self._enabled
+            return response
+        try:
+            decision = self._generation_store.begin(generation, operation)
+        except (OSError, ValueError) as error:
+            if operation == 'disable':
+                self._stop_motion('禁用代次持久化失败')
+            response.code, response.message = 'IO_ERROR', str(error)
+            response.enabled = self._enabled
+            return response
+        record = self._generation_store.record
+        response.operation_generation = record['generation']
+        if decision == 'stale':
+            response.code, response.message = 'STALE_GENERATION', '操作代次已过期或与现有操作冲突'
+        elif decision == 'duplicate':
+            response.success = record['success']
+            response.code, response.message = record['code'], record['message']
+        else:
+            try:
+                result = (self._enable_operation(response) if operation == 'enable'
+                          else self._disable_operation(response))
+            except Exception as error:
+                self._stop_motion('遥操操作异常')
+                response.success, response.message = False, str(error)
+                result = response
+            code = 'ENABLED' if result.success and operation == 'enable' else (
+                'DISABLED' if result.success else 'REJECTED')
+            try:
+                self._generation_store.finish(result.success, code, result.message)
+                response.code = code
+            except (OSError, ValueError) as error:
+                self._stop_motion('代次结果持久化失败')
+                response.success, response.code, response.message = False, 'IO_ERROR', str(error)
+        response.enabled = self._enabled
+        return response
+
+    def _enable(self, request: SetTeleopGeneration.Request,
+                response: SetTeleopGeneration.Response) -> SetTeleopGeneration.Response:
+        return self._generation_operation(request, response, 'enable')
+
+    def _disable(self, request: SetTeleopGeneration.Request,
+                 response: SetTeleopGeneration.Response) -> SetTeleopGeneration.Response:
+        return self._generation_operation(request, response, 'disable')
+
+    def _get_generation(self, request, response):
+        response.operation_generation = self._generation_store.record['generation']
+        response.enabled = self._enabled
         return response
 
     def _emergency_stop(

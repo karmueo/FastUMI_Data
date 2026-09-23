@@ -3,6 +3,7 @@
 import math
 from pathlib import Path
 import signal
+import sqlite3
 import threading
 
 import rclpy
@@ -16,8 +17,8 @@ from std_msgs.msg import Float32
 from rm_ros_interfaces.msg import Jointpos
 from fastumi_interfaces.msg import RecordingInfo, RecordingStatus
 from fastumi_interfaces.srv import (
-    CancelRecording, DeleteRecording, GetRecordingStatus, ListRecordings,
-    StartRecording, StopRecording,
+    CancelRecording, CancelRecordingRequest, DeleteRecording, GetRecordingRequest,
+    GetRecordingStatus, ListRecordings, StartRecording, StopRecording,
 )
 
 from fastumi_recorder.catalog import RecordingError, default_dataset_root
@@ -70,6 +71,8 @@ class RecorderNode(Node):
         for service, name, handler in (
             (StartRecording, 'start', self._start), (StopRecording, 'stop', self._stop),
             (CancelRecording, 'cancel', self._cancel), (DeleteRecording, 'delete', self._delete),
+            (CancelRecordingRequest, 'cancel_request', self._cancel_request),
+            (GetRecordingRequest, 'get_request', self._get_request),
             (GetRecordingStatus, 'get_status', self._get_status), (ListRecordings, 'list', self._list),
         ):
             self.create_service(service, PREFIX + '/' + name, handler)
@@ -130,14 +133,18 @@ class RecorderNode(Node):
             response.message = response.code
         except RecordingError as error:
             response.success, response.code, response.message = False, error.code, str(error)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, sqlite3.Error) as error:
             response.success, response.code, response.message = False, 'IO_ERROR', str(error)
         self.publish_status()
         return response
 
     def _start(self, request, response):
         """处理开始请求，任务空值使用配置默认值。"""
-        return self._operation(response, self.engine.start, request.dir_name, request.name, self._now())
+        if not request.request_id:
+            response.success, response.code, response.message = False, 'INVALID_ARGUMENT', 'request_id 必填'
+            return response
+        return self._operation(response, self.engine.start, request.dir_name,
+                               request.name, self._now(), request.request_id)
 
     def _stop(self, request, response):
         """处理带录制 ID 的幂等停止请求。"""
@@ -146,6 +153,32 @@ class RecorderNode(Node):
     def _cancel(self, request, response):
         """处理尚未提交保存的录制取消请求。"""
         return self._operation(response, self.engine.cancel, request.recording_id)
+
+    def _cancel_request(self, request, response):
+        """撤销请求身份，即使启动服务尚未收到它。"""
+        try:
+            response.recording_id, response.code, response.state = self.engine.cancel_request(request.request_id)
+            response.success = response.state == 'cancelled' or response.code == 'CANCEL_ACCEPTED'
+            response.message = response.code
+        except (RecordingError, OSError, sqlite3.Error) as error:
+            response.success = False
+            response.code = getattr(error, 'code', 'IO_ERROR')
+            response.message = str(error)
+        self.publish_status()
+        return response
+
+    def _get_request(self, request, response):
+        """读取持久化的请求状态。"""
+        try:
+            row = self.engine.get_request(request.request_id)
+            response.found = row is not None
+            if row:
+                for key in ('state', 'recording_id', 'code', 'message'):
+                    setattr(response, key, row[key])
+        except (RecordingError, OSError, sqlite3.Error) as error:
+            response.code = getattr(error, 'code', 'IO_ERROR')
+            response.message = str(error)
+        return response
 
     def _delete(self, request, response):
         """处理已保存条目的回收请求。"""

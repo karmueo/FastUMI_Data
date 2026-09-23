@@ -42,6 +42,24 @@ source install/setup.bash
 这里跳过 `fastumi_data` 是为了在 Jetson 上只构建 Placo 控制器；旧
 `rm75_policy_bridge` 仍依赖该数据包，须在数据链路完整构建后运行。
 
+`/fastumi/rm75/enable` 与 `/fastumi/rm75/disable` 使用
+`fastumi_interfaces/srv/SetTeleopGeneration`，请求必须携带递增的
+`operation_generation`。通过 `/fastumi/rm75/get_generation`
+（`GetTeleopGeneration`）读取最大代次和当前启用状态；旧代次及同代次相反操作
+会被拒绝。代次保存在 `teleop_generation_file` 节点参数指定的绝对路径，默认
+`~/.local/state/fastumi/rm75_teleop.json`。节点重启时保持禁用，不重放启用操作。
+
+```bash
+ros2 service call /fastumi/rm75/get_generation fastumi_interfaces/srv/GetTeleopGeneration '{}'
+ros2 service call /fastumi/rm75/enable fastumi_interfaces/srv/SetTeleopGeneration \
+  '{operation_generation: 1}'
+ros2 service call /fastumi/rm75/disable fastumi_interfaces/srv/SetTeleopGeneration \
+  '{operation_generation: 2}'
+```
+
+示例代次仅适用于新台账；实际调用应先查询最大代次并递增。收到禁用成功响应且
+查询显示 `enabled=false`、最大代次不少于禁用代次后，客户端才可确认恢复完成。
+
 配置默认 `dry_run=false`，一旦收到新鲜关节反馈和有效预测就会直接向实机发送命令。
 首次联调应显式启用 dry-run：
 

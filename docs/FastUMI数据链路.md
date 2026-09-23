@@ -865,7 +865,9 @@ ros2 launch fastumi_rm75 rm75_deployment.launch.py
 `T_base_tcp_start`：
 
 ```bash
-ros2 service call /fastumi/rm75/enable std_srvs/srv/Trigger {}
+ros2 service call /fastumi/rm75/get_generation fastumi_interfaces/srv/GetTeleopGeneration '{}'
+ros2 service call /fastumi/rm75/enable fastumi_interfaces/srv/SetTeleopGeneration \
+  '{operation_generation: 1}'
 ```
 
 节点执行

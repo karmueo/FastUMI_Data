@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
+import uuid
 from types import SimpleNamespace
 
 import h5py
@@ -15,6 +16,7 @@ from fastumi_recorder.catalog import Catalog, RecordingError
 from fastumi_recorder.engine import (
     RecorderEngine, ffmpeg_packet_to_h264, image_to_jpeg,
 )
+from fastumi_recorder.request_ledger import RequestLedger
 from fastumi_recorder.core import EpisodeBuffer
 from fastumi_recorder.storage import select_video_samples
 import fastumi_recorder.engine as engine_module
@@ -219,6 +221,155 @@ def test_busy_during_save_and_duplicate_stop(engine, monkeypatch):
     finally:
         release.set()
     wait_for(lambda: engine.state == 'idle')
+
+
+def test_request_identity_retry_cancel_first_and_restart(tmp_path):
+    first = RecorderEngine(tmp_path, image_transport='raw')
+    request_id, blocked_id = str(uuid.uuid4()), str(uuid.uuid4())
+    try:
+        assert first.cancel_request(blocked_id)[2] == 'cancelled'
+        with pytest.raises(RecordingError) as error:
+            first.start(request_id=blocked_id)
+        assert error.value.code == 'CANCELLED'
+        ready(first)
+        recording_id, _ = first.start(timestamp=11., request_id=request_id)
+        assert first.start(timestamp=12., request_id=request_id)[0] == recording_id
+        assert first.get_request(request_id)['state'] == 'recording'
+        assert first.cancel_request(request_id)[2] == 'cancelled'
+        assert first.start(request_id=request_id)[0] == recording_id
+    finally:
+        first.close()
+    second = RecorderEngine(tmp_path, image_transport='raw')
+    try:
+        assert second.get_request(blocked_id)['state'] == 'cancelled'
+        assert second.start(request_id=request_id)[0] == recording_id
+        assert second.get_request(request_id)['state'] == 'cancelled'
+    finally:
+        second.close()
+
+
+def test_cancel_cleanup_failure_does_not_report_cancelled(engine, monkeypatch):
+    request_id = str(uuid.uuid4())
+    ready(engine)
+    recording_id, _ = engine.start(timestamp=11., request_id=request_id)
+    temporary = engine._temporary
+    real_rmtree = engine_module.shutil.rmtree
+
+    def fail_cleanup(path, *args, **kwargs):
+        if path == temporary:
+            raise OSError('cleanup denied')
+        return real_rmtree(path, *args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(engine_module.shutil, 'rmtree', fail_cleanup)
+        with pytest.raises(OSError, match='cleanup denied'):
+            engine.cancel(recording_id)
+
+    request = engine.get_request(request_id)
+    assert request['state'] == 'failed'
+    assert request['code'] == 'IO_ERROR'
+    assert temporary.exists()
+    assert engine.cancel_request(request_id)[2] == 'failed'
+
+
+def test_ledger_restart_marks_interrupted_and_finishes_cancel(tmp_path):
+    from fastumi_recorder.catalog import Catalog
+    catalog = Catalog(tmp_path)
+    pending_id, cancel_id = str(uuid.uuid4()), str(uuid.uuid4())
+    recording_id = str(uuid.uuid4())
+    temporary = tmp_path / 'task' / 'name' / f'.recording-{recording_id}'
+    temporary.mkdir(parents=True)
+    ledger = RequestLedger(tmp_path)
+    try:
+        ledger.put(pending_id, state='pending')
+        ledger.put(cancel_id, state='saving', recording_id=recording_id,
+                   cancel_requested=1, start_success=1, start_code='STARTED',
+                   start_message='STARTED')
+    finally:
+        ledger.close()
+    reopened = RequestLedger(tmp_path)
+    try:
+        reopened.recover(catalog)
+        assert reopened.get(pending_id)['state'] == 'failed'
+        assert reopened.get(pending_id)['start_code'] == 'INTERRUPTED'
+        assert reopened.get(cancel_id)['state'] == 'cancelled'
+        assert not temporary.exists()
+    finally:
+        reopened.close()
+        catalog.close()
+    restarted = RecorderEngine(tmp_path, image_transport='raw')
+    try:
+        with pytest.raises(RecordingError) as error:
+            restarted.start(request_id=pending_id)
+        assert error.value.code == 'INTERRUPTED'
+    finally:
+        restarted.close()
+
+
+def test_request_cancel_during_save_discards_before_publish(engine, monkeypatch, tmp_path):
+    entered, release = threading.Event(), threading.Event()
+    real_write = engine_module.write_episode
+    def blocked(*args):
+        entered.set()
+        assert release.wait(3.)
+        return real_write(*args)
+    monkeypatch.setattr(engine_module, 'write_episode', blocked)
+    request_id = str(uuid.uuid4())
+    ready(engine)
+    rid, _ = engine.start(timestamp=11., request_id=request_id)
+    engine.stop(rid, 12.)
+    assert entered.wait(2.)
+    assert engine.cancel_request(request_id)[1] == 'CANCEL_ACCEPTED'
+    release.set()
+    wait_for(lambda: engine.get_request(request_id)['state'] == 'cancelled')
+    assert engine.list()[1] == 0
+    assert not any(tmp_path.rglob('episode_*'))
+
+
+def test_publish_commit_wins_late_cancel(engine, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    real_publish = engine.catalog.publish
+    def blocked_publish(*args):
+        entered.set()
+        assert release.wait(3.)
+        return real_publish(*args)
+    monkeypatch.setattr(engine.catalog, 'publish', blocked_publish)
+    request_id = str(uuid.uuid4())
+    ready(engine)
+    rid, _ = engine.start(timestamp=11., request_id=request_id)
+    engine.stop(rid, 12.)
+    assert entered.wait(2.)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending_cancel = pool.submit(engine.cancel_request, request_id)
+        release.set()
+        assert pending_cancel.result(timeout=3.)[2] == 'completed'
+    assert engine.list()[1] == 1
+
+
+def test_cancel_kills_active_encoder(engine, monkeypatch, tmp_path):
+    registered, release = threading.Event(), threading.Event()
+    processes = []
+    real_register = engine.encoder.register
+    def blocked_register(process):
+        real_register(process)
+        processes.append(process)
+        registered.set()
+        assert release.wait(3.)
+    monkeypatch.setattr(engine.encoder, 'register', blocked_register)
+    request_id = str(uuid.uuid4())
+    ready(engine)
+    rid, _ = engine.start(timestamp=11., request_id=request_id)
+    engine.image(11.2, frame())
+    engine.stop(rid, 12.)
+    assert registered.wait(2.)
+    try:
+        assert engine.cancel_request(request_id)[1] == 'CANCEL_ACCEPTED'
+    finally:
+        release.set()
+    wait_for(lambda: engine.get_request(request_id)['state'] == 'cancelled')
+    assert all(process.poll() is not None for process in processes)
+    assert engine.list()[1] == 0
+    assert not any(tmp_path.rglob('episode_*'))
 
 
 def test_failed_save_preserves_temporary(engine, monkeypatch):

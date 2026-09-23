@@ -1,0 +1,7 @@
+string request_id
+---
+bool found
+string state
+string recording_id
+string code
+string message

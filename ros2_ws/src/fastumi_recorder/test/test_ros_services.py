@@ -12,7 +12,8 @@ from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
 from rm_ros_interfaces.msg import Jointpos
 from fastumi_interfaces.srv import (
-    StartRecording, StopRecording, CancelRecording, GetRecordingStatus,
+    StartRecording, StopRecording, CancelRecording, CancelRecordingRequest,
+    GetRecordingRequest, GetRecordingStatus,
     ListRecordings, DeleteRecording,
 )
 from fastumi_recorder.node import RecorderNode
@@ -36,6 +37,8 @@ def test_ros_service_lifecycle(tmp_path):
     clients = {name: client.create_client(kind, '/fastumi/recording/'+name)
                for name, kind in [('start', StartRecording), ('stop', StopRecording),
                                   ('cancel', CancelRecording), ('get_status', GetRecordingStatus),
+                                  ('cancel_request', CancelRecordingRequest),
+                                  ('get_request', GetRecordingRequest),
                                   ('list', ListRecordings), ('delete', DeleteRecording)]}
 
     def call(name, request):
@@ -62,11 +65,14 @@ def test_ros_service_lifecycle(tmp_path):
                 executor.spin_once(timeout_sec=.005)
 
     try:
-        assert call('start', StartRecording.Request()).code == 'NOT_READY'
+        assert call('start', StartRecording.Request(request_id=str(uuid.uuid4()))).code == 'NOT_READY'
         pump(.4)
-        start = call('start', StartRecording.Request(dir_name='test', name='services'))
+        request_id = str(uuid.uuid4())
+        start = call('start', StartRecording.Request(request_id=request_id, dir_name='test', name='services'))
         assert start.success
-        assert call('start', StartRecording.Request()).code == 'BUSY'
+        assert call('start', StartRecording.Request(request_id=request_id)).recording_id == start.recording_id
+        assert call('get_request', GetRecordingRequest.Request(request_id=request_id)).state == 'recording'
+        assert call('start', StartRecording.Request(request_id=str(uuid.uuid4()))).code == 'BUSY'
         pump(.4, actions=True)
         stopped = call('stop', StopRecording.Request(recording_id=start.recording_id))
         assert stopped.success and stopped.code == 'STOP_ACCEPTED'
@@ -77,6 +83,7 @@ def test_ros_service_lifecycle(tmp_path):
                 break
         assert status.state == 'idle', status.last_error
         assert status.last_completed.recording_id == start.recording_id
+        assert call('get_request', GetRecordingRequest.Request(request_id=request_id)).state == 'completed'
         entries = call('list', ListRecordings.Request())
         assert entries.success and entries.total == 1
         info = entries.recordings[0]
@@ -87,8 +94,11 @@ def test_ros_service_lifecycle(tmp_path):
         assert call('list', ListRecordings.Request()).total == 0
         assert call('delete', DeleteRecording.Request(recording_id='../../etc')).code == 'INVALID_ARGUMENT'
         pump()
-        start = call('start', StartRecording.Request())
+        start = call('start', StartRecording.Request(request_id=str(uuid.uuid4())))
         assert call('cancel', CancelRecording.Request(recording_id=start.recording_id)).success
+        blocked_id = str(uuid.uuid4())
+        assert call('cancel_request', CancelRecordingRequest.Request(request_id=blocked_id)).state == 'cancelled'
+        assert call('start', StartRecording.Request(request_id=blocked_id)).code == 'CANCELLED'
     finally:
         recorder.close()
         executor.shutdown()

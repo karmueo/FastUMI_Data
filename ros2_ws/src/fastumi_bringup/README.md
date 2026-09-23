@@ -40,6 +40,39 @@ ros2 launch fastumi_bringup hardware.launch.py \
 回位等待就绪最多 30 秒、运动结果最多 120 秒。失败或超时退出整个启动，
 不重试、不开放录制服务。回位成功才启动录制服务，服务启动后为 idle，
 不会自动开始录制。统一启动没有遥操指令仲裁，回位期间遥操主机应保持暂停。
+远端启动录制必须提供客户端生成的 `request_id`；超时后可通过
+`/fastumi/recording/cancel_request` 撤销，并用 `get_request` 核对终态。
+请求台账与录制数据共用 `dataset_root`，节点重启后仍能识别旧请求。
+
+## 启动后的话题与服务
+
+下表列出本入口默认启动时的主要对外接口；关闭对应的 `start_*` 开关后，该组件的接口不会出现。
+机械臂驱动还发布其他 `/rm_driver/*` 状态与命令结果话题，可用 `ros2 topic list -t` 查看完整列表。
+
+| 发布方 | 话题 | 类型 | 说明 |
+|---|---|---|---|
+| RM75 驱动 | `/joint_states` | `sensor_msgs/msg/JointState` | 实际关节状态，录制器输入 |
+| RM75 驱动 | `/rm_driver/udp_feedback_valid` | `std_msgs/msg/Bool` | UDP 反馈是否有效，回位节点据此等待就绪 |
+| RM75 驱动 | `/rm_driver/udp_arm_position` | `geometry_msgs/msg/Pose` | 当前末端位姿 |
+| RM75 驱动 | `/rm_driver/movej_result` | `std_msgs/msg/Bool` | MoveJ 命令结果，回位节点据此判断结果 |
+| Unitree 夹爪 | `/motion_control/gripper_state` | `std_msgs/msg/Float32` | 实际开度，0 为闭合、1 为张开；名称可由夹爪配置修改 |
+| 末端相机 | `/wrist_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | H.264 图像包，录制器直接订阅 |
+| 本地解码节点 | `/wrist_camera/image_decoded` | `sensor_msgs/msg/Image` | 解码画面，仅在 `enable_decoder:=true` 时发布 |
+| 录制器 | `/fastumi/recording/status` | `fastumi_interfaces/msg/RecordingStatus` | 录制状态，定期及状态变化时发布 |
+
+默认在机械臂回位成功后启动录制器；若关闭 `start_arm` 或 `move_to_initial_pose`，录制器直接启动。`start_recorder:=false` 时不提供以下服务。
+以下服务的类型均以 `fastumi_interfaces/srv/` 为前缀。
+
+| 服务 | 类型 | 用途 |
+|---|---|---|
+| `/fastumi/recording/start` | `StartRecording` | 开始录制，需提供 `request_id` |
+| `/fastumi/recording/stop` | `StopRecording` | 停止当前录制并异步保存 |
+| `/fastumi/recording/cancel` | `CancelRecording` | 丢弃尚未停止的录制 |
+| `/fastumi/recording/cancel_request` | `CancelRecordingRequest` | 按 `request_id` 撤销启动请求 |
+| `/fastumi/recording/get_request` | `GetRecordingRequest` | 查询启动请求终态 |
+| `/fastumi/recording/get_status` | `GetRecordingStatus` | 查询当前录制状态 |
+| `/fastumi/recording/list` | `ListRecordings` | 列出已保存的录制 |
+| `/fastumi/recording/delete` | `DeleteRecording` | 回收已保存的录制 |
 
 ## 参数与维护
 
