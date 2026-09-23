@@ -58,3 +58,31 @@ ros2 bag play /absolute/path/to/episode_N/bag
 ```
 
 请求台账保存在数据根目录的 `.recording_requests.sqlite3`，重启不会重放未完成请求。正常退出自动停止当前录制并等待 MCAP 写入，默认上限 120 秒；超时的隐藏目录不进入列表。独立部署和遥操客户端需要安装与录制时一致的自定义消息定义，才能正常回放自定义话题。
+
+## 离线转换为训练 episode
+
+仓库根目录的 `convert_hardware_mcap.py` 接受一轮 `episode_N` 或其父目录，按编号将每轮
+MCAP 转换为 `proprio.hdf5`、`gripper.mp4` 和 `conversion.json`。输出兼容
+`rm75-single-arm-v1` HDF5 结构，不生成需要人工标注的 `gripper.json`。
+
+```bash
+cd /path/to/FastUMI_Data
+source /opt/ros/humble/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
+source ros2_ws/install/setup.bash
+python convert_hardware_mcap.py \
+  --input dataset/h5dy_data/1/11 \
+  --output dataset/h5dy_data/1/11_training
+```
+
+脚本需要已安装的 `rosbag2_storage_mcap`、`ffmpeg`、`ffprobe`、`h5py`、OpenCV，以及
+构建后的 `rm_ros_interfaces`。支持相机 raw、JPEG、H.264 三种录制模式。H.264 从
+关节指令区间内首个可解码关键帧开始；各数据流没有共同时间区间、不能解码，
+或视频帧数与 HDF5 相机时间戳数量不一致时，该轮不会发布。已存在的目标 episode
+也不会被覆盖。
+
+所有输出时间戳统一采用 MCAP 的录制机接收时间，以首末有效关节指令裁剪。夹爪状态和
+最近收到的指令按状态时间戳配对；Tracker 位置映射至 `observations/vr_pos`；原始 bag
+没有 B 键事件，因此 `observations/vr_flag_B` 为空。`conversion.json` 记录每轮数据量、
+丢弃帧数及 bag 与消息 header/PTS 的时间差。录制机接收时间不等同于各设备的采集时间；
+跨机器采集延迟和时钟偏移仍需单独标定。
