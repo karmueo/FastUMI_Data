@@ -1,6 +1,6 @@
 /**
  * @file usb_camera_ffmpeg.cpp
- * @brief 按稳定 V4L2 物理端口采集 MJPEG，并通过 FFmpeg image transport 发布。
+ * @brief 按稳定 V4L2 物理端口采集 MJPEG，并用软件或 Jetson 硬件发布 H.264。
  */
 
 #include <atomic>
@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include <ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp>
 #include <image_transport/publisher_plugin.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <pluginlib/class_loader.hpp>
@@ -36,6 +37,7 @@
 #include <sensor_msgs/msg/image.hpp>
 
 #include "fastumi_usb_camera/configuration.hpp"
+#include "fastumi_usb_camera/hardware_h264_encoder.hpp"
 #include "fastumi_usb_camera/jpeg_frame.hpp"
 #include "fastumi_usb_camera/latest_frame_buffer.hpp"
 
@@ -430,16 +432,33 @@ public:
     config_.serial_number = declare_parameter<std::string>("serial_number", "");
     config_.frame_id = declare_parameter<std::string>("frame_id", config_.frame_id);
     config_.topic = declare_parameter<std::string>("topic", config_.topic);
+    h264_encoder_ = declare_parameter<std::string>("h264_encoder", "hardware");
     validate_configuration(config_);
+    if (h264_encoder_ != "hardware" && h264_encoder_ != "software") {
+      throw std::invalid_argument("h264_encoder must be hardware or software");
+    }
 
-    encoder_ = loader.createUniqueInstance(
-      image_transport::PublisherPlugin::getLookupName("ffmpeg"));
     auto qos = rmw_qos_profile_sensor_data;
     qos.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
     qos.depth = 1;
     qos.reliability = RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT;
     qos.durability = RMW_QOS_POLICY_DURABILITY_VOLATILE;
-    encoder_->advertise(this, config_.topic, qos);
+    if (h264_encoder_ == "software") {
+      software_encoder_ = loader.createUniqueInstance(
+        image_transport::PublisherPlugin::getLookupName("ffmpeg"));
+      software_encoder_->advertise(this, config_.topic, qos);
+    } else {
+      hardware_publisher_ = create_publisher<
+        ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(
+        config_.topic + "/ffmpeg", rclcpp::SensorDataQoS().keep_last(20));
+      HardwareH264Configuration hardware_configuration;
+      hardware_configuration.width = static_cast<int>(config_.width);
+      hardware_configuration.height = static_cast<int>(config_.height);
+      hardware_configuration.fps = static_cast<int>(config_.fps);
+      hardware_encoder_ = std::make_unique<HardwareH264Encoder>(
+        hardware_configuration,
+        [this](HardwareH264Packet && packet) {publish_hardware_packet(std::move(packet));});
+    }
 
     diagnostics_timer_ = create_wall_timer(
       std::chrono::seconds(1), std::bind(&UsbCameraFfmpeg::report_diagnostics, this));
@@ -469,10 +488,10 @@ public:
     }
     RCLCPP_INFO(
       get_logger(),
-      "Streaming V4L2 %s MJPEG %ldx%ld@%ld -> %s/ffmpeg",
+      "Streaming V4L2 %s MJPEG %ldx%ld@%ld -> %s/ffmpeg encoder=%s",
       camera_->device_path().c_str(),
       config_.width, config_.height, config_.fps,
-      config_.topic.c_str());
+      config_.topic.c_str(), h264_encoder_.c_str());
   }
 
   void stop()
@@ -483,14 +502,19 @@ public:
         camera_->stop();
         camera_.reset();
       }
+      if (hardware_encoder_) {
+        hardware_encoder_->stop();
+      }
       frame_buffer_.close();
       if (worker_.joinable()) {
         worker_.join();
       }
     }
-    if (encoder_) {
-      encoder_->shutdown();
-      encoder_.reset();
+    hardware_encoder_.reset();
+    hardware_publisher_.reset();
+    if (software_encoder_) {
+      software_encoder_->shutdown();
+      software_encoder_.reset();
     }
   }
 
@@ -509,6 +533,52 @@ private:
   static void v4l2_callback(const uint8_t * data, size_t size, void * user_data) noexcept
   {
     static_cast<UsbCameraFfmpeg *>(user_data)->capture_frame(data, size);
+  }
+
+  static uint64_t stamp_nanoseconds(const builtin_interfaces::msg::Time & stamp)
+  {
+    if (stamp.sec < 0) {
+      throw std::runtime_error("camera timestamp is negative");
+    }
+    return static_cast<uint64_t>(stamp.sec) * 1'000'000'000ULL + stamp.nanosec;
+  }
+
+  static builtin_interfaces::msg::Time time_from_nanoseconds(uint64_t nanoseconds)
+  {
+    builtin_interfaces::msg::Time stamp;
+    stamp.sec = static_cast<int32_t>(nanoseconds / 1'000'000'000ULL);
+    stamp.nanosec = static_cast<uint32_t>(nanoseconds % 1'000'000'000ULL);
+    return stamp;
+  }
+
+  bool has_subscribers() const
+  {
+    return h264_encoder_ == "hardware" ?
+           hardware_publisher_->get_subscription_count() != 0U :
+           software_encoder_->getNumSubscribers() != 0U;
+  }
+
+  void publish_hardware_packet(HardwareH264Packet && packet) noexcept
+  {
+    try {
+      ffmpeg_image_transport_msgs::msg::FFMPEGPacket message;
+      message.header.stamp = time_from_nanoseconds(packet.pts);
+      message.header.frame_id = config_.frame_id;
+      message.width = static_cast<int32_t>(config_.width);
+      message.height = static_cast<int32_t>(config_.height);
+      message.encoding = "h264;nv12;bgr8;bgr8";
+      message.pts = packet.pts;
+      message.flags = packet.keyframe ? 0x01U : 0x00U;
+      message.is_bigendian = false;
+      message.data = std::move(packet.data);
+      hardware_publisher_->publish(std::move(message));
+      pipeline_nanoseconds_.fetch_add(packet.latency_nanoseconds);
+      encoded_count_.fetch_add(1);
+    } catch (const std::exception & error) {
+      set_fatal_error(std::string("hardware H.264 publish failed: ") + error.what());
+    } catch (...) {
+      set_fatal_error("hardware H.264 publish failed with an unknown error");
+    }
   }
 
   void capture_frame(const uint8_t * data, size_t size) noexcept
@@ -534,13 +604,31 @@ private:
   {
     try {
       while (auto captured = frame_buffer_.wait_and_take()) {
-        if (encoder_->getNumSubscribers() == 0) {
+        const bool subscribed = has_subscribers();
+        const bool needs_hardware_probe = h264_encoder_ == "hardware" &&
+          !hardware_probe_submitted_.load();
+        if (!subscribed && !needs_hardware_probe) {
           skipped_without_subscriber_count_.fetch_add(1);
           continue;
         }
         const auto dequeue_time = SteadyClock::now();
         queued_nanoseconds_.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
             dequeue_time - captured->queued_at).count());
+
+        if (h264_encoder_ == "hardware") {
+          if (!hardware_encoder_->push(
+              stamp_nanoseconds(captured->stamp), captured->data, captured->queued_at))
+          {
+            if (stopping_) {
+              return;
+            }
+            throw std::runtime_error(hardware_encoder_->error_message());
+          }
+          if (!subscribed) {
+            hardware_probe_submitted_ = true;
+          }
+          continue;
+        }
 
         cv::Mat bgr = decode_jpeg_frame(
           captured->data, static_cast<int>(config_.width), static_cast<int>(config_.height));
@@ -571,7 +659,7 @@ private:
           }
         }
 
-        encoder_->publish(image);
+        software_encoder_->publish(image);
         publish_nanoseconds_.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
             SteadyClock::now() - decoded_time).count());
         encoded_count_.fetch_add(1);
@@ -599,20 +687,28 @@ private:
     const auto interval_queue_ns = queued_nanoseconds_.exchange(0);
     const auto interval_decode_ns = decode_nanoseconds_.exchange(0);
     const auto interval_publish_ns = publish_nanoseconds_.exchange(0);
+    const auto interval_pipeline_ns = pipeline_nanoseconds_.exchange(0);
     const double divisor = interval_encoded == 0 ? 1.0 : static_cast<double>(interval_encoded);
 
     RCLCPP_INFO(
       get_logger(),
-      "frames captured=%lu encoded=%lu overwritten=%lu no_subscriber=%lu invalid=%lu "
-      "decode_failed=%lu rate=%lu fps avg_queue=%.2f ms avg_decode=%.2f ms avg_publish=%.2f ms",
+      "encoder=%s frames captured=%lu encoded=%lu overwritten=%lu no_subscriber=%lu invalid=%lu "
+      "decode_failed=%lu rate=%lu fps avg_queue=%.2f ms avg_decode=%.2f ms "
+      "avg_publish=%.2f ms avg_pipeline=%.2f ms",
+      h264_encoder_.c_str(),
       captured, encoded, overwritten, skipped_without_subscriber_count_.load(),
       invalid_frame_count_.load() + (camera_ ? camera_->invalid_count() : 0U),
       decode_failure_count_.load(), interval_encoded,
       interval_queue_ns / divisor / 1.0e6, interval_decode_ns / divisor / 1.0e6,
-      interval_publish_ns / divisor / 1.0e6);
+      interval_publish_ns / divisor / 1.0e6, interval_pipeline_ns / divisor / 1.0e6);
     previous_encoded_count_ = encoded;
 
     if (started_ && !stopping_) {
+      if (hardware_encoder_ && hardware_encoder_->poll_error()) {
+        set_fatal_error("NVIDIA H.264 hardware pipeline failed: " +
+          hardware_encoder_->error_message());
+        return;
+      }
       if (camera_ && camera_->failed()) {
         set_fatal_error("V4L2 camera capture failed: " + camera_->error_message());
         return;
@@ -627,7 +723,10 @@ private:
   }
 
   CameraConfiguration config_;
-  pluginlib::UniquePtr<image_transport::PublisherPlugin> encoder_;
+  std::string h264_encoder_;
+  pluginlib::UniquePtr<image_transport::PublisherPlugin> software_encoder_;
+  rclcpp::Publisher<ffmpeg_image_transport_msgs::msg::FFMPEGPacket>::SharedPtr hardware_publisher_;
+  std::unique_ptr<HardwareH264Encoder> hardware_encoder_;
   LatestFrameBuffer<CapturedJpeg> frame_buffer_;
   std::unique_ptr<V4l2Camera> camera_;
   std::thread worker_;
@@ -635,6 +734,7 @@ private:
   std::atomic<bool> started_{false};
   std::atomic<bool> stopping_{false};
   std::atomic<bool> fatal_error_{false};
+  std::atomic<bool> hardware_probe_submitted_{false};
   std::atomic<int64_t> last_frame_steady_ns_{0};
   std::atomic<uint64_t> captured_count_{0};
   std::atomic<uint64_t> encoded_count_{0};
@@ -644,6 +744,7 @@ private:
   std::atomic<int64_t> queued_nanoseconds_{0};
   std::atomic<int64_t> decode_nanoseconds_{0};
   std::atomic<int64_t> publish_nanoseconds_{0};
+  std::atomic<int64_t> pipeline_nanoseconds_{0};
   uint64_t previous_encoded_count_{0};
 };
 

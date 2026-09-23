@@ -38,6 +38,7 @@ def test_wrist_only_without_umi(monkeypatch, tmp_path):
     assert actions[0][1]['enable_ffmpeg'] == 'true'
     assert actions[0][1]['topic'] == '/wrist_camera/image_raw'
     assert actions[0][1]['enable_decoder'].perform(context(mod)) == 'false'
+    assert actions[0][1]['h264_encoder'].perform(context(mod)) == 'hardware'
     assert actions[1][1]['image_topic'].perform(context(mod)) == \
         '/wrist_camera/image_raw/ffmpeg'
     assert actions[1][1]['image_transport'].perform(context(mod)) == 'ffmpeg'
@@ -62,6 +63,20 @@ def test_wrist_decoder_override_is_forwarded(monkeypatch, tmp_path):
         wrist_video_device=str(device), enable_decoder='true')
     camera = mod._launch_hardware(ctx)[0]
     assert camera[1]['enable_decoder'].perform(ctx) == 'true'
+
+
+def test_wrist_software_encoder_override_is_forwarded(monkeypatch, tmp_path):
+    mod = module()
+    device = tmp_path / 'camera-video-index0'
+    device.touch()
+    monkeypatch.setattr(mod, 'is_physical_video_device_path', lambda _: True)
+    monkeypatch.setattr(
+        mod, '_include', lambda package, launch, arguments=None: (package, arguments))
+    ctx = context(
+        mod, start_arm='false', start_gripper='false', start_recorder='false',
+        wrist_video_device=str(device), h264_encoder='software')
+    camera = mod._launch_hardware(ctx)[0]
+    assert camera[1]['h264_encoder'].perform(ctx) == 'software'
 
 
 def test_disabled_devices_and_recorder_only(monkeypatch):

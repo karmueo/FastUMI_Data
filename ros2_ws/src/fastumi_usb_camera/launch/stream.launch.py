@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -15,11 +16,15 @@ def generate_launch_description() -> LaunchDescription:
         "config" / "ffmpeg.yaml"
     return LaunchDescription([
         DeclareLaunchArgument("config", default_value=str(default_config)),
+        DeclareLaunchArgument("h264_encoder", default_value="hardware"),
         Node(
             package="fastumi_usb_camera",
             executable="usb_camera_ffmpeg",
             name="usb_camera_ffmpeg",
             output="screen",
-            parameters=[LaunchConfiguration("config")],
+            parameters=[LaunchConfiguration("config"), {
+                "h264_encoder": ParameterValue(
+                    LaunchConfiguration("h264_encoder"), value_type=str),
+            }],
         ),
     ])

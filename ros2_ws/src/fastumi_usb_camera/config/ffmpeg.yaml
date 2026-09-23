@@ -11,6 +11,7 @@ usb_camera_ffmpeg:
     frame_id: usb_camera_optical_frame
     topic: /usb_camera/image_raw
     frame_timeout_seconds: 5.0
+    h264_encoder: hardware
 
     usb_camera.image_raw.ffmpeg.encoder: libx264
     usb_camera.image_raw.ffmpeg.encoder_av_options: "preset:ultrafast,tune:zerolatency,profile:baseline"

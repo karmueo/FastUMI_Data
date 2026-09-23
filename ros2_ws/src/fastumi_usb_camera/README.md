@@ -9,10 +9,11 @@
 默认相机是
 `1bcf:28c4`，模式为 `1280x960@30`。
 
-独立的 C++ `usb_camera_ffmpeg` 节点通过内核 V4L2 直接采集 MJPEG，在发送端解码 JPEG，
-用官方 `ffmpeg_image_transport` 编码为 H.264；`usb_camera_receiver` 在接收端
-解码并发布原始图像。两种采集节点会争用同一 USB 相机，因此每次只启动一种。
-FFmpeg 链路仍只缓存最新待处理帧，避免编码或网络变慢时积压旧画面。
+独立的 C++ `usb_camera_ffmpeg` 节点通过内核 V4L2 直接采集 MJPEG。默认使用 Jetson
+`nvv4l2decoder` 和 `nvv4l2h264enc` 完成硬件解码、编码；也可显式切换到 OpenCV 与
+`libx264` 软件链路。两种后端均发布兼容 `ffmpeg_image_transport` 的 H.264 包，
+`usb_camera_receiver` 在接收端解码并发布原始图像。采集节点会争用同一 USB 相机，
+因此每次只启动一种；H.264 链路只缓存最新待处理帧，避免处理变慢时积压旧画面。
 
 ## 安装与构建（ROS 2 Humble / Jetson）
 
@@ -24,17 +25,24 @@ FFmpeg 链路仍只缓存最新待处理帧，避免编码或网络变慢时积�
 再安装系统依赖并构建：
 
 ```bash
-cd ros2_ws
-source /opt/ros/humble/setup.bash
-source .venv-numpy1/bin/activate
-sudo apt install libopencv-dev \
+# 第一次需要安装依赖
+sudo apt install libopencv-dev libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   ros-humble-ffmpeg-image-transport ros-humble-cv-bridge \
   ros-humble-ament-cmake-python ros-humble-ament-cmake-gtest \
   ros-humble-ament-cmake-pytest
+
+# 编译
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
 python -m colcon build --symlink-install --packages-select fastumi_usb_camera \
   --cmake-clean-cache --cmake-args -DCMAKE_BUILD_TYPE=Release \
   -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
+
+# 检查
 head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 ```
 
@@ -43,6 +51,9 @@ head -1 install/fastumi_usb_camera/lib/fastumi_usb_camera/usb_camera_node
 按工作区说明移走旧的 `build`、`install` 和 `log`，避免保留旧独立环境的解释器路径。
 C++ FFmpeg 节点也在 NumPy 1 构建阶段构建，但自身不导入 Python 图像库；它通过
 `uvcvideo` 和 V4L2 打开配置的视频节点，退出时不会解绑内核驱动。
+默认硬件后端还要求 JetPack 提供 `nvidia-l4t-gstreamer`，并在启动时严格检查
+`nvv4l2decoder`、`nvvidconv`、`nvv4l2h264enc` 和 `h264parse`；任一组件缺失都会
+直接退出，不会静默回退到软件编码。
 
 Python 相机节点通过 libuvc 直接访问 USB 设备。首次使用时可为这一型号安装
 udev 规则：
@@ -74,8 +85,12 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py
 # 改为仅发布相机原生 JPEG；与上一个启动命令择一运行。
 ros2 launch fastumi_usb_camera usb_camera.launch.py publish_compressed:=true
 
-# 改为仅发布 FFmpeg H.264；与上述启动命令择一运行。
+# 改为仅发布 H.264；默认使用 Jetson 硬件编解码。
 ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true
+
+# 非 Jetson 平台或调试时显式使用原 libx264 软件编码。
+ros2 launch fastumi_usb_camera usb_camera.launch.py \
+  enable_ffmpeg:=true h264_encoder:=software
 
 # FFmpeg 发送端同时在本机启动可选解码节点。
 ros2 launch fastumi_usb_camera usb_camera.launch.py \
@@ -97,7 +112,8 @@ USB 标识可以用十进制
 `usb_camera_ffmpeg`，即使同时传入 `publish_compressed:=true` 也以 FFmpeg 为准，
 不会创建 raw/JPEG 发布器。`enable_decoder` 默认为 `false`；仅在 FFmpeg 模式下
 可设为 `true`，并把解码结果发布到 `decoded_topic`。布尔开关均只接受 `true`
-或 `false`，切换模式需重启。
+或 `false`。`h264_encoder` 仅接受 `hardware` 或 `software`，默认 `hardware`；
+切换模式需重启。
 
 FFmpeg 模式先加载 `ffmpeg_config`（默认 `config/ffmpeg.yaml`），再加载 `config`，
 最后应用显式传入的相机参数；后加载的相机值覆盖先前的默认值。`config` 中供
@@ -111,8 +127,10 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
   width:=640 height:=480 fps:=30
 ```
 
-`namespace:=...` 仅作用于 Python raw/JPEG 模式；FFmpeg 输出使用绝对基础参数
-`topic` 对应的 `/ffmpeg` 话题。launch 会为该基础话题生成匹配的编码器参数前缀。
+`namespace:=...` 仅作用于 Python raw/JPEG 模式；H.264 输出使用绝对基础参数
+`topic` 对应的 `/ffmpeg` 话题。软件后端会为该基础话题生成匹配的 FFmpeg 编码器
+参数前缀；硬件后端固定使用 4 Mbps、GOP/IDR 10、Baseline、无 B 帧，并在每个
+IDR 写入 SPS/PPS。
 
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
@@ -144,7 +162,7 @@ source /path/to/ros2_ws/install/setup.bash
 export ROS_DOMAIN_ID=63
 
 # 启动 FFmpeg 发送端，此命令会持续运行。
-ros2 launch fastumi_usb_camera stream.launch.py
+ros2 launch fastumi_usb_camera stream.launch.py h264_encoder:=hardware
 
 # 在另一个已加载相同环境的终端检查压缩话题的类型和 QoS。
 ros2 topic info --verbose /usb_camera/image_raw/ffmpeg
@@ -185,13 +203,14 @@ ros2 run rqt_image_view rqt_image_view
 
 也可以分别用 `config:=/absolute/path/ffmpeg.yaml` 指定新配置。发送端 `topic`
 和接收端 `input_topic` 均是**不带 `/ffmpeg` 后缀**的绝对基础话题；接收端
-`output_topic` 是解码后发布的绝对话题。发送端默认 `libx264`、4 Mbps、
-GOP 10、无 B 帧及低延迟编码选项。调整 `topic` 时，编码插件参数前缀也要同步
-调整：去掉话题开头的 `/`，把余下的 `/` 改为 `.`，再加 `.ffmpeg.`。
+`output_topic` 是解码后发布的绝对话题。发送端默认采用 NVIDIA 硬件后端；
+`h264_encoder:=software` 时使用 `libx264`、4 Mbps、GOP 10、无 B 帧及低延迟
+编码选项。软件模式调整 `topic` 时，编码插件参数前缀也要同步调整：去掉话题
+开头的 `/`，把余下的 `/` 改为 `.`，再加 `.ffmpeg.`。
 例如 `/camera/front/image_raw` 对应 `camera.front.image_raw.ffmpeg.encoder`。
 插件按自身规则把发送队列深度提高到至少 `2 × GOP`；接收压缩流使用
 Best Effort / Volatile / Keep Last(20)，解码输出使用 Reliable / Volatile /
-Keep Last(1)。发送端每秒记录采集、覆盖、无订阅者跳过、坏帧、编码帧率和处理耗时。
+Keep Last(1)。发送端每秒记录所选后端、采集、覆盖、无订阅者跳过、坏帧、编码帧率和处理耗时。
 跨机比较时间戳前需同步时钟；显示延迟以实测为准。
 
 处理跟不上采集时，待处理缓存只保留最新帧，旧帧会被覆盖。节点每 5 秒记录

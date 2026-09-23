@@ -22,14 +22,15 @@ ros2 launch fastumi_bringup hardware.launch.py \
   gripper_network_interface:="$GRIPPER_NETWORK_INTERFACE" \
   gripper_config_file:="$GRIPPER_CONFIG_FILE" \
   dataset_root:="$DATASET_ROOT" \
+  h264_encoder:="${H264_ENCODER:-hardware}" \
   enable_decoder:=true
 ```
 
-`hardware.local.env` 被 Git 忽略。末端相机填写 USB 4.2 对应的完整
-`/dev/v4l/by-path/*-video-index0`，可以通过命令
-`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS，并在
+`hardware.local.env` 被 Git 忽略。
+末端相机填写 USB 4.2 对应的完整`/dev/v4l/by-path/*-video-index0`，可以通过命令`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS，并在
 `/wrist_camera/image_raw/ffmpeg` 发布约 4 Mbps 的低延迟 H.264。Jetson 默认不启动
-解码节点，局域网遥操端负责解码显示。
+解码节点，遥操端负责解码显示。默认使用 NVIDIA GStreamer 硬件编解码；只有
+排障或非 Jetson 环境才显式设置 `h264_encoder:=software`。
 模板不含本机绝对路径；本机设备缺失时启动明确报错。
 
 **启动会产生硬件动作**，机械臂等待有效反馈后。
@@ -47,6 +48,7 @@ ros2 launch fastumi_bringup hardware.launch.py \
 | `start_arm` / `start_gripper` / `start_wrist_camera` / `start_recorder` | true | 独立组件开关 |
 | `move_to_initial_pose` | true | 启动机械臂时执行一次回位；false 用于维护 |
 | `enable_decoder` | false | 是否在 Jetson 本地把 H.264 解码到 `/wrist_camera/image_decoded` |
+| `h264_encoder` | hardware | `hardware` 使用 NVIDIA GStreamer；`software` 使用 libx264 |
 | `wrist_video_device` | 空，必须填写 | 完整物理端口路径 |
 | `wrist_width` / `wrist_height` / `camera_fps` | 1280 / 960 / 30 | 采集模式；FPS 同时用于录制视频 |
 | `gripper_config_file` | 已安装 `unitree_gripper` 包的 `config/gripper.yaml` | 夹爪 ROS 参数 YAML |

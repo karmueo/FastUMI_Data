@@ -2,9 +2,10 @@
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 from launch import LaunchContext
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, EmitEvent
 from launch.utilities import perform_substitutions
 import pytest
 
@@ -124,7 +125,9 @@ def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
     assert overrides["frame_id"] == "custom_frame"
     assert overrides["video_device"] == ""
     assert overrides["topic"] == "/usb_camera/image_raw"
+    assert overrides["h264_encoder"] == "hardware"
     assert overrides["usb_camera.image_raw.ffmpeg.encoder"] == "libx264"
+    assert callable(node["on_exit"])
     assert "namespace" not in node
     assert "publish_compressed" not in node["parameters"][2]
 
@@ -146,6 +149,30 @@ def test_ffmpeg_decoder_is_optional_and_uses_explicit_topics(monkeypatch):
         "input_topic": "/wrist_camera/image_raw",
         "output_topic": "/wrist_camera/image_decoded",
     }
+
+
+def test_ffmpeg_software_encoder_override(monkeypatch):
+    """显式 software 选择保留原 libx264 发布路径。"""
+    module = _load_launch()
+    node = _selected_node(
+        monkeypatch, module, enable_ffmpeg="true", h264_encoder="software")
+    assert node["parameters"][2]["h264_encoder"] == "software"
+    assert node["parameters"][2]["usb_camera.image_raw.ffmpeg.encoder"] == "libx264"
+
+
+def test_invalid_h264_encoder_fails_before_node_start(monkeypatch):
+    module = _load_launch()
+    with pytest.raises(ValueError, match="h264_encoder"):
+        _selected_node(
+            monkeypatch, module, enable_ffmpeg="true", h264_encoder="automatic")
+
+
+def test_h264_camera_exit_requests_global_shutdown():
+    module = _load_launch()
+    actions = module._shutdown_on_camera_exit(
+        SimpleNamespace(returncode=1), LaunchContext())
+    assert len(actions) == 1
+    assert isinstance(actions[0], EmitEvent)
 
 
 def test_decoder_requires_ffmpeg_mode(monkeypatch):

@@ -64,6 +64,7 @@ def _launch_hardware(context):
             'fps': LaunchConfiguration('camera_fps'),
             'frame_id': 'wrist_camera_optical_frame', 'enable_ffmpeg': 'true',
             'enable_decoder': LaunchConfiguration('enable_decoder'),
+            'h264_encoder': LaunchConfiguration('h264_encoder'),
             'topic': '/wrist_camera/image_raw',
             'decoded_topic': '/wrist_camera/image_decoded',
         }))
@@ -104,7 +105,8 @@ def generate_launch_description():
     )
     defaults = dict(
         start_arm='true', start_gripper='true', start_wrist_camera='true', start_recorder='true',
-        move_to_initial_pose='true', enable_decoder='false', wrist_video_device='', wrist_width='1280',
+        move_to_initial_pose='true', enable_decoder='false', h264_encoder='hardware',
+        wrist_video_device='', wrist_width='1280',
         wrist_height='960', camera_fps='30', gripper_config_file=gripper_default_config,
         gripper_network_interface='',
         dataset_root='', dir_name='test', name='default_test', record_camera='true',

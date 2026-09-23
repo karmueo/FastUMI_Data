@@ -4,7 +4,9 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction
+from launch.events import Shutdown
+from launch.logging import get_logger
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -39,6 +41,9 @@ def _camera_node(context):
         raise ValueError("enable_decoder 只能是 true 或 false")
     if enable_decoder == "true" and enable_ffmpeg != "true":
         raise ValueError("enable_decoder=true 仅支持 FFmpeg 模式")
+    h264_encoder = LaunchConfiguration("h264_encoder").perform(context)
+    if h264_encoder not in ("hardware", "software"):
+        raise ValueError("h264_encoder 只能是 hardware 或 software")
     compressed = LaunchConfiguration("publish_compressed").perform(context).lower()
     if compressed and compressed not in ("true", "false"):
         raise ValueError("publish_compressed 只能是 true 或 false")
@@ -57,6 +62,7 @@ def _camera_node(context):
         if not decoded_topic.startswith("/") or decoded_topic.endswith("/"):
             raise ValueError("decoded_topic 必须是不以 / 结尾的绝对话题")
         overrides["topic"] = topic
+        overrides["h264_encoder"] = h264_encoder
         prefix = topic.lstrip("/").replace("/", ".") + ".ffmpeg."
         overrides.update({
             prefix + "encoder": "libx264",
@@ -74,6 +80,7 @@ def _camera_node(context):
             name="usb_camera_ffmpeg",
             output="screen",
             parameters=[LaunchConfiguration("ffmpeg_config"), config, overrides],
+            on_exit=_shutdown_on_camera_exit,
         )]
         if enable_decoder == "true":
             nodes.append(Node(
@@ -110,6 +117,15 @@ def _camera_node(context):
     )]
 
 
+def _shutdown_on_camera_exit(event, context):
+    """H.264 相机意外退出时关闭包含它的统一启动。"""
+    if context.is_shutdown:
+        return []
+    reason = f"H.264 相机节点退出（退出码 {event.returncode}），统一启动退出"
+    get_logger("fastumi_usb_camera").error(reason)
+    return [EmitEvent(event=Shutdown(reason=reason))]
+
+
 def generate_launch_description() -> LaunchDescription:
     """声明配置与模式参数，按模式生成一个相机节点。"""
     # 安装后包共享目录中的默认参数文件。
@@ -122,6 +138,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("namespace", default_value="usb_camera"),
         DeclareLaunchArgument("enable_ffmpeg", default_value="false"),
         DeclareLaunchArgument("enable_decoder", default_value="false"),
+        DeclareLaunchArgument("h264_encoder", default_value="hardware"),
         DeclareLaunchArgument("topic", default_value="/usb_camera/image_raw"),
         DeclareLaunchArgument("decoded_topic", default_value="/usb_camera/image_decoded"),
     ]
