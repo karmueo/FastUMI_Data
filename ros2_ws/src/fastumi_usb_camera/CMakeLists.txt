@@ -10,6 +10,8 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(builtin_interfaces REQUIRED)
+find_package(ffmpeg_encoder_decoder REQUIRED)
+find_package(ffmpeg_image_transport_msgs REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rcl_interfaces REQUIRED)
@@ -40,7 +42,7 @@ ament_target_dependencies(usb_camera_ffmpeg
 
 add_executable(usb_camera_receiver src/usb_camera_receiver.cpp)
 ament_target_dependencies(usb_camera_receiver
-  image_transport pluginlib rclcpp sensor_msgs)
+  ffmpeg_encoder_decoder ffmpeg_image_transport_msgs image_transport pluginlib rclcpp sensor_msgs)
 
 install(TARGETS ${PROJECT_NAME}_core usb_camera_node usb_camera_ffmpeg usb_camera_receiver
   ARCHIVE DESTINATION lib
@@ -54,8 +56,6 @@ install(FILES README.md DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
-  find_package(ffmpeg_image_transport_msgs REQUIRED)
-
   ament_add_pytest_test(test_python test)
 
   ament_add_gtest(test_configuration test/test_configuration.cpp)
@@ -81,7 +81,7 @@ if(BUILD_TESTING)
 
   add_executable(test_ffmpeg_round_trip test/test_ffmpeg_round_trip.cpp)
   ament_target_dependencies(test_ffmpeg_round_trip
-    ffmpeg_image_transport_msgs image_transport pluginlib rclcpp sensor_msgs)
+    ffmpeg_encoder_decoder ffmpeg_image_transport_msgs image_transport pluginlib rclcpp sensor_msgs)
   add_test(NAME test_ffmpeg_round_trip COMMAND test_ffmpeg_round_trip)
   set_tests_properties(test_ffmpeg_round_trip PROPERTIES TIMEOUT 30)
 endif()

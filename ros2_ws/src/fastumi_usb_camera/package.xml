@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>ament_cmake_python</build_depend>
   <depend>builtin_interfaces</depend>
+  <depend>ffmpeg_encoder_decoder</depend>
   <depend>ffmpeg_image_transport</depend>
   <depend>ffmpeg_image_transport_msgs</depend>
   <depend>image_transport</depend>

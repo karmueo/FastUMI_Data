@@ -29,7 +29,7 @@ source .venv-numpy1/bin/activate
 # 第一次构建需要安装下面的依赖
 sudo apt update
 sudo apt install libopencv-dev \
-  ros-jazzy-ffmpeg-image-transport \
+  ros-jazzy-ffmpeg-image-transport ros-jazzy-ffmpeg-encoder-decoder \
   ros-jazzy-ament-cmake-python ros-jazzy-ament-cmake-gtest \
   ros-jazzy-ament-cmake-pytest
 
@@ -204,12 +204,31 @@ source install/setup.bash
 # 启动 FFmpeg 接收端，将 H.264 解码成本机的 bgr8 图像。
 ros2 launch fastumi_usb_camera receive.launch.py
 
+# 在配备 NVIDIA GPU 与 h264_cuvid 的 x86 接收机上启用硬件解码。
+ros2 launch fastumi_usb_camera receive.launch.py \
+  input_topic:=/wrist_camera/image_raw \
+  output_topic:=/wrist_camera/image_decoded \
+  decoder_backend:=cuda output_queue_depth:=5
+
 # 在另一个已加载相同环境的终端检查解码图像话题和 QoS。
 ros2 topic info --verbose /usb_camera/image_decoded
 
 # 打开图像查看器，在界面中选择 /usb_camera/image_decoded。
 ros2 run rqt_image_view rqt_image_view
 ```
+
+`decoder_backend` 默认是 `transport`，沿用 `ffmpeg_image_transport` 订阅插件；
+本机面板管理的 `wrist_decoder` 指定为 `cuda`，使用 `h264_cuvid` 解码 H.264。
+CUDA 模式在接收端给解码器分配递增 PTS，原始 ROS 时间戳和 `frame_id` 仍传给
+解码后的图像。该模式要求 FFmpeg 提供可用的 NVIDIA CUDA 解码器；初始化失败时
+节点报错退出。需要软件解码时可显式使用 `decoder_backend:=transport`，当前
+`ffmpeg.yaml` 已为末端 H.264 流指定软件解码器。
+CUDA 模式每五秒在接收节点日志中记录实际收到的压缩包率、已提交发布的图像率、
+源时间戳断档、解码失败及最长解码和发布耗时。`ros2 topic hz` 统计的是测速端
+收到的图像率，原始 `bgr8` 图像较大时可低于节点日志中的发布率。
+`output_queue_depth` 默认是 1；本机面板管理的末端相机设为 5。接收端使用
+`RELIABLE` 且保留足够队列时，现场 30 秒测试达到约 30 fps。增大队列会占用
+更多内存；若消费端持续处理不过来，队列仍可能积压并增加画面延迟。
 
 也可以分别用 `config:=/absolute/path/ffmpeg.yaml` 指定新配置。发送端 `topic`
 和接收端 `input_topic` 均是**不带 `/ffmpeg` 后缀**的绝对基础话题；接收端

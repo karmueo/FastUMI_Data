@@ -21,3 +21,5 @@ usb_camera_receiver:
   ros__parameters:
     input_topic: /usb_camera/image_raw
     output_topic: /usb_camera/image_decoded
+    # Jetson H.264 流使用软件解码，避免 cuvid 解码帧的 PTS 无法匹配。
+    wrist_camera.image_raw.ffmpeg.decoders.h264: h264

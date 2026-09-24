@@ -1,3 +1,7 @@
+/**
+ * @file test_ffmpeg_round_trip.cpp
+ * @brief 验证 FFmpeg 往返传输及使用本地 PTS 时的原始时间戳恢复。
+ */
 // Copyright 2026 karmueo
 
 #include <chrono>
@@ -7,7 +11,10 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
+#include <vector>
 
+#include <ffmpeg_encoder_decoder/decoder.hpp>
 #include <ffmpeg_image_transport_msgs/msg/ffmpeg_packet.hpp>
 #include <image_transport/publisher_plugin.hpp>
 #include <image_transport/subscriber_plugin.hpp>
@@ -43,6 +50,7 @@ sensor_msgs::msg::Image make_image(int64_t nanoseconds)
   return image;
 }
 
+/** @brief 验证插件往返、重新订阅及本地 PTS 解码后的消息头。 */
 void run_check()
 {
   const std::string topic = "/round_trip/image";
@@ -74,11 +82,15 @@ void run_check()
   publisher->advertise(publisher_node.get(), topic, qos);
 
   bool keyframe_seen = false;
+  // 保存实际编码后的包，以验证高位 PTS 的接收端解码方式。
+  std::vector<ffmpeg_image_transport_msgs::msg::FFMPEGPacket> captured_packets;
   auto packet_subscription = packet_node->create_subscription<
     ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(
     topic + "/ffmpeg", rclcpp::SensorDataQoS().keep_last(20),
-    [&keyframe_seen](ffmpeg_image_transport_msgs::msg::FFMPEGPacket::ConstSharedPtr packet) {
+    [&keyframe_seen, &captured_packets](
+      ffmpeg_image_transport_msgs::msg::FFMPEGPacket::ConstSharedPtr packet) {
       keyframe_seen = keyframe_seen || packet->flags != 0;
+      captured_packets.push_back(*packet);
     });
 
   rclcpp::executors::SingleThreadedExecutor executor;
@@ -120,6 +132,46 @@ void run_check()
   subscribe_and_receive(1000000);
   subscribe_and_receive(2000000);
   require(keyframe_seen, "no H.264 keyframe packet was observed");
+
+  // 模拟 Jetson 包中纳秒级的原始 PTS，直接解码时仅传入本地小序号。
+  // 用软件解码器验证与 CUDA 路径相同的 PTS 和消息头映射行为。
+  ffmpeg_encoder_decoder::Decoder normalized_decoder;
+  normalized_decoder.setOutputMessageEncoding("bgr8");
+  // 记录实际输入帧的 ROS 时间戳，用于核对解码回调。
+  std::unordered_set<int64_t> expected_stamps;
+  // 已成功恢复的图像数量及下一个解码器本地 PTS。
+  size_t normalized_frames = 0;
+  uint64_t local_pts = 1;
+  // 首个关键帧出现后才初始化解码器。
+  bool initialized = false;
+  for (auto & packet : captured_packets) {
+    packet.pts = 1700000000000000000ULL + local_pts;
+    if (!initialized) {
+      if ((packet.flags & AV_PKT_FLAG_KEY) == 0) {
+        continue;
+      }
+      initialized = normalized_decoder.initialize(
+        packet.encoding,
+        [&expected_stamps, &normalized_frames](
+          const ffmpeg_encoder_decoder::ImageConstPtr & image, bool, const std::string &) {
+          require(
+            expected_stamps.count(rclcpp::Time(image->header.stamp).nanoseconds()) != 0,
+            "normalized decoder changed the original ROS timestamp");
+          require(image->header.frame_id == "test_camera", "normalized frame_id changed");
+          require(image->encoding == sensor_msgs::image_encodings::BGR8,
+            "normalized image encoding changed");
+          ++normalized_frames;
+        }, "h264");
+      require(initialized, "software decoder initialization failed");
+    }
+    expected_stamps.insert(rclcpp::Time(packet.header.stamp).nanoseconds());
+    require(
+      normalized_decoder.decodePacket(
+        packet.encoding, packet.data.data(), packet.data.size(), local_pts++,
+        packet.header.frame_id, rclcpp::Time(packet.header.stamp)),
+      "normalized packet decoding failed");
+  }
+  require(normalized_frames > 0, "normalized decoder produced no image");
 
   packet_subscription.reset();
   publisher->shutdown();
