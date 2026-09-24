@@ -24,6 +24,7 @@ from convert_hardware_mcap import (
     ConversionError,
     convert_episode,
     discover_episodes,
+    main,
 )
 
 
@@ -87,8 +88,9 @@ def _image(mode: str, index: int, timestamp_ns: int,
 def _make_bag(root: Path, mode: str, *, include_tracker: bool = True,
               state_offsets: tuple[int, int] = (150, 350),
               skip_first_h264_packet: bool = False,
-              corrupt_jpeg_index: int | None = None) -> Path:
-    episode = root / "episode_12"
+              corrupt_jpeg_index: int | None = None,
+              episode_number: int = 12) -> Path:
+    episode = root / f"episode_{episode_number}"
     episode.mkdir(parents=True)
     bag = episode / "bag"
     writer = rosbag2_py.SequentialWriter()
@@ -215,3 +217,84 @@ def test_disjoint_camera_and_state_times_do_not_publish_episode(tmp_path: Path) 
         convert_episode(source, output)
     assert not (output / source.name).exists()
     assert not list(output.glob(".episode_12.tmp-*"))
+
+
+@pytest.mark.parametrize("workers", ("0", "-1", "1.5", "abc"))
+def test_cli_rejects_invalid_worker_counts(tmp_path: Path, workers: str) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["--input", str(tmp_path), "--output", str(tmp_path / "output"),
+              "--workers", workers])
+    assert error.value.code == 2
+
+
+def test_single_episode_caps_workers_and_converts_serially(tmp_path: Path,
+                                                            capsys) -> None:
+    source = _make_bag(tmp_path / "source", "raw")
+    output = tmp_path / "output"
+    assert main(["--input", str(source), "--output", str(output),
+                 "--workers", "99"]) == 0
+    assert (output / source.name / "proprio.hdf5").is_file()
+    lines = capsys.readouterr().out
+    assert "并发数: 1" in lines
+    assert "[1/1] episode_12: 完成" in lines
+
+
+def test_default_parallel_conversion_matches_serial_results(tmp_path: Path,
+                                                            monkeypatch,
+                                                            capsys) -> None:
+    monkeypatch.setattr("convert_hardware_mcap.os.cpu_count", lambda: 12)
+    source = tmp_path / "source"
+    episodes = [_make_bag(source, mode, episode_number=index)
+                for index, mode in enumerate(("raw", "jpeg", "h264"))]
+    serial_output = tmp_path / "serial"
+    parallel_output = tmp_path / "parallel"
+    expected_reports = {
+        episode.name: convert_episode(episode, serial_output)
+        for episode in episodes
+    }
+
+    assert main(["--input", str(source), "--output", str(parallel_output)]) == 0
+    lines = capsys.readouterr().out
+    assert "并发数: 3" in lines
+    assert "[3/3]" in lines
+    for episode in episodes:
+        expected = expected_reports[episode.name]
+        converted = parallel_output / episode.name
+        assert json.loads((converted / "conversion.json").read_text()) == expected
+        with h5py.File(serial_output / episode.name / "proprio.hdf5") as serial, \
+                h5py.File(converted / "proprio.hdf5") as parallel:
+            datasets = []
+            serial.visititems(lambda name, item: datasets.append(name)
+                              if isinstance(item, h5py.Dataset) else None)
+            for name in datasets:
+                np.testing.assert_array_equal(serial[name][:], parallel[name][:])
+            assert dict(serial.attrs) == dict(parallel.attrs)
+        capture = cv2.VideoCapture(str(converted / "gripper.mp4"))
+        assert capture.isOpened()
+        assert int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) == (
+            expected["output_counts"]["video_frames"])
+        capture.release()
+
+
+def test_parallel_failures_do_not_block_other_episodes(tmp_path: Path,
+                                                       capsys) -> None:
+    source = tmp_path / "source"
+    good = _make_bag(source, "raw", episode_number=1)
+    missing = _make_bag(source, "jpeg", include_tracker=False,
+                        episode_number=2)
+    corrupt = _make_bag(source, "jpeg", corrupt_jpeg_index=2,
+                        episode_number=3)
+    existing = _make_bag(source, "raw", episode_number=4)
+    output = tmp_path / "output"
+    (output / existing.name).mkdir(parents=True)
+
+    assert main(["--input", str(source), "--output", str(output),
+                 "--workers", "2"]) == 1
+    lines = capsys.readouterr().out
+    assert "并发数: 2" in lines
+    assert "总计 4 轮，成功 1，失败 3" in lines
+    assert (output / good.name / "proprio.hdf5").is_file()
+    assert not (output / missing.name).exists()
+    assert not (output / corrupt.name).exists()
+    assert (output / existing.name).is_dir()
+    assert not list(output.glob(".episode_*.tmp-*"))

@@ -11,9 +11,12 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_right
 from collections import Counter, defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 import math
+import multiprocessing
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -334,10 +337,16 @@ def _payload(spool: Any, record: CameraRecord) -> bytes:
     return payload
 
 
-def _probe_frames(path: Path) -> list[dict[str, Any]]:
+def _probe_frames(path: Path, *, threads: int | None = None) -> list[dict[str, Any]]:
+    command = ["ffprobe", "-v", "error"]
+    if threads is not None:
+        command.extend(["-threads", str(threads)])
+    command.extend([
+        "-show_frames", "-select_streams", "v:0",
+        "-show_entries", "frame=pkt_pos", "-of", "json", str(path),
+    ])
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_frames", "-select_streams", "v:0",
-         "-show_entries", "frame=pkt_pos", "-of", "json", str(path)],
+        command,
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -391,7 +400,10 @@ def _decode_frame(spool: Any, record: CameraRecord, mode: str) -> np.ndarray:
 
 
 def _write_video(path: Path, records: list[CameraRecord], mode: str,
-                 spool: Any, fps: float) -> None:
+                 spool: Any, fps: float, *, threads: int | None = None) -> None:
+    ffmpeg_command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if threads is not None:
+        ffmpeg_command.extend(["-filter_threads", "1"])
     if mode == "h264":
         bitstream_path = path.with_suffix(".h264")
         offsets = []
@@ -399,7 +411,7 @@ def _write_video(path: Path, records: list[CameraRecord], mode: str,
             for record in records:
                 offsets.append(bitstream.tell())
                 bitstream.write(_payload(spool, record))
-        frames = _probe_frames(bitstream_path)
+        frames = _probe_frames(bitstream_path, threads=threads)
         frame_offsets = [int(frame["pkt_pos"]) for frame in frames
                          if "pkt_pos" in frame]
         if frame_offsets != offsets:
@@ -407,9 +419,10 @@ def _write_video(path: Path, records: list[CameraRecord], mode: str,
                 "H.264 解码帧与 MCAP 包不是一一对应，拒绝写入错误时间戳"
             )
         _run_ffmpeg(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-framerate", str(fps), "-f", "h264", "-i", str(bitstream_path),
-             "-an", "-c:v", "copy", "-movflags", "+faststart", str(path)]
+            ffmpeg_command + [
+                "-framerate", str(fps), "-f", "h264", "-i", str(bitstream_path),
+                "-an", "-c:v", "copy", "-movflags", "+faststart", str(path),
+            ]
         )
         bitstream_path.unlink()
     else:
@@ -424,15 +437,19 @@ def _write_video(path: Path, records: list[CameraRecord], mode: str,
                     raise ConversionError("视频帧尺寸不一致")
                 yield image.tobytes()
 
-        _run_ffmpeg(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-f", "rawvideo", "-pixel_format", "bgr24", "-video_size",
-             f"{width}x{height}", "-framerate", str(fps), "-i", "pipe:0",
-             "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(path)],
-            frames(),
-        )
-    if len(_probe_frames(path)) != len(records):
+        command = ffmpeg_command + [
+            "-f", "rawvideo", "-pixel_format", "bgr24", "-video_size",
+            f"{width}x{height}", "-framerate", str(fps), "-i", "pipe:0",
+            "-an", "-c:v", "libx264",
+        ]
+        if threads is not None:
+            command.extend(["-threads", str(threads)])
+        command.extend([
+            "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", str(path),
+        ])
+        _run_ffmpeg(command, frames())
+    if len(_probe_frames(path, threads=threads)) != len(records):
         raise ConversionError("MP4 帧数与 HDF5 相机时间戳数量不一致")
 
 
@@ -498,7 +515,8 @@ def discover_episodes(source: Path) -> list[Path]:
     return sorted(episodes, key=lambda path: int(path.name[8:]))
 
 
-def convert_episode(source: Path, output_dir: Path) -> dict[str, Any]:
+def convert_episode(source: Path, output_dir: Path, *,
+                    video_threads: int | None = None) -> dict[str, Any]:
     """Convert one episode into a staging directory, then publish it."""
     destination = output_dir / source.name
     if destination.exists():
@@ -512,7 +530,7 @@ def convert_episode(source: Path, output_dir: Path) -> dict[str, Any]:
             selected = _select(data)
             fps = _fps(selected["camera"])
             _write_video(stage / "gripper.mp4", selected["camera"],
-                         data["camera_mode"], spool, fps)
+                         data["camera_mode"], spool, fps, threads=video_threads)
             _write_hdf5(stage / "proprio.hdf5", selected)
 
         recording_path = source / "recording.json"
@@ -563,26 +581,78 @@ def convert_episode(source: Path, output_dir: Path) -> dict[str, Any]:
         raise
 
 
+def _positive_int(value: str) -> int:
+    """Parse a positive process count for the command line."""
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("并行进程数必须是正整数") from error
+    if number <= 0:
+        raise argparse.ArgumentTypeError("并行进程数必须是正整数")
+    return number
+
+
+def _init_worker() -> None:
+    """Keep OpenCV from creating a full CPU-sized thread pool per process."""
+    cv2.setNumThreads(1)
+
+
+def convert_episodes(episodes: list[Path], output_dir: Path,
+                     workers: int):
+    """Yield completed conversions, with errors isolated to each episode."""
+    if workers == 1:
+        for episode in episodes:
+            try:
+                yield episode, convert_episode(episode, output_dir), None
+            except Exception as error:
+                yield episode, None, error
+        return
+
+    video_threads = max(1, (os.cpu_count() or 1) // workers)
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context,
+                             initializer=_init_worker) as executor:
+        futures = {
+            executor.submit(convert_episode, episode, output_dir,
+                            video_threads=video_threads): episode
+            for episode in episodes
+        }
+        for future in as_completed(futures):
+            episode = futures[future]
+            try:
+                yield episode, future.result(), None
+            except Exception as error:
+                yield episode, None, error
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path,
                         help="episode_N 目录或包含多个 episode_N 的目录")
     parser.add_argument("--output", required=True, type=Path,
                         help="输出 episode_N 的父目录")
+    parser.add_argument("--workers", type=_positive_int,
+                        default=min(4, os.cpu_count() or 1),
+                        help="并行转换进程数，默认最多 4；设为 1 顺序转换")
     arguments = parser.parse_args(argv)
     source = arguments.input.expanduser().resolve()
     output = arguments.output.expanduser().resolve()
     episodes = discover_episodes(source)
     if output == source or output in episodes:
         parser.error("输出目录不能与输入 episode 或父目录相同")
+    workers = min(arguments.workers, len(episodes))
+    print(f"并发数: {workers}", flush=True)
     failed = 0
-    for episode in episodes:
-        try:
-            report = convert_episode(episode, output)
-            print(f"{episode.name}: 完成，视频 {report['output_counts']['video_frames']} 帧")
-        except Exception as error:
+    for completed, (episode, report, error) in enumerate(
+            convert_episodes(episodes, output, workers), 1):
+        if error is not None:
             failed += 1
-            print(f"{episode.name}: 失败: {error}")
+            print(f"[{completed}/{len(episodes)}] {episode.name}: 失败: {error}",
+                  flush=True)
+        else:
+            print(f"[{completed}/{len(episodes)}] {episode.name}: "
+                  f"完成，视频 {report['output_counts']['video_frames']} 帧",
+                  flush=True)
     print(f"总计 {len(episodes)} 轮，成功 {len(episodes)-failed}，失败 {failed}")
     return 1 if failed else 0
 

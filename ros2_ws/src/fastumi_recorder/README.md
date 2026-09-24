@@ -103,6 +103,11 @@ python convert_hardware_mcap.py \
   --output dataset/h5dy_data/1/11_training
 ```
 
+批量转换默认并行，最多使用 4 个进程，且不会超过 episode 数量。可用
+`--workers 2` 指定进程数，用 `--workers 1` 顺序转换；输入只有一轮时始终顺序转换。
+各轮完成后立即显示进度，单轮失败不会中断其他轮次，最终汇总成功和失败数量。
+并行时脚本会限制每个进程的视频处理线程数，避免同时启动过多编码线程。
+
 脚本需要已安装的 `rosbag2_storage_mcap`、`ffmpeg`、`ffprobe`、`h5py`、OpenCV，以及
 构建后的 `rm_ros_interfaces`。支持相机 raw、JPEG、H.264 三种录制模式。H.264 从
 关节指令区间内首个可解码关键帧开始；各数据流没有共同时间区间、不能解码，
