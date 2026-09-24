@@ -47,6 +47,7 @@ class RecorderNode(Node):
             gripper_action_topic='/motion_control/gripper_command',
             tracker_odom_topic='/vive_tracker/odom',
             image_topic='/wrist_camera/image_raw/ffmpeg', image_transport='ffmpeg',
+            image_reliability='reliable', image_qos_depth=30,
         )
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -57,6 +58,12 @@ class RecorderNode(Node):
         image_transport = str(values['image_transport']).strip().lower()
         if image_transport not in ('raw', 'jpeg', 'ffmpeg'):
             raise ValueError('image_transport 必须是 raw、jpeg 或 ffmpeg')
+        image_reliability = str(values['image_reliability']).strip().lower()
+        if image_reliability not in ('reliable', 'best_effort'):
+            raise ValueError('image_reliability 只能是 reliable 或 best_effort')
+        image_qos_depth = values['image_qos_depth']
+        if type(image_qos_depth) is not int or image_qos_depth <= 0:
+            raise ValueError('image_qos_depth 必须是正整数')
         topics = {
             stream: (values[parameter], message_type)
             for stream, parameter, message_type in (
@@ -100,8 +107,14 @@ class RecorderNode(Node):
                 'jpeg': (CompressedImage, self._compressed_image),
                 'ffmpeg': (FFMPEGPacket, self._ffmpeg_image),
             }[image_transport]
-            self.create_subscription(
-                image_type, values['image_topic'], image_handler, qos_profile_sensor_data)
+            self.image_subscription = self.create_subscription(
+                image_type, values['image_topic'], image_handler,
+                QoSProfile(
+                    depth=image_qos_depth,
+                    reliability=(ReliabilityPolicy.RELIABLE
+                                 if image_reliability == 'reliable'
+                                 else ReliabilityPolicy.BEST_EFFORT),
+                    durability=DurabilityPolicy.VOLATILE))
         self.create_timer(0.5, self.publish_status)
         self.create_timer(0.05, self._publish_change)
         self.publish_status()

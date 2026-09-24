@@ -433,24 +433,34 @@ public:
     config_.frame_id = declare_parameter<std::string>("frame_id", config_.frame_id);
     config_.topic = declare_parameter<std::string>("topic", config_.topic);
     h264_encoder_ = declare_parameter<std::string>("h264_encoder", "hardware");
+    const auto publish_reliability = declare_parameter<std::string>(
+      "publish_reliability", "reliable");
     validate_configuration(config_);
     if (h264_encoder_ != "hardware" && h264_encoder_ != "software") {
       throw std::invalid_argument("h264_encoder must be hardware or software");
     }
+    if (publish_reliability != "reliable" && publish_reliability != "best_effort") {
+      throw std::invalid_argument("publish_reliability must be reliable or best_effort");
+    }
 
     auto qos = rmw_qos_profile_sensor_data;
     qos.history = RMW_QOS_POLICY_HISTORY_KEEP_LAST;
-    qos.depth = 1;
-    qos.reliability = RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT;
+    qos.depth = 20;
+    qos.reliability = publish_reliability == "reliable" ?
+      RMW_QOS_POLICY_RELIABILITY_RELIABLE : RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT;
     qos.durability = RMW_QOS_POLICY_DURABILITY_VOLATILE;
     if (h264_encoder_ == "software") {
       software_encoder_ = loader.createUniqueInstance(
         image_transport::PublisherPlugin::getLookupName("ffmpeg"));
       software_encoder_->advertise(this, config_.topic, qos);
     } else {
+      auto image_qos = rclcpp::SensorDataQoS().keep_last(20);
+      if (publish_reliability == "reliable") {
+        image_qos.reliable();
+      }
       hardware_publisher_ = create_publisher<
         ffmpeg_image_transport_msgs::msg::FFMPEGPacket>(
-        config_.topic + "/ffmpeg", rclcpp::SensorDataQoS().keep_last(20));
+        config_.topic + "/ffmpeg", image_qos);
       HardwareH264Configuration hardware_configuration;
       hardware_configuration.width = static_cast<int>(config_.width);
       hardware_configuration.height = static_cast<int>(config_.height);

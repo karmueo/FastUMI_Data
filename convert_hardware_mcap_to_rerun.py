@@ -32,7 +32,6 @@ from convert_hardware_mcap import (
     _decode_frame,
     _fps,
     _write_video,
-    discover_episodes,
 )
 
 
@@ -320,30 +319,49 @@ def convert_episode(source: Path, output_dir: Path) -> dict[str, Any]:
     }
 
 
+def discover_rerun_episodes(source: Path) -> list[Path]:
+    """Find numbered MCAP episodes at any depth below a source directory."""
+    if (source / "bag" / "metadata.yaml").is_file():
+        return [source]
+    if not source.is_dir():
+        raise ConversionError(f"没有找到 episode_N/bag: {source}")
+    episodes = [
+        path for path in source.rglob("episode_*")
+        if path.is_dir() and path.name[8:].isdigit()
+        and (path / "bag" / "metadata.yaml").is_file()
+    ]
+    if not episodes:
+        raise ConversionError(f"没有找到 episode_N/bag: {source}")
+    return sorted(episodes, key=lambda path: (path.parent.relative_to(source).parts,
+                                               int(path.name[8:])))
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Export one episode or all numbered episodes directly below a directory."""
+    """Export one episode or all numbered episodes below a directory."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path,
-                        help="episode_N 目录或包含多个 episode_N 的目录")
+                        help="episode_N 目录或包含 episode_N 的根目录（递归查找）")
     parser.add_argument("--output", required=True, type=Path,
-                        help=".rrd 文件的输出目录")
+                        help=".rrd 输出根目录（保留输入下的子目录结构）")
     args = parser.parse_args(argv)
     source = args.input.expanduser().resolve()
     output = args.output.expanduser().resolve()
-    episodes = discover_episodes(source)
+    episodes = discover_rerun_episodes(source)
+    single_episode = episodes == [source]
     failed = 0
     for episode in episodes:
+        destination_dir = output if single_episode else output / episode.parent.relative_to(source)
         try:
-            report = convert_episode(episode, output)
-            print(f"{episode.name}: 完成 -> {report['output']}，"
+            report = convert_episode(episode, destination_dir)
+            print(f"{episode}: 完成 -> {report['output']}，"
                   f"相机 {report['counts']['camera']} 帧，"
                   f"关键帧前跳过 {report['camera_skipped_until_keyframe']} 帧，"
                   f"其他采样 {report['counts']}")
             if report["invalid"]:
-                print(f"{episode.name}: 无效消息 {report['invalid']}")
+                print(f"{episode}: 无效消息 {report['invalid']}")
         except Exception as error:
             failed += 1
-            print(f"{episode.name}: 失败: {error}")
+            print(f"{episode}: 失败: {error}")
     print(f"总计 {len(episodes)} 轮，成功 {len(episodes) - failed}，失败 {failed}")
     return 1 if failed else 0
 

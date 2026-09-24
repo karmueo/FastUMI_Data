@@ -1,6 +1,6 @@
 # 使用 Rerun 查看硬件采集 episode
 
-`dataset/h5dy_data/1/11` 是 ROS 2 MCAP episode 目录，不是 HDF5 文件。转换脚本读取每个 `episode_N/bag`，各生成一个 Rerun `.rrd` 文件；也可将单个 `episode_N` 作为输入。
+`dataset/h5dy_data/1/11` 是 ROS 2 MCAP episode 的集合目录，不是 HDF5 文件。转换脚本递归查找输入目录下的 `episode_N/bag`，各生成一个 Rerun `.rrd` 文件；也可将单个 `episode_N` 作为输入。
 
 ## 环境
 
@@ -32,7 +32,15 @@ rerun dataset/rerun_data/1/11/episode_3.rrd
 rerun dataset/rerun_data/1/11/episode_4.rrd
 ```
 
-单轮转换可将 `--input` 设为 `dataset/h5dy_data/1/11/episode_3`。已有同名 `.rrd` 时脚本拒绝覆盖；要重新导出，请先移走旧文件。输出放在被 Git 忽略的 `dataset/` 下。
+也可以从更高层的根目录批量转换，输出会保留该输入目录下的相对子目录结构。例如：
+
+```bash
+python3 convert_hardware_mcap_to_rerun.py \
+  --input dataset/h5dy_data/rm75/jingbao \
+  --output dataset/rerun_data/rm75/jingbao
+```
+
+此时 `episode_70/bag` 会生成 `dataset/rerun_data/rm75/jingbao/episode_70.rrd`；若输入下还有 `session_a/episode_71/bag`，则生成 `dataset/rerun_data/rm75/jingbao/session_a/episode_71.rrd`。单轮转换可将 `--input` 设为 `dataset/h5dy_data/1/11/episode_3`，此时 `.rrd` 直接写入 `--output`。已有同名 `.rrd` 时脚本拒绝覆盖；要重新导出，请先移走旧文件。输出放在被 Git 忽略的 `dataset/` 下。
 
 文件内置默认视图布局。打开后，在 Viewer 底部选择 `bag_receive_time` 时间轴，拖动或播放时间光标。`camera/wrist` 显示相机；`world/vive_tracker_odom` 显示 Tracker 坐标轴与完整轨迹；`joint/feedback`、`joint/command` 和 `gripper` 显示状态及指令曲线。可以在实体树中选中单个关节比较数值。
 

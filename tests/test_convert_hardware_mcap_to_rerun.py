@@ -15,7 +15,9 @@ import pyarrow as pa
 from rerun.chunk import RrdReader
 
 from convert_hardware_mcap import ConversionError
-from convert_hardware_mcap_to_rerun import _log_camera, _read_episode, convert_episode, main
+from convert_hardware_mcap_to_rerun import (
+    _log_camera, _read_episode, convert_episode, discover_rerun_episodes, main,
+)
 from test_convert_hardware_mcap import BASE_NS, _make_bag
 
 
@@ -142,3 +144,17 @@ def test_parent_directory_continues_after_existing_output(tmp_path: Path) -> Non
     convert_episode(first, output)
     assert main(["--input", str(first.parent), "--output", str(output)]) == 1
     assert (output / "episode_13.rrd").is_file()
+
+
+def test_nested_directories_preserve_relative_output_paths(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    first = _make_bag(source / "task_a", "raw")
+    second = source / "task_b" / "session_1" / "episode_12"
+    second.parent.mkdir(parents=True)
+    second.symlink_to(first, target_is_directory=True)
+
+    assert discover_rerun_episodes(source) == [first, second]
+    output = tmp_path / "output"
+    assert main(["--input", str(source), "--output", str(output)]) == 0
+    assert (output / "task_a" / "episode_12.rrd").is_file()
+    assert (output / "task_b" / "session_1" / "episode_12.rrd").is_file()

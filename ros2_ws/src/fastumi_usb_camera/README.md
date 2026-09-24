@@ -143,7 +143,8 @@ IDR 写入 SPS/PPS。
 完整 JPEG 帧时的 ROS 时钟时间，默认坐标系名为
 `usb_camera_optical_frame`。该节点不发布坐标变换或相机内参。
 切换模式后需要停止旧节点并重新启动；仍在运行的旧进程会继续发布旧话题。
-发布端 QoS 为 `BEST_EFFORT / VOLATILE / KEEP_LAST(5)`。话题使用相对名称，
+发布端 QoS 默认为 `RELIABLE / VOLATILE / KEEP_LAST(20)`；启动参数
+`publish_reliability:=best_effort` 可改用 Best Effort。话题使用相对名称，
 可通过 ROS namespace 或 remapping 调整。
 
 ## FFmpeg 双机传输

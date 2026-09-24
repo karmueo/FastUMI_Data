@@ -12,12 +12,14 @@ def generate_launch_description():
     defaults = dict(dataset_root='', dir_name='test', name='default_test',
                     record_camera='true',
                     image_topic='/wrist_camera/image_raw/ffmpeg',
-                    image_transport='ffmpeg', shutdown_save_timeout='120.0')
+                    image_transport='ffmpeg', image_reliability='reliable',
+                    image_qos_depth='30', shutdown_save_timeout='120.0')
     parameters = {key: ParameterValue(LaunchConfiguration(key), value_type=str)
                   for key in ('dataset_root', 'dir_name', 'name', 'image_topic',
-                              'image_transport')}
+                              'image_transport', 'image_reliability')}
     parameters.update(
         record_camera=ParameterValue(LaunchConfiguration('record_camera'), value_type=bool),
+        image_qos_depth=ParameterValue(LaunchConfiguration('image_qos_depth'), value_type=int),
         shutdown_save_timeout=ParameterValue(LaunchConfiguration('shutdown_save_timeout'), value_type=float),
     )
     return LaunchDescription([

@@ -9,6 +9,7 @@ import rosbag2_py
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
@@ -26,6 +27,24 @@ pytestmark = pytest.mark.skipif(
     reason='rosbag2_storage_mcap is not installed')
 
 
+def test_best_effort_image_subscription_override(tmp_path, monkeypatch):
+    """独立录制入口可选 Best Effort 和自定义图像队列深度。"""
+    monkeypatch.setenv('ROS_DOMAIN_ID', '224')
+    rclpy.init()
+    recorder = RecorderNode(parameter_overrides=[
+        Parameter('dataset_root', value=str(tmp_path)),
+        Parameter('image_reliability', value='best_effort'),
+        Parameter('image_qos_depth', value=12),
+    ])
+    try:
+        assert recorder.image_subscription.qos_profile.reliability == ReliabilityPolicy.BEST_EFFORT
+        assert recorder.image_subscription.qos_profile.depth == 12
+    finally:
+        recorder.close()
+        recorder.destroy_node()
+        rclpy.shutdown()
+
+
 def test_ros_service_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_DOMAIN_ID', '223')
     rclpy.init()
@@ -34,8 +53,11 @@ def test_ros_service_lifecycle(tmp_path, monkeypatch):
               'joint_action_topic': prefix+'/action', 'gripper_state_topic': prefix+'/gripper',
               'gripper_action_topic': prefix+'/gripper_action', 'image_topic': prefix+'/image',
               'image_transport': 'raw',
+              'image_qos_depth': 45,
               'tracker_odom_topic': prefix+'/tracker'}
     recorder = RecorderNode(parameter_overrides=[Parameter(key, value=value) for key, value in params.items()])
+    assert recorder.image_subscription.qos_profile.reliability == ReliabilityPolicy.RELIABLE
+    assert recorder.image_subscription.qos_profile.depth == 45
     client = Node('recorder_test_client')
     executor = SingleThreadedExecutor()
     executor.add_node(recorder)

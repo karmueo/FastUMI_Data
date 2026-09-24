@@ -35,6 +35,14 @@ def _enabled(context, name):
     return value == 'true'
 
 
+def _reliability(context, name):
+    """校验相机传输可靠性参数。"""
+    value = LaunchConfiguration(name).perform(context).strip().lower()
+    if value not in ('reliable', 'best_effort'):
+        raise ValueError(f'{name} 只能是 reliable 或 best_effort')
+    return value
+
+
 def _include(package, launch_file, arguments=None):
     """创建已安装包的 launch 包含动作。"""
     source = Path(get_package_share_directory(package)) / 'launch' / launch_file
@@ -69,6 +77,14 @@ def _launch_hardware(context):
         raise ValueError('image_topic/image_transport 必须与 wrist_camera_mode 对应的相机输出一致')
     image_topic = image_topic or default_topic
     image_transport = image_transport or default_transport
+    publish_reliability = _reliability(context, 'camera_publish_reliability')
+    record_reliability = _reliability(context, 'camera_record_reliability')
+    record_depth = LaunchConfiguration('camera_record_depth').perform(context).strip()
+    if not record_depth.isdecimal() or int(record_depth) <= 0:
+        raise ValueError('camera_record_depth 必须是正整数')
+    if camera_enabled and _enabled(context, 'start_recorder') and _enabled(context, 'record_camera'):
+        if publish_reliability == 'best_effort' and record_reliability == 'reliable':
+            raise ValueError('录制端 reliable 与相机发布端 best_effort 不兼容')
     actions = []
     if camera_enabled:
         device = LaunchConfiguration('wrist_video_device').perform(context)
@@ -87,6 +103,7 @@ def _launch_hardware(context):
             'enable_decoder': LaunchConfiguration('enable_decoder'),
             'topic': '/wrist_camera/image_raw',
             'decoded_topic': '/wrist_camera/image_decoded',
+            'publish_reliability': publish_reliability,
         }
         if mode == 'h264':
             camera_arguments['h264_encoder'] = LaunchConfiguration('h264_encoder')
@@ -104,7 +121,9 @@ def _launch_hardware(context):
             ('dataset_root', 'dir_name', 'name', 'record_camera',
              'shutdown_save_timeout')
         }
-        recorder_arguments.update(image_topic=image_topic, image_transport=image_transport)
+        recorder_arguments.update(
+            image_topic=image_topic, image_transport=image_transport,
+            image_reliability=record_reliability, image_qos_depth=record_depth)
         recorder = _include('fastumi_recorder', 'recorder.launch.py', recorder_arguments)
     if _enabled(context, 'start_arm'):
         actions.append(_include('rm_driver', 'rm_75_driver.launch.py'))
@@ -137,6 +156,8 @@ def generate_launch_description():
         gripper_network_interface='',
         dataset_root='', dir_name='test', name='default_test', record_camera='true',
         image_topic='', image_transport='',
+        camera_publish_reliability='reliable', camera_record_reliability='reliable',
+        camera_record_depth='30',
         shutdown_save_timeout='120.0',
     )
     return LaunchDescription([

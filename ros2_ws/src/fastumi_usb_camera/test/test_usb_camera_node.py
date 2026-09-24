@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
+from rclpy.qos import ReliabilityPolicy
 
 from fastumi_usb_camera.usb_camera_node import UsbCameraNode
 
@@ -68,6 +69,8 @@ def test_raw_mode_decodes_without_creating_compressed_publisher(camera_node):
     """默认模式仅创建 raw 发布器，图像解码为 bgr8。"""
     node = camera_node
     assert node._image_publisher is not None
+    assert node._image_publisher.qos_profile.reliability == ReliabilityPolicy.RELIABLE
+    assert node._image_publisher.qos_profile.depth == 20
     raw_publisher = FakePublisher()
     node._image_publisher = raw_publisher
     assert node._compressed_publisher is None
@@ -141,3 +144,15 @@ def test_runtime_parameter_change_is_rejected(camera_node):
     results = camera_node.set_parameters([Parameter("width", value=640)])
     assert not results[0].successful
     assert camera_node.get_parameter("width").value == 1280
+
+
+def test_best_effort_publisher_override():
+    """启动参数实际应用到 JPEG/raw 共用的图像发布器。"""
+    rclpy.init(args=["--ros-args", "-p", "publish_reliability:=best_effort"])
+    node = UsbCameraNode(camera_factory=FakeCamera)
+    try:
+        assert node._image_publisher.qos_profile.reliability == ReliabilityPolicy.BEST_EFFORT
+    finally:
+        node.close()
+        node.destroy_node()
+        rclpy.shutdown()

@@ -48,7 +48,7 @@ def test_default_mode_starts_only_python_raw_node(monkeypatch):
     module = _load_launch()
     node = _selected_node(monkeypatch, module)
     assert node["executable"] == "usb_camera_node"
-    assert node["parameters"][1] == {}
+    assert node["parameters"][1] == {"publish_reliability": "reliable"}
     assert node["namespace"].perform(_context(module)) == "usb_camera"
 
 
@@ -57,7 +57,8 @@ def test_jpeg_mode_starts_only_python_node(monkeypatch):
     module = _load_launch()
     node = _selected_node(monkeypatch, module, publish_compressed="TRUE")
     assert node["executable"] == "usb_camera_node"
-    assert node["parameters"][1] == {"publish_compressed": True}
+    assert node["parameters"][1] == {
+        "publish_compressed": True, "publish_reliability": "reliable"}
 
 
 def test_device_uid_is_passed_only_to_python_node(monkeypatch):
@@ -65,7 +66,7 @@ def test_device_uid_is_passed_only_to_python_node(monkeypatch):
     module = _load_launch()
     node = _selected_node(monkeypatch, module, device_uid="1:15")
     assert node["parameters"][1] == {
-        "device_uid": "1:15", "video_device": ""
+        "device_uid": "1:15", "video_device": "", "publish_reliability": "reliable"
     }
     with pytest.raises(ValueError, match="device_uid"):
         _selected_node(
@@ -77,7 +78,8 @@ def test_video_device_is_passed_to_both_camera_modes(monkeypatch):
     """稳定物理路径传给两种节点，且不能与 UID 同时指定。"""
     module = _load_launch()
     node = _selected_node(monkeypatch, module, video_device=PHYSICAL_DEVICE)
-    assert node["parameters"][1] == {"video_device": PHYSICAL_DEVICE}
+    assert node["parameters"][1] == {
+        "video_device": PHYSICAL_DEVICE, "publish_reliability": "reliable"}
     ffmpeg = _selected_node(
         monkeypatch, module, video_device=PHYSICAL_DEVICE,
         enable_ffmpeg="true",
@@ -101,6 +103,7 @@ def test_explicit_usb_id_disables_default_video_device(monkeypatch):
         "vendor_id": 0x1BCF,
         "product_id": 0x28C4,
         "video_device": "",
+        "publish_reliability": "reliable",
     }
 
 
@@ -126,6 +129,7 @@ def test_ffmpeg_takes_precedence_and_layers_camera_parameters(monkeypatch):
     assert overrides["video_device"] == ""
     assert overrides["topic"] == "/usb_camera/image_raw"
     assert overrides["h264_encoder"] == "hardware"
+    assert overrides["publish_reliability"] == "reliable"
     assert overrides["usb_camera.image_raw.ffmpeg.encoder"] == "libx264"
     assert callable(node["on_exit"])
     assert "namespace" not in node
@@ -165,6 +169,17 @@ def test_invalid_h264_encoder_fails_before_node_start(monkeypatch):
     with pytest.raises(ValueError, match="h264_encoder"):
         _selected_node(
             monkeypatch, module, enable_ffmpeg="true", h264_encoder="automatic")
+
+
+@pytest.mark.parametrize("enable_ffmpeg", ["false", "true"])
+def test_publish_reliability_is_forwarded_and_validated(monkeypatch, enable_ffmpeg):
+    module = _load_launch()
+    node = _selected_node(monkeypatch, module, enable_ffmpeg=enable_ffmpeg,
+                          publish_reliability="best_effort")
+    assert node["parameters"][-1]["publish_reliability"] == "best_effort"
+    with pytest.raises(ValueError, match="publish_reliability"):
+        _selected_node(monkeypatch, module, enable_ffmpeg=enable_ffmpeg,
+                       publish_reliability="invalid")
 
 
 def test_h264_camera_exit_requests_global_shutdown():

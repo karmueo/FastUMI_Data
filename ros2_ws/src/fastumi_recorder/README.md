@@ -25,6 +25,10 @@ ros2 run fastumi_recorder recorder --ros-args \
 
 `image_transport` 支持 `raw`（`Image`）、`jpeg`（`CompressedImage`）和 `ffmpeg`（`FFMPEGPacket`）。`record_camera:=false` 时不订阅图像。Tracker、动作话题可以缺席；开始录制要求最近 `input_freshness` 秒内收到有效关节状态、夹爪状态和启用的图像输入，默认 2 秒。校验只用于就绪判定，录制期间收到的消息按原始 CDR 内容写入，不裁剪、不重编码、不合成样本。消息自带的 header 时间戳保持不变；bag 时间戳为 Jetson 收到消息时的 ROS 时间。两机间需要正确同步系统时钟。
 
+相机订阅默认采用 `RELIABLE / VOLATILE / KEEP_LAST(30)`；可通过
+`image_reliability:=best_effort` 和 `image_qos_depth:=正整数` 调整。
+当发布端使用 Best Effort 时，录制端也必须设置为 Best Effort，否则 QoS 不兼容。
+
 每个成功条目位于 `<dataset_root>/<dir_name>/<name>/episode_N/`：
 
 - `bag/metadata.yaml` 和 `bag/*.mcap`：标准 ROS 2 bag，可用 `ros2 bag info` 和 `ros2 bag play`。
@@ -58,6 +62,30 @@ ros2 bag play /absolute/path/to/episode_N/bag
 ```
 
 请求台账保存在数据根目录的 `.recording_requests.sqlite3`，重启不会重放未完成请求。正常退出自动停止当前录制并等待 MCAP 写入，默认上限 120 秒；超时的隐藏目录不进入列表。独立部署和遥操客户端需要安装与录制时一致的自定义消息定义，才能正常回放自定义话题。
+
+## 采集质量检查
+
+仓库根目录的 `audit_hardware_mcap.py` 递归检查指定数据根目录下的相机和关节消息，
+不读取 Tracker 的值。默认对相机和关节状态使用 200 ms 间断阈值；
+关节指令只检查话题、消息格式和数值，不检查接收时间间隔。
+异常轮次全部列出后，先选择指定异常 episode、含相机异常的 episode 或全部异常，
+再选择删除、移动到输入目录的 `.quarantine/` 或不修改。指定时可输入逗号或空格分隔的
+编号（如 `14`）、名称（如 `episode_14`）或根目录相对路径；同名 episode 必须用相对路径区分。
+非交互终端只输出检查结果，不修改文件。
+
+```bash
+cd /path/to/FastUMI_Data
+source /opt/ros/humble/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
+source ros2_ws/install/setup.bash
+python audit_hardware_mcap.py --input dataset/h5dy_data \
+  --camera-gap-ms 200 --joint-state-gap-ms 200 --workers 4
+```
+
+H.264 从首个关键帧起核对解码帧；JPEG 逐帧实际解码。脚本只检查关节格式、
+非有限值及相机、关节状态时间连续性，不按关节限位或推算速度筛除。移动和删除保留录制编号文件，
+运行中的录制器占用数据目录时拒绝处理。默认最多 4 个进程并行检查，`--workers 1`
+可顺序检查；并行时按完成顺序显示结果，统一处理时仍按 episode 编号顺序执行。
 
 ## 离线转换为训练 episode
 

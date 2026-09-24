@@ -41,6 +41,7 @@ class UsbCameraNode(Node):
         self.declare_parameter("fps", 30)
         self.declare_parameter("frame_id", "usb_camera_optical_frame")
         self.declare_parameter("publish_compressed", False)
+        self.declare_parameter("publish_reliability", "reliable")
         self.add_on_set_parameters_callback(self._reject_runtime_parameters)
 
         # 这些参数只在创建节点时读取，不支持运行时改变设备或发布器。
@@ -67,10 +68,14 @@ class UsbCameraNode(Node):
         self._publish_compressed = bool(
             self.get_parameter("publish_compressed").value
         )
+        publish_reliability = str(self.get_parameter("publish_reliability").value).strip().lower()
+        if publish_reliability not in ("reliable", "best_effort"):
+            raise ValueError("publish_reliability 只能是 reliable 或 best_effort")
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=5,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            depth=20,
+            reliability=(ReliabilityPolicy.RELIABLE if publish_reliability == "reliable"
+                         else ReliabilityPolicy.BEST_EFFORT),
             durability=DurabilityPolicy.VOLATILE,
         )
         self._image_publisher = (

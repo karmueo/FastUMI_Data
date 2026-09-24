@@ -44,6 +44,9 @@ launch_args=(
   "wrist_video_device:=$WRIST_VIDEO_DEVICE"
   "wrist_camera_mode:=${WRIST_CAMERA_MODE:-jpeg}"
   "h264_encoder:=${H264_ENCODER:-hardware}"
+  "camera_publish_reliability:=${CAMERA_PUBLISH_RELIABILITY:-reliable}"
+  "camera_record_reliability:=${CAMERA_RECORD_RELIABILITY:-reliable}"
+  "camera_record_depth:=${CAMERA_RECORD_DEPTH:-30}"
 )
 if [[ -n "${GRIPPER_NETWORK_INTERFACE:-}" ]]; then
   launch_args+=("gripper_network_interface:=$GRIPPER_NETWORK_INTERFACE")
@@ -60,6 +63,7 @@ ros2 launch fastumi_bringup hardware.launch.py "${launch_args[@]}"
 `hardware.local.env` 被 Git 忽略。
 末端相机填写 USB 4.2 对应的完整`/dev/v4l/by-path/*-video-index0`，可以通过命令`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS。默认 `jpeg` 发布相机原生 JPEG。
 选择 `h264` 时约 4 Mbps，Jetson 默认使用 NVIDIA GStreamer 硬件编码；排障或非 Jetson 环境才设置 `h264_encoder:=software`。本地解码仅在 `h264` 模式下可开启，例如 `wrist_camera_mode:=h264 enable_decoder:=true`。
+相机发布与录制订阅默认使用 `reliable`；两者也可同时改为 `best_effort`。录制端 `KEEP_LAST` 深度默认 30，按 30 FPS 约容纳 1 秒图像消息。Reliable 可重传传输丢包，但可能增加积压和延迟；不覆盖相机采集及编码器内部丢帧。
 模板不含本机绝对路径；本机设备缺失时启动明确报错。
 
 | `wrist_camera_mode` | 相机话题 | 消息类型 | Recorder 处理 |
@@ -121,6 +125,8 @@ raw 1280×960@30 的未压缩数据约 **6.6 GB/分钟**；MCAP 的 Zstd 压缩�
 | `wrist_camera_mode` | jpeg | `raw`、`jpeg` 或 `h264`；同时选择相机发布和录制器输入 |
 | `enable_decoder` | false | 是否在 Jetson 本地把 H.264 解码到 `/wrist_camera/image_decoded` |
 | `h264_encoder` | hardware | 仅 `h264` 模式使用；`hardware` 使用 NVIDIA GStreamer，`software` 使用 libx264 |
+| `camera_publish_reliability` / `camera_record_reliability` | reliable / reliable | 相机发布端与录制端订阅分别选择 `reliable` 或 `best_effort` |
+| `camera_record_depth` | 30 | 录制端相机订阅 `KEEP_LAST` 队列深度，必须为正整数 |
 | `wrist_video_device` | 空，必须填写 | 完整物理端口路径 |
 | `wrist_width` / `wrist_height` / `camera_fps` | 1280 / 960 / 30 | 相机采集模式 |
 | `gripper_config_file` | 已安装 `unitree_gripper` 包的 `config/gripper.yaml` | 夹爪 ROS 参数 YAML |

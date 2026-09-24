@@ -47,8 +47,11 @@ def test_wrist_modes_match_recorder(monkeypatch, tmp_path, mode, ffmpeg, compres
     assert actions[0][1]['topic'] == '/wrist_camera/image_raw'
     assert actions[0][1]['enable_decoder'].perform(context(mod)) == 'false'
     assert ('h264_encoder' in actions[0][1]) == (mode == 'h264')
+    assert actions[0][1]['publish_reliability'] == 'reliable'
     assert actions[1][1]['image_topic'] == topic
     assert actions[1][1]['image_transport'] == transport
+    assert actions[1][1]['image_reliability'] == 'reliable'
+    assert actions[1][1]['image_qos_depth'] == '30'
     assert not any('umi' in name for name in context(mod).launch_configurations)
 
 
@@ -64,6 +67,10 @@ def test_default_camera_mode_is_jpeg():
     ({'wrist_camera_mode': 'raw', 'enable_decoder': 'true'}, 'enable_decoder'),
     ({'image_topic': '/other'}, 'image_topic/image_transport'),
     ({'image_transport': 'raw'}, 'image_topic/image_transport'),
+    ({'camera_publish_reliability': 'invalid'}, 'camera_publish_reliability'),
+    ({'camera_record_reliability': 'invalid'}, 'camera_record_reliability'),
+    ({'camera_record_depth': '0'}, 'camera_record_depth'),
+    ({'camera_publish_reliability': 'best_effort'}, '不兼容'),
 ])
 def test_invalid_mode_or_conflicting_override_fails_before_device(changes, message):
     mod = module()
@@ -81,6 +88,21 @@ def test_matching_manual_override_is_allowed(monkeypatch, tmp_path):
         mod, start_arm='false', start_gripper='false', wrist_video_device=str(device),
         image_topic='/wrist_camera/image_raw/compressed', image_transport='jpeg'))
     assert actions[1][1]['image_transport'] == 'jpeg'
+
+
+def test_camera_qos_overrides_are_forwarded(monkeypatch, tmp_path):
+    mod = module()
+    device = tmp_path / 'camera-video-index0'
+    device.touch()
+    monkeypatch.setattr(mod, 'is_physical_video_device_path', lambda _: True)
+    monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: (package, arguments))
+    actions = mod._launch_hardware(context(
+        mod, start_arm='false', start_gripper='false', wrist_video_device=str(device),
+        camera_publish_reliability='best_effort',
+        camera_record_reliability='best_effort', camera_record_depth='45'))
+    assert actions[0][1]['publish_reliability'] == 'best_effort'
+    assert actions[1][1]['image_reliability'] == 'best_effort'
+    assert actions[1][1]['image_qos_depth'] == '45'
 
 
 def test_missing_camera_fails_before_start():

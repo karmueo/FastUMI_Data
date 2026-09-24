@@ -44,6 +44,9 @@ def _camera_node(context):
     h264_encoder = LaunchConfiguration("h264_encoder").perform(context)
     if h264_encoder not in ("hardware", "software"):
         raise ValueError("h264_encoder 只能是 hardware 或 software")
+    publish_reliability = LaunchConfiguration("publish_reliability").perform(context).strip().lower()
+    if publish_reliability not in ("reliable", "best_effort"):
+        raise ValueError("publish_reliability 只能是 reliable 或 best_effort")
     compressed = LaunchConfiguration("publish_compressed").perform(context).lower()
     if compressed and compressed not in ("true", "false"):
         raise ValueError("publish_compressed 只能是 true 或 false")
@@ -63,6 +66,7 @@ def _camera_node(context):
             raise ValueError("decoded_topic 必须是不以 / 结尾的绝对话题")
         overrides["topic"] = topic
         overrides["h264_encoder"] = h264_encoder
+        overrides["publish_reliability"] = publish_reliability
         prefix = topic.lstrip("/").replace("/", ".") + ".ffmpeg."
         overrides.update({
             prefix + "encoder": "libx264",
@@ -97,6 +101,7 @@ def _camera_node(context):
 
     if compressed:
         overrides["publish_compressed"] = compressed == "true"
+    overrides["publish_reliability"] = publish_reliability
     if device_uid:
         overrides["device_uid"] = device_uid
         overrides["video_device"] = ""
@@ -139,6 +144,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("enable_ffmpeg", default_value="false"),
         DeclareLaunchArgument("enable_decoder", default_value="false"),
         DeclareLaunchArgument("h264_encoder", default_value="hardware"),
+        DeclareLaunchArgument("publish_reliability", default_value="reliable"),
         DeclareLaunchArgument("topic", default_value="/usb_camera/image_raw"),
         DeclareLaunchArgument("decoded_topic", default_value="/usb_camera/image_decoded"),
     ]
