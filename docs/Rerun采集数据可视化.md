@@ -30,6 +30,9 @@ python3 convert_hardware_mcap_to_rerun.py \
 
 rerun dataset/rerun_data/1/11/episode_3.rrd
 rerun dataset/rerun_data/1/11/episode_4.rrd
+
+# 网页
+rerun --web-viewer --port auto dataset/h5dy_data/rm75_rerun
 ```
 
 也可以从更高层的根目录批量转换，输出会保留该输入目录下的相对子目录结构。例如：
