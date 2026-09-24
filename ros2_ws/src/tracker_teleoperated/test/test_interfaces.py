@@ -50,6 +50,12 @@ class FakeKinematics:
             raise self.error
         return self.pose.copy()
 
+    def solve(self, target_pose, _seed_positions):
+        """将目标的基座 X 位移映射成可观察的七轴测试指令。"""
+        if self.error is not None:
+            raise self.error
+        return np.full(7, target_pose[0, 3])
+
 
 class ReferenceState:
     """承载参考采集方法需要的最小节点状态。"""
@@ -203,6 +209,8 @@ class HomeState:
         self._home_command_quiet_period_s = 0.20
         self._home_speed_percent = 20
         self._feedback_timeout_s = 0.25
+        self._feedback_freeze_timeout_s = 0.25
+        self._latest_joint_stamp_ns = None
         self._heartbeat_timeout_s = 0.50
         self._latest_heartbeat_monotonic = time.monotonic()
         self._latest_status_stamp_ns = None
@@ -257,6 +265,8 @@ class TrackerInputState(WorkspaceCalibrationState):
     _clear_control_reference = TrackerTeleopNode._clear_control_reference
     _publish_enabled = TrackerTeleopNode._publish_enabled
     _update_gripper = TrackerTeleopNode._update_gripper
+    _capture_reference = TrackerTeleopNode._capture_reference
+    _freshness_error = TrackerTeleopNode._freshness_error
     _mapping_recovery_instruction = (
         TrackerTeleopNode._mapping_recovery_instruction
     )
@@ -265,12 +275,15 @@ class TrackerInputState(WorkspaceCalibrationState):
         """创建已标定、已启用且关节反馈新鲜的遥操状态。"""
         super().__init__()
         self._mapping_basis = np.eye(3)
+        self._kinematics = FakeKinematics(make_pose((0.4, 0.0, 0.2)))
         self._enabled = True
         self._pose_validator = PoseStreamValidator(recovery_samples=3)
         self._latest_joint_positions = np.zeros(7)
         self._latest_joint_monotonic = time.monotonic()
         self._last_tick_monotonic = time.monotonic()
-        self._feedback_timeout_s = 0.25
+        self._feedback_timeout_s = 0.50
+        self._feedback_freeze_timeout_s = 0.25
+        self._feedback_frozen = False
         self._heartbeat_timeout_s = 0.50
         self._latest_heartbeat_monotonic = time.monotonic()
         self._latest_status_stamp_ns = None
@@ -282,10 +295,15 @@ class TrackerInputState(WorkspaceCalibrationState):
         self._gripper_command_publisher = FakePublisher()
         # 记录保持目标，验证恢复输入不会自动继续驱动机械臂。
         self.commands = []
+        self.targets = []
 
     def _publish_command(self, positions):
         """记录指令，避免向实机发送数据。"""
         self.commands.append(np.asarray(positions).copy())
+
+    def _publish_target_pose(self, target):
+        """记录控制周期求出的末端目标。"""
+        self.targets.append(np.asarray(target).copy())
 
 
 class GripperBridgeState:
@@ -297,6 +315,7 @@ class GripperBridgeState:
     def __init__(self):
         """创建默认暂停且尚无夹爪输入的模拟节点。"""
         self._enabled = False
+        self._feedback_frozen = False
         self._gripper_follower = GripperFollower(0.25, 0.25)
         self._gripper_command_publisher = FakePublisher()
         self._status_publisher = FakePublisher()
@@ -358,6 +377,100 @@ def test_gripper_prediction_timeout_does_not_pause_arm_control():
     )
     assert state.commands[-1] == pytest.approx(np.zeros(7))
     assert "夹爪预测超时" in state._status_publisher.messages[-1].data
+
+
+def test_short_joint_feedback_gap_freezes_target_then_recovers():
+    """验证短暂反馈断流后保留原有运动零点并继续遥操。"""
+    state = TrackerInputState()
+    now = time.monotonic()
+    state._latest_tracker_monotonic = now - 0.15
+    state._pose_timeout_s = 0.25
+    state._freeze_timeout_s = 0.10
+    state._latest_joint_monotonic = now - 0.30
+    state._latest_tracker_pose = make_pose((0.2, 0.0, 0.0))
+
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._enabled and state._feedback_frozen
+    assert state.commands[-1] == pytest.approx(np.zeros(7))
+    assert "七轴反馈短暂中断" in state._status_publisher.messages[-1].data
+
+    state._latest_joint_monotonic = time.monotonic()
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._enabled and not state._feedback_frozen
+    assert state._reference_tracker_pose == pytest.approx(make_pose((1.0, 1.0, 1.0)))
+    assert state._reference_eef_pose == pytest.approx(make_pose((2.0, 2.0, 2.0)))
+    assert "七轴反馈已恢复" in state._status_publisher.messages[-1].data
+
+
+def test_normal_joint_feedback_gap_keeps_following_tracker():
+    """验证常见反馈间隔内仍计算 Tracker 目标并发送新关节指令。"""
+    state = TrackerInputState()
+    now = time.monotonic()
+    state._latest_joint_monotonic = now - 0.15
+    state._latest_tracker_monotonic = now
+    state._pose_timeout_s = 0.25
+    state._freeze_timeout_s = 0.10
+    state._pose_smoothing_enabled = False
+    state._joint_smoothing_enabled = False
+    state._translation_scale = 1.0
+    state._rotation_scale = 1.0
+    state._reference_tracker_pose = make_pose()
+    state._reference_eef_pose = make_pose()
+    state._latest_tracker_pose = make_pose((0.1, 0.0, 0.0))
+
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._enabled and not state._feedback_frozen
+    assert state.targets[-1][0, 3] == pytest.approx(0.1)
+    assert state.commands[-1] == pytest.approx([0.1] * 7)
+
+
+def test_prolonged_joint_feedback_gap_pauses_control():
+    """验证持续反馈失联仍停止遥操并清除运动零点。"""
+    state = TrackerInputState()
+    now = time.monotonic()
+    state._latest_joint_monotonic = now - 0.60
+
+    TrackerTeleopNode._control_tick(state)
+
+    assert not state._enabled
+    assert state._reference_tracker_pose is None
+    assert "七轴反馈超时" in state._status_publisher.messages[-1].data
+
+
+def test_joint_feedback_recovery_does_not_recompute_reference():
+    """验证反馈恢复时无需正运动学计算，原有零点仍有效。"""
+    state = TrackerInputState()
+    now = time.monotonic()
+    state._latest_tracker_monotonic = now - 0.15
+    state._pose_timeout_s = 0.25
+    state._freeze_timeout_s = 0.10
+    state._feedback_frozen = True
+    state._kinematics.error = RuntimeError("正运动学失败")
+
+    TrackerTeleopNode._control_tick(state)
+
+    assert state._enabled and not state._feedback_frozen
+    assert state._reference_tracker_pose == pytest.approx(make_pose((1.0, 1.0, 1.0)))
+    assert state.commands[-1] == pytest.approx(np.zeros(7))
+    assert "七轴反馈已恢复" in state._status_publisher.messages[-1].data
+
+
+def test_enable_requires_feedback_fresher_than_freeze_limit():
+    """验证处于冻结区间的反馈不能用于建立新的遥操零点。"""
+    now = time.monotonic()
+    state = SimpleNamespace(
+        _latest_heartbeat_monotonic=now,
+        _heartbeat_timeout_s=0.50,
+        _tracker_freshness_error=lambda _now: None,
+        _latest_joint_positions=np.zeros(7),
+        _latest_joint_monotonic=now - 0.30,
+        _feedback_freeze_timeout_s=0.25,
+    )
+
+    assert "七轴反馈不够新鲜" in TrackerTeleopNode._freshness_error(state, now)
 
 
 def test_invalid_tracker_status_pauses_and_preserves_mapping():
@@ -580,6 +693,8 @@ def test_default_yaml_uses_configured_home_target():
     assert parameters["gripper_command_topic"] == "/motion_control/gripper_command"
     assert parameters["gripper_estimate_timeout_s"] == pytest.approx(0.25)
     assert parameters["gripper_feedback_timeout_s"] == pytest.approx(0.25)
+    assert parameters["feedback_freeze_timeout_s"] == pytest.approx(0.25)
+    assert parameters["feedback_timeout_s"] == pytest.approx(0.50)
     assert parameters["home_command_quiet_period_s"] == pytest.approx(0.20)
 
 

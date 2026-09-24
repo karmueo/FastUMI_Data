@@ -42,10 +42,25 @@ def configured_rviz(template_path, config_path, manager_config_path=None):
     return display
 
 
+def visible_video_displays(display, show_wrist_video, show_umi_video):
+    """按启动参数从运行时 RViz 配置移除未启用的视频画面。"""
+    visible = {"末端视频": show_wrist_video, "UMI 视频": show_umi_video}
+    manager = display["Visualization Manager"]
+    manager["Displays"] = [
+        item for item in manager["Displays"]
+        if item.get("Class") != "rviz_default_plugins/Image"
+        or visible.get(item.get("Name"), True)
+    ]
+    return display
+
+
 def _launch(context):
     """创建管理器，按需生成 RViz 配置并接入退出信号转发。"""
     config = LaunchConfiguration("config_file").perform(context)
     share = FindPackageShare("tracker_teleoperated").perform(context)
+    show_wrist_video = LaunchConfiguration("show_wrist_video").perform(context) == "true"
+    show_umi_video = LaunchConfiguration("show_umi_video").perform(context) == "true"
+    use_rviz = LaunchConfiguration("use_rviz").perform(context) == "true"
     # 在自动启动前读取面板保存的设备；旧 Topic 字段不改变业务输入。
     rviz_config = LaunchConfiguration("rviz_config").perform(context)
     video_parameters = {}
@@ -65,6 +80,7 @@ def _launch(context):
             "manager_config": LaunchConfiguration("manager_config").perform(context),
             "autostart": LaunchConfiguration("autostart").perform(context) == "true",
             "use_recorder": LaunchConfiguration("use_recorder").perform(context) == "true",
+            "show_wrist_video": show_wrist_video and use_rviz,
             **video_parameters,
         }],
     )
@@ -72,22 +88,26 @@ def _launch(context):
         target_action=manager,
         on_exit=[EmitEvent(event=Shutdown(reason="遥操会话管理器已退出"))],
     )), manager]
-    if LaunchConfiguration("use_rviz").perform(context) == "true":
-        rviz_config = LaunchConfiguration("rviz_config").perform(context)
-        if not rviz_config:
-            # 仅修改运行时副本，包内配置始终保持可重用。
-            descriptor, rviz_config = tempfile.mkstemp(prefix="tracker-teleop-", suffix=".rviz")
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                yaml.safe_dump(configured_rviz(
-                    Path(share) / "config/tracker_teleoperated.rviz", config,
-                    LaunchConfiguration("manager_config").perform(context)), stream, allow_unicode=True)
+    if use_rviz:
+        saved_config = LaunchConfiguration("rviz_config").perform(context)
+        if saved_config:
+            display = yaml.safe_load(Path(saved_config).read_text(encoding="utf-8"))
+        else:
+            display = configured_rviz(
+                Path(share) / "config/tracker_teleoperated.rviz", config,
+                LaunchConfiguration("manager_config").perform(context))
+        visible_video_displays(display, show_wrist_video, show_umi_video)
+        # 默认和用户配置都只修改运行时副本，退出时清理。
+        descriptor, rviz_config = tempfile.mkstemp(prefix="tracker-teleop-", suffix=".rviz")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(display, stream, allow_unicode=True)
 
-            def cleanup(_context, path=rviz_config):
-                """会话退出时删除临时显示配置。"""
-                Path(path).unlink(missing_ok=True)
-                return []
+        def cleanup(_context, path=rviz_config):
+            """会话退出时删除临时显示配置。"""
+            Path(path).unlink(missing_ok=True)
+            return []
 
-            actions.append(RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=cleanup)])))
+        actions.append(RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=cleanup)])))
         rviz = Node(package="rviz2", executable="rviz2", name="tracker_teleop_rviz",
                     arguments=["-d", rviz_config], output="screen")
         # 窗口退出时只通知管理器；等待管理器保存完成后才关闭整个 launch。
@@ -100,7 +120,7 @@ def _launch(context):
 
 
 def generate_launch_description():
-    """声明原有参数和面板管理参数，默认自动启动并显示 RViz。"""
+    """声明会话和视频显示参数，默认自动启动 RViz 但不显示视频。"""
     share = FindPackageShare("tracker_teleoperated")
     return LaunchDescription([
         DeclareLaunchArgument("config_file", default_value=PathJoinSubstitution([share, "config", "tracker_teleoperated.yaml"])),
@@ -108,6 +128,8 @@ def generate_launch_description():
         DeclareLaunchArgument("use_recorder", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument("autostart", default_value="true", choices=["true", "false"]),
         DeclareLaunchArgument("use_rviz", default_value="true", choices=["true", "false"]),
+        DeclareLaunchArgument("show_wrist_video", default_value="false", choices=["true", "false"]),
+        DeclareLaunchArgument("show_umi_video", default_value="false", choices=["true", "false"]),
         DeclareLaunchArgument("rviz_config", default_value=""),
         OpaqueFunction(function=_launch),
     ])

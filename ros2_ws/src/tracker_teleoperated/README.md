@@ -2,7 +2,7 @@
 
 # Tracker 遥操与 RViz2 面板
 
-本包运行在 ROS 2 Jazzy 遥操主机。它启动 VIVE Tracker、UMI 相机、夹爪开合度估计、H.264 解码和遥操逆运动学节点，并通过 RViz2 面板统一显示状态。机械臂、夹爪、末端相机编码节点和录制服务由外部入口启动，本包只监测它们。
+本包运行在 ROS 2 Jazzy 遥操主机。它启动 VIVE Tracker、UMI 相机、夹爪开合度估计和遥操逆运动学节点；开启末端视频显示时也启动 H.264 解码节点，并通过 RViz2 面板统一显示状态。机械臂、夹爪、末端相机编码节点和录制服务由外部入口启动，本包只监测它们。
 
 ## 局域网 ROS 2 环境
 
@@ -20,6 +20,36 @@ VIVE Tracker 节点依赖 SteamVR/OpenVR 运行时。启动插件前先确认 St
 
 逆运动学节点向 `/rm_driver/movej_canfd_cmd` 和`/motion_control/gripper_command` 发布控制目标；“外部管理”进程生命周期由其他入口负责。
 
+## 构建
+
+从仓库根目录执行以下命令。先按[工作区构建说明](../../README.md#构建与验证)创建 `.venv-numpy1` 和 `.venv-numpy2`，并安装 ROS 2 Jazzy、系统依赖及 OpenVR SDK。共享接口、相机和 Tracker 等依赖包在 NumPy 1 环境构建：
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
+rosdep install --from-paths src --ignore-src -r -y
+PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
+  python -m colcon build --build-base build --symlink-install \
+  --packages-skip tracker_teleoperated dp_infer \
+  --cmake-args -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+```
+
+然后打开新终端，在 NumPy 2 环境只构建遥操包，避免重新构建上一阶段的依赖包：
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy2/bin/activate
+source install/setup.bash
+PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
+  python -m colcon build --build-base build --symlink-install \
+  --packages-select tracker_teleoperated \
+  --allow-overriding tracker_teleoperated \
+  --cmake-args -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+source install/setup.bash
+```
+
 ## 启动
 
 ```bash
@@ -32,6 +62,8 @@ ros2 launch tracker_teleoperated tracker_teleoperated.launch.py
 
 `autostart:=false` 只启动管理器和 RViz2；
 `use_recorder:=false` 禁用面板的远端录制操作，但仍显示录制服务健康状态。
+`show_wrist_video:=true` 在 RViz2 显示末端视频，并允许管理器启动本机 H.264 解码节点；
+`show_umi_video:=true` 在 RViz2 显示 UMI 视频。两项默认均为 `false`，也适用于通过 `rviz_config` 指定的配置；关闭显示不会修改原始 RViz 配置。`use_rviz:=false` 时不会启动末端解码。UMI 视频关闭显示后，UMI 相机仍会运行并为夹爪预测提供图像。
 
 管理器只允许创建以下五类本机进程：
 
@@ -100,6 +132,8 @@ Q 关闭 RViz2、Ctrl+C 和“停止全部”执行相同收尾顺序：暂停�
 H、Backspace 和停止录制时的回车会先暂停 CANFD 透传，默认静默
 `home_command_quiet_period_s=0.20` 秒以排空旧命令，再发送一次阻塞式 MoveJ。
 回位完成后遥操保持暂停，需要再次显式启用。
+
+七轴反馈超过 `feedback_freeze_timeout_s`（默认 0.25 秒）时，控制节点保持最近的关节目标；反馈在 `feedback_timeout_s`（默认 0.50 秒）内恢复后，继续使用原有运动零点跟随。持续失联会暂停遥操并清除运动零点，待反馈恢复后按空格重新启用。面板的“遥操”状态显示冻结、恢复或暂停原因；组件行的“正常”表示进程和话题仍在运行，不代表遥操已启用。出现停控时可查看管理器会话目录中的 `teleop.log`，核对“七轴反馈超时”“Tracker 跟踪状态无效”等原因。
 
 ## 验证
 

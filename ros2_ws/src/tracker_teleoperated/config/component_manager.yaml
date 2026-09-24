@@ -39,7 +39,7 @@ components:
     health_timeout_s: 1.0
     mode: auto
     nodes: [/usb_camera_receiver]
-    parameters: {input_topic: /wrist_camera/image_raw, output_topic: /wrist_camera/image_decoded}
+    parameters: {input_topic: /wrist_camera/image_raw, output_topic: /wrist_camera/image_decoded, decoder_backend: cuda, output_queue_depth: 5}
   teleop:
     label: 遥操控制
     mode: auto

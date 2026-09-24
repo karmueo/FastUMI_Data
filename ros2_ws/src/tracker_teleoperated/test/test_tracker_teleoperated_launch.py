@@ -24,12 +24,101 @@ def module():
 
 
 def test_launch_defaults():
-    """默认自动启动管理器与 RViz，保留记录开关。"""
+    """默认自动启动管理器与 RViz，但不显示两路视频。"""
     arguments = {item.name: item for item in module().generate_launch_description().entities
                  if isinstance(item, DeclareLaunchArgument)}
     for name in ("autostart", "use_recorder", "use_rviz"):
         assert "".join(part.perform(LaunchContext()) for part in arguments[name].default_value) == "true"
-    assert set(arguments) == {"config_file", "manager_config", "autostart", "use_recorder", "use_rviz", "rviz_config"}
+    for name in ("show_wrist_video", "show_umi_video"):
+        assert "".join(part.perform(LaunchContext()) for part in arguments[name].default_value) == "false"
+    assert set(arguments) == {"config_file", "manager_config", "autostart", "use_recorder", "use_rviz",
+                              "show_wrist_video", "show_umi_video", "rviz_config"}
+
+
+def launch_context(rviz_config="", **overrides):
+    """构造含全部显式参数的 launch 测试上下文。"""
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "config_file": str(ROOT / "config/tracker_teleoperated.yaml"),
+        "manager_config": str(ROOT / "config/component_manager.yaml"),
+        "autostart": "false", "use_recorder": "true", "use_rviz": "true",
+        "show_wrist_video": "false", "show_umi_video": "false",
+        "rviz_config": str(rviz_config), **overrides,
+    })
+    return context
+
+
+def launch_display(loaded, context):
+    """捕获本次启动的节点参数和临时 RViz 配置，并清理测试副本。"""
+    captured = []
+    original = loaded.Node
+
+    def capture(**kwargs):
+        """保留真实节点对象，同时记录创建时的公开参数。"""
+        captured.append(kwargs)
+        return original(**kwargs)
+
+    loaded.Node = capture
+    try:
+        loaded._launch(context)
+    finally:
+        loaded.Node = original
+    path = Path(captured[1]["arguments"][1])
+    try:
+        return captured, yaml.safe_load(path.read_text(encoding="utf-8"))
+    finally:
+        path.unlink()
+
+
+def image_names(display):
+    """读取 RViz 配置中实际保留的视频画面名称。"""
+    return {item["Name"] for item in display["Visualization Manager"]["Displays"]
+            if item["Class"] == "rviz_default_plugins/Image"}
+
+
+def test_video_visibility_and_decoder_parameter():
+    """两路显示开关独立控制画面，末端开关同时传给管理器。"""
+    loaded = module()
+    for wrist, umi, expected in (
+        (False, False, set()),
+        (True, False, {"末端视频"}),
+        (False, True, {"UMI 视频"}),
+        (True, True, {"末端视频", "UMI 视频"}),
+    ):
+        context = launch_context(show_wrist_video=str(wrist).lower(), show_umi_video=str(umi).lower())
+        nodes, display = launch_display(loaded, context)
+        assert image_names(display) == expected
+        assert nodes[0]["parameters"][0]["show_wrist_video"] is wrist
+
+
+def test_without_rviz_does_not_start_decoder():
+    """RViz 未启动时，即使请求显示末端画面也不解码。"""
+    captured = []
+    loaded = module()
+    loaded.Node = lambda **kwargs: captured.append(kwargs) or Node(**kwargs)
+    loaded._launch(launch_context(use_rviz="false", show_wrist_video="true"))
+    assert len(captured) == 1
+    assert captured[0]["parameters"][0]["show_wrist_video"] is False
+
+
+def test_custom_rviz_visibility_preserves_other_settings(tmp_path):
+    """自定义配置的其他画面、话题与面板字段在过滤后保持原值。"""
+    saved = yaml.safe_load((ROOT / "config/tracker_teleoperated.rviz").read_text(encoding="utf-8"))
+    saved["Panels"][0]["UmiVideoDevice"] = UMI_DEVICE
+    saved["Visualization Manager"]["Global Options"]["Fixed Frame"] = "saved_odom"
+    for item in saved["Visualization Manager"]["Displays"]:
+        if item["Class"] == "rviz_default_plugins/Image":
+            item["Topic"]["Value"] = "/saved/umi" if item["Name"] == "UMI 视频" else "/saved/wrist"
+    path = tmp_path / "custom.rviz"
+    path.write_text(yaml.safe_dump(saved, allow_unicode=True), encoding="utf-8")
+    original = path.read_text(encoding="utf-8")
+    _, display = launch_display(module(), launch_context(path, show_umi_video="true"))
+    assert image_names(display) == {"UMI 视频"}
+    assert display["Panels"] == saved["Panels"]
+    assert display["Visualization Manager"]["Global Options"] == saved["Visualization Manager"]["Global Options"]
+    image = next(item for item in display["Visualization Manager"]["Displays"] if item.get("Name") == "UMI 视频")
+    assert image["Topic"]["Value"] == "/saved/umi"
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_display_topics_follow_control_and_record_config(tmp_path):
@@ -59,15 +148,10 @@ def test_display_topics_follow_control_and_record_config(tmp_path):
     assert display["Panels"][0]["Class"] == "tracker_teleoperated/TeleopPanel"
 
 
-def test_window_exit_signals_manager_instead_of_aborting_save():
+def test_window_exit_signals_manager_instead_of_aborting_save(tmp_path, monkeypatch):
     """关闭窗口只通知管理器，避免整个 launch 提前终止保存。"""
-    context = LaunchContext()
-    context.launch_configurations.update({
-        "config_file": str(ROOT / "config/tracker_teleoperated.yaml"),
-        "manager_config": str(ROOT / "config/component_manager.yaml"),
-        "autostart": "false", "use_recorder": "true", "use_rviz": "true",
-        "rviz_config": str(ROOT / "config/tracker_teleoperated.rviz"),
-    })
+    monkeypatch.setattr(module().tempfile, "tempdir", str(tmp_path))
+    context = launch_context(ROOT / "config/tracker_teleoperated.rviz")
     actions = module()._launch(context)
     nodes = [item for item in actions if isinstance(item, Node)]
     assert len(nodes) == 2
@@ -80,6 +164,7 @@ def test_window_exit_signals_manager_instead_of_aborting_save():
 def test_saved_rviz_sources_initialize_manager(tmp_path, monkeypatch):
     """加载保存的视频源时，管理器与 RViz 使用同一初始输入。"""
     loaded = module()
+    monkeypatch.setattr(loaded.tempfile, "tempdir", str(tmp_path))
     saved = yaml.safe_load((ROOT / "config/tracker_teleoperated.rviz").read_text())
     saved['Panels'][0].update(
         UmiVideoDevice=UMI_DEVICE, WristVideoDevice=WRIST_DEVICE)
@@ -96,13 +181,7 @@ def test_saved_rviz_sources_initialize_manager(tmp_path, monkeypatch):
         return Node(**kwargs)
 
     monkeypatch.setattr(loaded, "Node", capture)
-    context = LaunchContext()
-    context.launch_configurations.update({
-        "config_file": str(ROOT / "config/tracker_teleoperated.yaml"),
-        "manager_config": str(ROOT / "config/component_manager.yaml"),
-        "autostart": "false", "use_recorder": "true", "use_rviz": "true",
-        "rviz_config": str(path),
-    })
+    context = launch_context(path)
     loaded._launch(context)
     assert captured[0]["parameters"][0]["umi_video_device"] == UMI_DEVICE
     assert "wrist_video_device" not in captured[0]["parameters"][0]
@@ -112,19 +191,14 @@ def test_saved_rviz_sources_initialize_manager(tmp_path, monkeypatch):
 def test_legacy_dynamic_rviz_sources_are_ignored(tmp_path, monkeypatch):
     """旧 RViz 动态节点不覆盖管理配置中的稳定端口。"""
     loaded = module()
+    monkeypatch.setattr(loaded.tempfile, "tempdir", str(tmp_path))
     saved = yaml.safe_load((ROOT / "config/tracker_teleoperated.rviz").read_text())
     saved['Panels'][0].update(UmiVideoDevice='/dev/video2', WristVideoDevice='/dev/video0')
     path = tmp_path / "legacy.rviz"
     path.write_text(yaml.safe_dump(saved))
     captured = []
     monkeypatch.setattr(loaded, "Node", lambda **kwargs: captured.append(kwargs) or Node(**kwargs))
-    context = LaunchContext()
-    context.launch_configurations.update({
-        "config_file": str(ROOT / "config/tracker_teleoperated.yaml"),
-        "manager_config": str(ROOT / "config/component_manager.yaml"),
-        "autostart": "false", "use_recorder": "true", "use_rviz": "true",
-        "rviz_config": str(path),
-    })
+    context = launch_context(path)
     loaded._launch(context)
     assert 'umi_video_device' not in captured[0]["parameters"][0]
     assert 'wrist_video_device' not in captured[0]["parameters"][0]

@@ -82,7 +82,7 @@ class ComponentManager(Node):
         for name, default in {
             "manager_config": str(share / "config/component_manager.yaml"),
             "config_file": str(share / "config/tracker_teleoperated.yaml"),
-            "autostart": True, "use_recorder": True,
+            "autostart": True, "use_recorder": True, "show_wrist_video": True,
         }.items():
             self.declare_parameter(name, default)
         self.config = read_configuration(self.get_parameter("manager_config").value)
@@ -132,6 +132,8 @@ class ComponentManager(Node):
             item = dict(self.config["components"].get(key, {"mode": "disabled"}))
             if key not in LOCAL_COMPONENT_IDS:
                 item["mode"] = "observe"
+            if key == "wrist_decoder" and not self.get_parameter("show_wrist_video").value:
+                item["mode"] = "disabled"
             self.components[key] = Component(key, item, Health({}))
             self.create_service(
                 SetBool, PREFIX + f"components/{key}/set_running",

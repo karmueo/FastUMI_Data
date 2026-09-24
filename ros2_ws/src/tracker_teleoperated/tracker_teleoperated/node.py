@@ -250,6 +250,9 @@ class TrackerTeleopNode(Node):
         self._feedback_timeout_s = float(
             self.get_parameter("feedback_timeout_s").value
         )
+        self._feedback_freeze_timeout_s = float(
+            self.get_parameter("feedback_freeze_timeout_s").value
+        )
         self._heartbeat_timeout_s = float(
             self.get_parameter("heartbeat_timeout_s").value
         )
@@ -258,6 +261,8 @@ class TrackerTeleopNode(Node):
         )
         if not 0.0 < self._freeze_timeout_s < self._pose_timeout_s:
             raise ValueError("位姿冻结阈值必须为正数且小于位姿超时阈值")
+        if not 0.0 < self._feedback_freeze_timeout_s < self._feedback_timeout_s:
+            raise ValueError("七轴反馈冻结阈值必须小于暂停阈值且大于零")
         if self._feedback_timeout_s <= 0.0 or self._heartbeat_timeout_s <= 0.0:
             raise ValueError("反馈和心跳超时必须为正数")
 
@@ -310,6 +315,12 @@ class TrackerTeleopNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        # 七轴反馈只保留最新帧，避免高频可靠传输积压旧关节状态。
+        feedback_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
         self._command_publisher = self.create_publisher(
             Jointpos,
             str(self.get_parameter("command_topic").value),
@@ -359,7 +370,7 @@ class TrackerTeleopNode(Node):
             JointState,
             str(self.get_parameter("joint_state_topic").value),
             self._joint_state_callback,
-            20,
+            feedback_qos,
         )
         self.create_subscription(
             GripperState,
@@ -437,6 +448,9 @@ class TrackerTeleopNode(Node):
         self._latest_tracker_monotonic = 0.0
         self._latest_joint_positions: Optional[np.ndarray] = None
         self._latest_joint_monotonic = 0.0
+        # 记录最新有效反馈的源时间戳与短暂断流状态。
+        self._latest_joint_stamp_ns: Optional[int] = None
+        self._feedback_frozen = False
         self._homing = False
         # 待发命令存在时处于 CANFD 静默期，实际发布后才开始计算 MoveJ 超时。
         self._home_started_monotonic = 0.0
@@ -530,7 +544,8 @@ class TrackerTeleopNode(Node):
         self.declare_parameter("joint_acceleration_limit_rad_s2", 2.0)
         self.declare_parameter("pose_freeze_timeout_s", 0.10)
         self.declare_parameter("pose_timeout_s", 0.25)
-        self.declare_parameter("feedback_timeout_s", 0.25)
+        self.declare_parameter("feedback_timeout_s", 0.50)
+        self.declare_parameter("feedback_freeze_timeout_s", 0.25)
         self.declare_parameter("heartbeat_timeout_s", 0.50)
         self.declare_parameter("status_sync_tolerance_s", 0.05)
         self.declare_parameter("position_jump_threshold_m", 0.30)
@@ -572,7 +587,7 @@ class TrackerTeleopNode(Node):
             self._gripper_command_publisher.publish(
                 Float32(data=float(decision.command))
             )
-        if not enabled or not decision.changed:
+        if not enabled or not decision.changed or self._feedback_frozen:
             return
         # 夹爪输入问题只更改夹爪状态说明，不改变机械臂启用状态。
         status_messages = {
@@ -737,13 +752,28 @@ class TrackerTeleopNode(Node):
         except ValueError as error:
             self.get_logger().warning(str(error))
             return
+        now = time.monotonic()
+        if self._latest_joint_monotonic > 0.0:
+            receive_gap = now - self._latest_joint_monotonic
+            if receive_gap > self._feedback_freeze_timeout_s:
+                stamp_ns = stamp_to_ns(message.header.stamp)
+                if stamp_ns > 0 and self._latest_joint_stamp_ns is not None:
+                    source_gap = (stamp_ns - self._latest_joint_stamp_ns) / 1.0e9
+                    source_detail = f"，消息源时间戳间隔 {source_gap:.3f} 秒"
+                else:
+                    source_detail = "，消息源时间戳不可用"
+                self.get_logger().warning(
+                    f"七轴反馈本地接收间隔 {receive_gap:.3f} 秒{source_detail}"
+                )
         if self._home_joint_positions is None:
             self._home_joint_positions = positions.copy()
             self.get_logger().info(
                 "已将启动时当前关节位姿记录为回位目标，可按 h 执行回位"
             )
         self._latest_joint_positions = positions
-        self._latest_joint_monotonic = time.monotonic()
+        self._latest_joint_monotonic = now
+        stamp_ns = stamp_to_ns(message.header.stamp)
+        self._latest_joint_stamp_ns = stamp_ns if stamp_ns > 0 else None
 
     def _home_result_callback(self, message: Bool) -> None:
         """处理 RM75 MoveJ 回位执行结果并解除回位状态。"""
@@ -809,8 +839,8 @@ class TrackerTeleopNode(Node):
             return tracker_error
         if self._latest_joint_positions is None:
             return "尚未收到完整七轴反馈"
-        if now - self._latest_joint_monotonic > self._feedback_timeout_s:
-            return "七轴反馈已超时"
+        if now - self._latest_joint_monotonic > self._feedback_freeze_timeout_s:
+            return "七轴反馈不够新鲜"
         return None
 
     def _calibrate_workspace_callback(
@@ -1142,6 +1172,7 @@ class TrackerTeleopNode(Node):
             response.message = f"无法启用遥操: {reference_error}"
             return response
         self._enabled = True
+        self._feedback_frozen = False
         self._publish_enabled()
         response.success = True
         initialization = (
@@ -1193,6 +1224,7 @@ class TrackerTeleopNode(Node):
         ):
             self._publish_command(self._command_positions)
         self._enabled = False
+        self._feedback_frozen = False
         self._clear_control_reference()
         self._publish_enabled()
         self.get_logger().warning(f"遥操已暂停: {reason}")
@@ -1211,7 +1243,8 @@ class TrackerTeleopNode(Node):
     def _control_tick(self) -> None:
         """在固定频率下检查安全条件、运行 IK 并发布关节目标。"""
         now = time.monotonic()
-        dt = min(max(now - self._last_tick_monotonic, 1.0e-4), 0.1)
+        tick_interval = now - self._last_tick_monotonic
+        dt = min(max(tick_interval, 1.0e-4), 0.1)
         self._last_tick_monotonic = now
         if self._homing:
             if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
@@ -1243,8 +1276,13 @@ class TrackerTeleopNode(Node):
         if now - self._latest_heartbeat_monotonic > self._heartbeat_timeout_s:
             self._disable("面板心跳超时", publish_hold=True)
             return
-        if now - self._latest_joint_monotonic > self._feedback_timeout_s:
-            self._disable("七轴反馈超时", publish_hold=False)
+        feedback_age = now - self._latest_joint_monotonic
+        if feedback_age > self._feedback_timeout_s:
+            self._disable(
+                f"七轴反馈超时：本地间隔 {feedback_age:.3f} 秒，"
+                f"控制周期 {tick_interval:.3f} 秒",
+                publish_hold=False,
+            )
             return
         tracker_age = now - self._latest_tracker_monotonic
         if tracker_age > self._pose_timeout_s:
@@ -1252,6 +1290,20 @@ class TrackerTeleopNode(Node):
             return
         self._update_gripper(True, now)
         assert self._command_positions is not None
+        if feedback_age > self._feedback_freeze_timeout_s:
+            if not self._feedback_frozen:
+                self._feedback_frozen = True
+                self.get_logger().warning(
+                    f"七轴反馈间隔 {feedback_age:.3f} 秒，"
+                    f"控制周期 {tick_interval:.3f} 秒，暂时保持关节目标"
+                )
+                self._publish_status("七轴反馈短暂中断，机械臂保持当前目标；等待反馈恢复")
+            self._publish_command(self._command_positions)
+            return
+        if self._feedback_frozen:
+            self._feedback_frozen = False
+            self.get_logger().info("七轴反馈已恢复，继续使用原有运动零点")
+            self._publish_status("七轴反馈已恢复，遥操继续跟随原有运动零点")
         if tracker_age > self._freeze_timeout_s:
             self._publish_command(self._command_positions)
             return

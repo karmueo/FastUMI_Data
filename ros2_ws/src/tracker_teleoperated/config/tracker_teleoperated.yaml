@@ -65,7 +65,9 @@ tracker_teleop:
     # 输入冻结、停用、同步和重定位恢复门限。
     pose_freeze_timeout_s: 0.10
     pose_timeout_s: 0.25
-    feedback_timeout_s: 0.25
+    # 七轴反馈短暂中断时先保持最近目标；持续失联才暂停遥操。
+    feedback_freeze_timeout_s: 0.25
+    feedback_timeout_s: 0.50
     heartbeat_timeout_s: 0.50
     status_sync_tolerance_s: 0.05
     position_jump_threshold_m: 0.30
@@ -76,5 +78,5 @@ tracker_teleop:
 remote_recording:
   ros__parameters:
     service_prefix: /fastumi/recording
-    dir_name: ""
-    name: ""
+    dir_name: "rm75"
+    name: "jingbao"

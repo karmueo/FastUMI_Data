@@ -7,7 +7,7 @@ import time
 from fastumi_interfaces.msg import RecordingInfo, RecordingStatus
 from fastumi_interfaces.srv import GetRecordingStatus, StopRecording
 from rclpy.parameter import Parameter
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 import pytest
 import rclpy
 import yaml
@@ -61,8 +61,7 @@ class FakeClient:
         future.cancel()
 
 
-@pytest.fixture
-def manager(tmp_path, monkeypatch):
+def make_manager(tmp_path, monkeypatch, show_wrist_video=True):
     """创建不接触硬件和真实子进程的管理器。"""
     import tracker_teleoperated.component_manager as module
 
@@ -80,9 +79,17 @@ def manager(tmp_path, monkeypatch):
         Parameter("manager_config", value=str(config_path)),
         Parameter("config_file", value=str(ROOT / "config/tracker_teleoperated.yaml")),
         Parameter("autostart", value=False),
+        Parameter("show_wrist_video", value=show_wrist_video),
     ], process_factory=FakeProcess)
     monkeypatch.setattr(node, "_command", lambda key: ([key], {}))
     monkeypatch.setattr(node, "_external_present", lambda _component: False)
+    return node
+
+
+@pytest.fixture
+def manager(tmp_path, monkeypatch):
+    """提供默认允许解码的隔离管理器。"""
+    node = make_manager(tmp_path, monkeypatch)
     try:
         yield node
     finally:
@@ -121,6 +128,29 @@ def test_only_five_local_components_can_start(manager):
         assert not accepted
         assert "只监测" in message
         assert manager.components[key].process is None
+
+
+def test_hidden_wrist_video_disables_every_start_path(tmp_path, monkeypatch):
+    """关闭末端画面后，自动启动、启动全部和单组件请求都跳过解码。"""
+    node = make_manager(tmp_path, monkeypatch, show_wrist_video=False)
+    try:
+        decoder = node.components["wrist_decoder"]
+        assert decoder.config["mode"] == "disabled"
+        node._autostart = True
+        node._autostart_at = 0
+        node._tick()
+        assert decoder.process is None
+        node._start_all_service(None, Trigger.Response())
+        assert decoder.process is None
+        accepted, _ = node._start("wrist_decoder")
+        assert not accepted
+        assert decoder.process is None
+        response = node._set_running("wrist_decoder", SetBool.Request(data=True), SetBool.Response())
+        assert not response.success
+        assert decoder.process is None
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 def test_local_external_discovery_ignores_stale_publisher_endpoint(manager):
