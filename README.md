@@ -68,6 +68,9 @@ continuous MCAP session, splits variable-length episodes from explicit events,
 exports versioned FastUMI HDF5 files, incrementally builds Diffusion Policy
 Zarr v2 datasets, and provides a dry-run-first RM75 deployment bridge.
 
+For visualizing hardware MCAP episodes with Rerun, see
+[Rerun采集数据可视化](docs/Rerun采集数据可视化.md).
+
 See the complete Chinese runbook:
 [`docs/ros2_fastumi_pipeline.md`](docs/ros2_fastumi_pipeline.md).
 

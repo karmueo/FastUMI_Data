@@ -22,7 +22,6 @@ from typing import Any
 import uuid
 
 import cv2
-import h5py
 import numpy as np
 from ffmpeg_image_transport_msgs.msg import FFMPEGPacket
 from nav_msgs.msg import Odometry
@@ -438,6 +437,8 @@ def _write_video(path: Path, records: list[CameraRecord], mode: str,
 
 
 def _write_hdf5(path: Path, selected: dict[str, Any]) -> None:
+    import h5py
+
     series = selected["series"]
     with h5py.File(path, "w") as root:
         root.attrs["sim"] = False

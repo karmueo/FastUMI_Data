@@ -85,7 +85,9 @@ def _image(mode: str, index: int, timestamp_ns: int,
 
 
 def _make_bag(root: Path, mode: str, *, include_tracker: bool = True,
-              state_offsets: tuple[int, int] = (150, 350)) -> Path:
+              state_offsets: tuple[int, int] = (150, 350),
+              skip_first_h264_packet: bool = False,
+              corrupt_jpeg_index: int | None = None) -> Path:
     episode = root / "episode_12"
     episode.mkdir(parents=True)
     bag = episode / "bag"
@@ -123,17 +125,23 @@ def _make_bag(root: Path, mode: str, *, include_tracker: bool = True,
         add(offset, TOPICS["joint_state"][0], message)
         tracker = Odometry()
         _stamp(tracker, BASE_NS + offset * 1_000_000 + 25_000_000)
+        tracker.header.frame_id = "vive_tracker_odom"
+        tracker.child_frame_id = "vive_tracker"
         tracker.pose.pose.position.x = offset / 1000.0
+        tracker.pose.pose.orientation.w = 1.0
         add(offset, TOPICS["tracker"][0], tracker)
         add(offset, TOPICS["gripper_state"][0], Float32(data=offset / 1000.0))
     # The first command predates the joint-action window but remains active.
     add(0, TOPICS["gripper_action"][0], Float32(data=0.2))
     add(300, TOPICS["gripper_action"][0], Float32(data=0.8))
     packets = _h264_packets() if mode == "h264" else None
-    for index in range(5):
+    for index in range(1 if skip_first_h264_packet else 0, 5):
         offset = index * 100
         timestamp_ns = BASE_NS + offset * 1_000_000
-        add(offset, camera_topic, _image(mode, index, timestamp_ns, packets))
+        image = _image(mode, index, timestamp_ns, packets)
+        if mode == "jpeg" and index == corrupt_jpeg_index:
+            image.data = b"\xff\xd8garbage\xff\xd9"
+        add(offset, camera_topic, image)
     for timestamp, topic, message in sorted(records, key=lambda item: item[0]):
         writer.write(topic, serialize_message(message), timestamp)
     del writer
