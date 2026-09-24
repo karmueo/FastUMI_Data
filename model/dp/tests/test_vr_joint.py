@@ -133,6 +133,8 @@ def test_joint_training_config():
         cfg = compose(config_name="train_diffusion_unet_timm_vr_joint_workspace")
     assert cfg.task.action_layout == "joint8"
     assert cfg.task.shape_meta.action.shape == [8]
+    assert cfg.dataloader.batch_size == 128
+    assert cfg.val_dataloader.batch_size == 32
     assert cfg.training.num_epochs == 120
     assert cfg.training.enable_validation
     assert cfg.checkpoint.topk.monitor_key == "val_loss"

@@ -34,7 +34,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--batch-size", type=int, choices=(32, 16, 8), default=32)
+    parser.add_argument("--batch-size", type=int, choices=(128, 64, 32, 16, 8), default=128,
+                        help="Training batch size per GPU")
+    parser.add_argument("--val-batch-size", type=int, choices=(128, 64, 32, 16, 8), default=32,
+                        help="Validation and evaluation batch size per GPU")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -45,10 +48,10 @@ def main():
                        WANDB_DIR=str(output), HF_HUB_OFFLINE="1")
     train_command = [sys.executable, "train.py", "--config-name=train_diffusion_unet_timm_vr_joint_workspace",
                      f"task.dataset_path={dataset}", f"hydra.run.dir={output}",
-                     f"dataloader.batch_size={args.batch_size}", f"val_dataloader.batch_size={args.batch_size}"]
+                     f"dataloader.batch_size={args.batch_size}", f"val_dataloader.batch_size={args.val_batch_size}"]
     eval_command = [sys.executable, "evaluate_vr_joint.py", "--checkpoint", str(output / "checkpoints/best.ckpt"),
                     "--dataset", dataset, "--output", str(output / "evaluation"),
-                    "--batch-size", str(args.batch_size)]
+                    "--batch-size", str(args.val_batch_size)]
     manifest = {"train_command": train_command, "evaluation_command": eval_command,
                 "environment": {key: environment[key] for key in
                                 ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "WANDB_MODE", "WANDB_DIR", "HF_HUB_OFFLINE")}}

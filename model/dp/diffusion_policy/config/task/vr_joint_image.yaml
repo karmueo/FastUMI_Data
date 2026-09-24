@@ -26,3 +26,5 @@ dataset:
   shape_meta: ${task.shape_meta}
   seed: 42
   val_ratio: 0.1
+  train_episode_indices: null
+  val_episode_indices: null

@@ -12,6 +12,7 @@ if __name__ == "__main__":
 import copy
 import contextlib
 import json
+import math
 import os
 import pathlib
 import pickle
@@ -36,7 +37,7 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.policy.diffusion_unet_image_policy import DiffusionUnetImagePolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from omegaconf import OmegaConf
-from torch.utils.data import DataLoader, default_collate
+from torch.utils.data import DataLoader, Subset, default_collate
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -325,7 +326,15 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
-        val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+        if validation_enabled and len(val_dataset) < accelerator.num_processes:
+            raise ValueError(
+                f"Validation requires at least {accelerator.num_processes} windows for "
+                f"{accelerator.num_processes} processes, got {len(val_dataset)}"
+            )
+        # Give each rank distinct validation windows; Accelerate's default
+        # even_batches=True would duplicate the tail of an incomplete batch.
+        val_indices = range(accelerator.process_index, len(val_dataset), accelerator.num_processes)
+        val_dataloader = DataLoader(Subset(val_dataset, val_indices), **cfg.val_dataloader)
         print("train dataset:", len(dataset), "train dataloader:", len(train_dataloader))
         print("val dataset:", len(val_dataset), "val dataloader:", len(val_dataloader))
 
@@ -338,7 +347,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(len(train_dataloader) * cfg.training.num_epochs)
+            # Accelerate's scheduler advances once per rank for each local
+            # optimizer step, including a possible padded final batch.
+            num_training_steps=(math.ceil(len(train_dataloader) / accelerator.num_processes)
+                                * accelerator.num_processes * cfg.training.num_epochs)
             // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
@@ -378,14 +390,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         # optimizer_to(self.optimizer, device)
 
         # accelerator
-        (
-            train_dataloader,
-            val_dataloader,
-            self.model,
-            self.optimizer,
-            lr_scheduler,
-        ) = accelerator.prepare(
-            train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
+        train_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
+            train_dataloader, self.model, self.optimizer, lr_scheduler
         )
         device = self.model.device
         if self.ema_model is not None:
@@ -422,7 +428,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     self.model.obs_encoder.eval()
                     self.model.obs_encoder.requires_grad_(False)
 
-                train_losses = list()
+                train_loss_total = 0.0
+                train_sample_count = 0
                 with tqdm.tqdm(
                     train_dataloader,
                     desc=f"Training epoch {self.epoch}",
@@ -457,7 +464,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         # logging
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
-                        train_losses.append(raw_loss_cpu)
+                        batch_size = int(batch["action"].shape[0])
+                        train_loss_total += raw_loss_cpu * batch_size
+                        train_sample_count += batch_size
                         step_log = {
                             "train_loss": raw_loss_cpu,
                             "global_step": self.global_step,
@@ -480,7 +489,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # at the end of each epoch
                 # replace train_loss with epoch average
-                train_loss = np.mean(train_losses)
+                train_totals = accelerator.reduce(
+                    torch.tensor([train_loss_total, train_sample_count], device=device, dtype=torch.float64),
+                    reduction="sum")
+                train_loss = (train_totals[0] / train_totals[1]).item()
                 step_log["train_loss"] = train_loss
 
                 # ========= eval for this epoch ==========
@@ -496,10 +508,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     step_log.update(runner_log)
 
                 # 验证使用当前评估策略（默认 EMA），不累计梯度。
+                sample_this_epoch = (cfg.training.sample_every > 0
+                                     and self.epoch % cfg.training.sample_every == 0)
                 if validation_enabled and self.epoch % cfg.training.val_every == 0:
                     step_log.update(evaluate_policy(
                         policy, val_dataloader, device, action_layout,
-                        sample=(self.epoch % cfg.training.sample_every == 0),
+                        sample=sample_this_epoch,
                         max_steps=cfg.training.max_val_steps, accelerator=accelerator))
 
                 if fixed_validation_batch is not None:
@@ -507,7 +521,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     step_log.update({"fixed_" + key: value for key, value in fixed_metrics.items()})
 
                 # run diffusion sampling on a training batch
-                if (self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
+                if sample_this_epoch and accelerator.is_main_process:
                     if train_sampling_batch is None:
                         raise RuntimeError("Training sampling batch is unavailable")
                     with torch.no_grad():

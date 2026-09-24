@@ -9,7 +9,7 @@ policy:
   obs_encoder:
     consistent_preprocessing: true
 dataloader:
-  batch_size: 32
+  batch_size: 128
   num_workers: 8
 val_dataloader:
   batch_size: 32

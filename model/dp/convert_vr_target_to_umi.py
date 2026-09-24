@@ -26,14 +26,14 @@ def matrix_to_pose(matrix):
 def convert(input_path, urdf_path, output_path):
     """保留图像、时间轴和来源字段，分别将状态和控制目标经 FK 转换；拒绝覆盖。"""
     source = zarr.open_group(str(input_path), mode="r")
-    if source.attrs.get("format") != "rm75-joint-image-v1" or not source.attrs.get("complete"):
+    if source.attrs.get("format") not in ("rm75-joint-image-v1", "rm75-joint-image-v2") or not source.attrs.get("complete"):
         raise ValueError("Expected complete joint dataset")
     fk = UrdfKinematics(urdf_path, JOINT_NAMES)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     root = zarr.open_group(str(output_path), mode="w-")
     root.attrs.update(dict(source.attrs))
     urdf_hash = hashlib.sha256(urdf_path.read_bytes()).hexdigest()
-    root.attrs.update({"format": "rm75-umi-pose-v1", "complete": False,
+    root.attrs.update({"format": "rm75-umi-pose-v2" if source.attrs.get("format") == "rm75-joint-image-v2" else "rm75-umi-pose-v1", "complete": False,
                        "action_layout": "pose10", "stored_action_layout": "xyz_rotvec_gripper",
                        "base_frame": "base_link", "end_frame": "Link7", "tool_offset": np.eye(4).tolist(),
                        "position_unit": "m", "rotation_unit": "rad", "gripper_representation": "normalized_0_1",

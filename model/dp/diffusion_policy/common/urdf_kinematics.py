@@ -49,6 +49,7 @@ class UrdfKinematics:
         if movable_names != self.joint_names or len(set(self.joint_names)) != len(self.joint_names):
             raise ValueError(f"Joint order mismatch: URDF={movable_names}, input={self.joint_names}")
         self.chain = []
+        self.joint_limits = []
         for joint in chain:
             kind = joint.get("type")
             if kind not in ("fixed", "revolute", "continuous") or joint.find("mimic") is not None:
@@ -61,6 +62,15 @@ class UrdfKinematics:
             axis = _vector(joint.find("axis"), "xyz", "1 0 0")
             if np.linalg.norm(axis) < 1e-12:
                 raise ValueError("Joint axis must be nonzero")
+            if kind != "fixed":
+                limit = joint.find("limit")
+                if limit is None or limit.get("lower") is None or limit.get("upper") is None:
+                    self.joint_limits.append(None)
+                else:
+                    lower, upper = float(limit.get("lower")), float(limit.get("upper"))
+                    if not np.isfinite([lower, upper]).all() or lower >= upper:
+                        raise ValueError(f"Invalid joint limits: {joint.get('name')}")
+                    self.joint_limits.append((lower, upper))
             self.chain.append((matrix, axis / np.linalg.norm(axis), kind != "fixed"))
 
     def forward(self, joint_angles):

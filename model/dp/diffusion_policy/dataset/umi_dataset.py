@@ -27,6 +27,7 @@ from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.sampler import SequenceSampler, get_val_mask
 from diffusion_policy.dataset.base_dataset import BaseDataset
 from diffusion_policy.model.common.normalizer import LinearNormalizer
+from diffusion_policy.common.fixed_normalization import fixed_range_normalizer
 from filelock import FileLock
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm, trange
@@ -357,11 +358,16 @@ class UmiDataset(BaseDataset):
                     array_to_stats(data_cache["action"][..., i * dim_a + 3 : (i + 1) * dim_a - 1])
                 )
             )  # rot
-            action_normalizers.append(
-                get_range_normalizer_from_stat(
-                    array_to_stats(data_cache["action"][..., (i + 1) * dim_a - 1 : (i + 1) * dim_a])
+            if self.dataset_attrs.get("format") == "rm75-umi-pose-v2":
+                if self.dataset_attrs.get("normalization_contract") != "urdf-joint-limits-v1":
+                    raise ValueError("Missing source URDF normalization contract")
+                action_normalizers.append(fixed_range_normalizer([0], [1]))
+            else:
+                action_normalizers.append(
+                    get_range_normalizer_from_stat(
+                        array_to_stats(data_cache["action"][..., (i + 1) * dim_a - 1 : (i + 1) * dim_a])
+                    )
                 )
-            )  # gripper
 
         normalizer["action"] = concatenate_normalizer(action_normalizers)
 
@@ -376,7 +382,9 @@ class UmiDataset(BaseDataset):
             elif key.endswith("rot_axis_angle") or "rot_axis_angle_wrt" in key:
                 this_normalizer = get_identity_normalizer_from_stat(stat)
             elif key.endswith("gripper_width"):
-                this_normalizer = get_range_normalizer_from_stat(stat)
+                this_normalizer = (fixed_range_normalizer([0], [1])
+                                   if self.dataset_attrs.get("format") == "rm75-umi-pose-v2"
+                                   else get_range_normalizer_from_stat(stat))
             else:
                 raise RuntimeError("unsupported")
             normalizer[key] = this_normalizer

@@ -63,8 +63,14 @@ def main():
         pred = policy.predict_action(dict_apply(batch["obs"], lambda value: value.to(args.device)))["action_pred"].cpu().numpy()
     matrices = decode_pose_actions(pred)
     rotations = matrices[..., :3, :3]
-    if pred.shape[1:] != (16, 10) or not np.isfinite(pred).all():
+    expected_horizon = int(cfg.task.action_horizon)
+    if pred.shape[1:] != (expected_horizon, 10) or not np.isfinite(pred).all():
         raise ValueError("Invalid predicted action shape or values")
+    recovered = policy.normalizer["action"].unnormalize(
+        policy.normalizer["action"].normalize(torch.from_numpy(pred).to(args.device))
+    ).detach().cpu().numpy()
+    if not np.allclose(recovered, pred, atol=1e-5):
+        raise ValueError("Action normalization roundtrip failed")
     if not np.allclose(rotations @ rotations.swapaxes(-1, -2), np.eye(3), atol=1e-4) or not np.allclose(np.linalg.det(rotations), 1, atol=1e-4):
         raise ValueError("Invalid decoded rotations")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -72,7 +78,8 @@ def main():
                         target_action=batch["action"].numpy(), relative_transforms=matrices)
     report = {"checkpoint": str(args.checkpoint.resolve()), "validation_windows": len(dataset),
               "max_steps": args.max_steps, "prediction_shape": list(pred.shape),
-              "rotation_decode_verified": True, "metrics": metrics}
+              "rotation_decode_verified": True, "inverse_normalization_verified": True,
+              "metrics": metrics}
     (args.output / "metrics.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 

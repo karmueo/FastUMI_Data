@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import zarr
 from diffusion_policy.common.normalize_util import get_image_identity_normalizer
+from diffusion_policy.common.fixed_normalization import fixed_range_normalizer
 from diffusion_policy.common.sampler import get_val_mask
 from diffusion_policy.dataset.base_dataset import BaseImageDataset
 from diffusion_policy.model.common.normalizer import LinearNormalizer
@@ -14,11 +15,12 @@ from diffusion_policy.model.common.normalizer import LinearNormalizer
 class VrJointImageDataset(BaseImageDataset):
     """提供 2 帧历史观测与 16 步绝对关节/夹爪动作，归一化仅拟合训练集。"""
 
-    def __init__(self, dataset_path, shape_meta, seed=42, val_ratio=0.1):
+    def __init__(self, dataset_path, shape_meta, seed=42, val_ratio=0.1,
+                 train_episode_indices=None, val_episode_indices=None):
         """只读打开转换结果，固定 episode 划分并建立训练样本索引。"""
         self.root = zarr.open_group(str(dataset_path), mode="r")
-        if self.root.attrs.get("format") != "rm75-joint-image-v1" or not self.root.attrs.get("complete"):
-            raise ValueError("Expected complete rm75-joint-image-v1 dataset")
+        if self.root.attrs.get("format") not in ("rm75-joint-image-v1", "rm75-joint-image-v2") or not self.root.attrs.get("complete"):
+            raise ValueError("Expected complete rm75-joint-image dataset")
         self.data = self.root["data"]
         self.ends = self.root["meta/episode_ends"][:]
         self.starts = np.r_[0, self.ends[:-1]]
@@ -39,6 +41,21 @@ class VrJointImageDataset(BaseImageDataset):
                 raise ValueError(f"Unexpected observation shape for {key}: {actual}")
         self.val_mask = get_val_mask(len(self.ends), val_ratio, seed)
         self.train_mask = ~self.val_mask
+        if train_episode_indices is not None or val_episode_indices is not None:
+            if train_episode_indices is None or val_episode_indices is None:
+                raise ValueError("Both split lists are required")
+            self.train_mask = np.zeros(len(self.ends), dtype=bool)
+            self.val_mask = np.zeros(len(self.ends), dtype=bool)
+            for mask, indices in ((self.train_mask, train_episode_indices),
+                                  (self.val_mask, val_episode_indices)):
+                indices = list(indices)
+                if (len(indices) != len(set(indices)) or
+                        any(not isinstance(index, (int, np.integer)) or index < 0 or index >= len(mask)
+                            for index in indices)):
+                    raise ValueError("Invalid episode indices")
+                mask[indices] = True
+            if not self.train_mask.any() or not self.val_mask.any() or np.any(self.train_mask & self.val_mask):
+                raise ValueError("Training and validation episodes must be nonempty and disjoint")
         self.indices = self._make_indices(self.train_mask)
         if not len(self.indices):
             raise ValueError("No training windows")
@@ -62,6 +79,21 @@ class VrJointImageDataset(BaseImageDataset):
     def get_normalizer(self, **kwargs):
         """只用训练 episode 的低维状态和动作拟合 [-1,1]，图像保持 [0,1]。"""
         normalizer = LinearNormalizer()
+        if self.root.attrs.get("format") == "rm75-joint-image-v2":
+            if self.root.attrs.get("normalization_contract") != "urdf-joint-limits-v1":
+                raise ValueError("Missing URDF normalization contract")
+            lower = np.asarray(self.root.attrs["joint_lower"], dtype=np.float32)
+            upper = np.asarray(self.root.attrs["joint_upper"], dtype=np.float32)
+            if lower.shape != (7,) or upper.shape != (7,):
+                raise ValueError("Expected seven URDF joint limits")
+            gripper_lower = float(self.root.attrs["gripper_lower"])
+            gripper_upper = float(self.root.attrs["gripper_upper"])
+            normalizer["robot0_joint_pos"] = fixed_range_normalizer(lower, upper)
+            normalizer["robot0_gripper_position"] = fixed_range_normalizer([gripper_lower], [gripper_upper])
+            normalizer["action"] = fixed_range_normalizer(
+                np.r_[lower, gripper_lower], np.r_[upper, gripper_upper])
+            normalizer["camera0_rgb"] = get_image_identity_normalizer()
+            return normalizer
         values = {}
         for key in ("robot0_joint_pos", "robot0_gripper_position", "action"):
             values[key] = np.concatenate([self.data[key][start:end] for start, end, selected

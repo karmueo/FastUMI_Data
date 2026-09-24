@@ -46,13 +46,22 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"checkpoint": str(args.checkpoint.resolve()), "dataset": str(args.dataset.resolve()),
               "validation_windows": len(dataset), "max_steps": args.max_steps, "metrics": metrics}
-    (args.output / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     batch = next(iter(loader))
     obs = dict_apply(batch["obs"], lambda value: value.to(args.device))
     with torch.no_grad():
         torch.manual_seed(42)
         pred = policy.predict_action(obs)["action_pred"].cpu().numpy()
+    expected_horizon = int(cfg.task.shape_meta.action.horizon)
+    if pred.shape[1:] != (expected_horizon, 8) or not np.isfinite(pred).all():
+        raise ValueError("Invalid joint prediction shape or values")
+    recovered = policy.normalizer["action"].unnormalize(
+        policy.normalizer["action"].normalize(torch.from_numpy(pred).to(args.device))
+    ).detach().cpu().numpy()
+    if not np.allclose(recovered, pred, atol=1e-5):
+        raise ValueError("Joint action normalization roundtrip failed")
+    report.update(prediction_shape=list(pred.shape), inverse_normalization_verified=True)
     np.savez_compressed(args.output / "predictions.npz", predicted_action=pred, target_action=batch["action"].numpy())
+    (args.output / "metrics.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
 
 
