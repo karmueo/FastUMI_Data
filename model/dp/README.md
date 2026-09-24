@@ -160,6 +160,34 @@ uv run --no-sync accelerate launch \
   "hydra.run.dir=$RUN_DIR"
 ```
 
+### 中断后恢复
+
+先确认原训练进程已经退出，再使用原运行目录的 `checkpoints/latest.ckpt`。
+恢复任务写入新的目录，以保留原 checkpoint 和日志；`training.num_epochs=120`
+表示训练总轮数。保持与原目录 `.hydra/config.yaml` 相同的数据集、每卡 batch
+和 GPU 进程数。中断所在轮尚未写入 checkpoint 的进度需要重跑。
+
+```bash
+cd model/dp
+OLD_RUN=/absolute/path/to/previous/run
+RUN_DIR="$(realpath ../../dataset/vr_target)/runs/resume_$(date +%Y%m%d_%H%M%S)"
+test -s "$OLD_RUN/checkpoints/latest.ckpt"
+mkdir -p "$RUN_DIR"
+CUDA_VISIBLE_DEVICES=0,1 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+WANDB_MODE=offline WANDB_DIR="$RUN_DIR" \
+HF_HUB_CACHE=/path/to/huggingface/hub HF_HUB_OFFLINE=1 \
+uv run --no-sync accelerate launch \
+  --multi_gpu --num_processes 2 --num_machines 1 \
+  --mixed_precision bf16 --dynamo_backend no \
+  train.py --config-name=train_diffusion_unet_timm_vr_joint_workspace \
+  "hydra.run.dir=$RUN_DIR" training.resume=true training.num_epochs=120 \
+  "training.ckpt_path=$OLD_RUN/checkpoints/latest.ckpt"
+```
+
+恢复会加载模型、EMA 和优化器状态，并根据保存的 `global_step` 重建学习率调度器。
+新目录会生成独立的 W&B 日志；原运行目录中的 `best.ckpt` 保留。
+只有恢复后验证 loss 低于历史最佳值，新目录才会写入新的 `best.ckpt`。
+
 ### 训练输出与评估
 
 完整配置为 120 epoch、每卡训练 batch 128、验证 batch 32、EMA、TF32 矩阵乘，

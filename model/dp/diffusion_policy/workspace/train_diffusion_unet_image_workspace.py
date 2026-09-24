@@ -207,8 +207,19 @@ def evaluate_policy(policy, dataloader, device, action_layout="pose10", sample=F
     return result
 
 
+def resumed_training_position(epoch, global_step, next_epoch=None, next_global_step=None):
+    """Return the next epoch and step from a current or legacy checkpoint."""
+    if next_epoch is None and next_global_step is None:
+        # Older checkpoints were written before the completed epoch was advanced.
+        return epoch + 1, global_step + 1
+    if next_epoch is None or next_global_step is None:
+        raise ValueError("Checkpoint has incomplete training progress metadata")
+    return next_epoch, next_global_step
+
+
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
-    include_keys = ["global_step", "epoch", "best_loss"]
+    include_keys = ["global_step", "epoch", "best_loss", "checkpoint_next_epoch",
+                    "checkpoint_next_global_step"]
     exclude_keys = tuple()
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
@@ -259,6 +270,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         self.global_step = 0
         self.epoch = 0
         self.best_loss = float("inf")  # 随 checkpoint 持久化的历史最佳监控值。
+        self.checkpoint_next_epoch = None
+        self.checkpoint_next_global_step = None
 
         # do not save optimizer if resume=False
         if not cfg.training.resume and not cfg.training.get("save_optimizer", False):
@@ -291,6 +304,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 )
             accelerator.print(f"Resuming from checkpoint {lastest_ckpt_path}")
             self.load_checkpoint(path=lastest_ckpt_path)
+            self.epoch, self.global_step = resumed_training_position(
+                self.epoch, self.global_step, self.checkpoint_next_epoch,
+                self.checkpoint_next_global_step)
+            accelerator.print(f"Continuing at epoch {self.epoch}, step {self.global_step}")
 
         # 新关节任务显式启用完整验证，旧任务保持原有默认采样行为。
         validation_enabled = cfg.training.get("enable_validation", False)
@@ -419,7 +436,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         logger_context = JsonLogger(log_path) if accelerator.is_main_process else contextlib.nullcontext()
         with logger_context as json_logger:
-            for local_epoch_idx in range(cfg.training.num_epochs):
+            for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
                 self.model.train()
 
                 step_log = dict()
@@ -519,6 +536,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 if fixed_validation_batch is not None:
                     fixed_metrics = evaluate_policy(policy, [fixed_validation_batch], device, action_layout, sample=True)
                     step_log.update({"fixed_" + key: value for key, value in fixed_metrics.items()})
+
+                # Checkpoints are written before the counters advance below.
+                self.checkpoint_next_epoch = self.epoch + 1
+                self.checkpoint_next_global_step = self.global_step + 1
 
                 # run diffusion sampling on a training batch
                 if sample_this_epoch and accelerator.is_main_process:
