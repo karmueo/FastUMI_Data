@@ -10,9 +10,13 @@ from fastumi_rm75.placo_control import (
     TargetTrajectory,
     decode_trajectory,
     fill_joint_command,
+    gate_gripper_target,
     ordered_joint_positions,
     sample_trajectory,
     sequence_is_new,
+    validate_gripper_targets,
+    validate_start_envelope,
+    validate_workspace,
 )
 
 
@@ -140,3 +144,44 @@ def test_joint_command_uses_radians_and_low_follow_fields():
     assert message.follow is False
     assert message.expand == 0.0
     assert message.dof == 7
+
+
+def test_workspace_rejects_outside_link7_target():
+    """任务工作区同时约束当前锚点和将要执行的 Link7 目标。"""
+    lower = [0.10, -0.22, 0.16]
+    upper = [0.54, 0.28, 0.50]
+    validate_workspace([[0.30, 0.0, 0.34], [0.45, -0.10, 0.42]], lower, upper)
+    with pytest.raises(ValueError, match="workspace"):
+        validate_workspace([[0.30, 0.0, 0.34], [0.09, 0.0, 0.34]], lower, upper)
+    with pytest.raises(ValueError, match="workspace"):
+        validate_workspace([0.30, 0.0, 0.61], lower, upper)
+
+
+def test_gripper_safety_floor_rejects_spurious_full_close():
+    """可选的非零夹爪命令下限仍可用于其他任务。"""
+    validate_gripper_targets([1.0, 0.5, 0.35], 0.34)
+    with pytest.raises(ValueError, match="configured minimum"):
+        validate_gripper_targets([1.0, 0.0], 0.34)
+
+
+def test_trial_envelope_rejects_ik_command_before_hardware_boundary():
+    """控制器必须在发布关节目标前拒绝超出起点距离或上升限制的 Link7 位姿。"""
+    start = [0.30, 0.0, 0.34]
+    validate_start_envelope([0.27, -0.03, 0.35], start, 0.05, 0.015)
+    with pytest.raises(ValueError, match="start displacement"):
+        validate_start_envelope([0.24, 0.0, 0.34], start, 0.05, 0.015)
+    with pytest.raises(ValueError, match="start rise"):
+        validate_start_envelope([0.30, 0.0, 0.36], start, 0.05, 0.015)
+    with pytest.raises(ValueError, match="finite"):
+        validate_start_envelope([np.nan, 0.0, 0.34], start, 0.05, 0.015)
+
+
+def test_gripper_closure_waits_for_visual_approval_but_can_hold_or_reopen():
+    """训练需要 0 闭合命令，视觉许可缺失时保持开度并允许张开。"""
+    assert gate_gripper_target(0.0, None, 0.99, False) == pytest.approx(0.99)
+    assert gate_gripper_target(0.0, 0.60, 0.70, False) == pytest.approx(0.60)
+    assert gate_gripper_target(0.80, 0.60, 0.70, False) == pytest.approx(0.80)
+    assert gate_gripper_target(0.0, 0.60, 0.70, True) == pytest.approx(0.0)
+    assert gate_gripper_target(0.0, None, None, False) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="gripper target"):
+        gate_gripper_target(float("nan"), None, 1.0, True)

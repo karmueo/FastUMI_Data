@@ -258,3 +258,56 @@ def fill_joint_command(message, positions: np.ndarray) -> None:
     message.follow = False
     message.expand = 0.0
     message.dof = 7
+
+
+def validate_workspace(positions, lower, upper) -> None:
+    """确认 base_link 下的 Link7 位置均在配置工作区内，单位米。"""
+    values = np.asarray(positions, dtype=np.float64).reshape(-1, 3)
+    minimum = np.asarray(lower, dtype=np.float64).reshape(3)
+    maximum = np.asarray(upper, dtype=np.float64).reshape(3)
+    if not np.isfinite(values).all():
+        raise ValueError("Link7 position is non-finite")
+    outside = np.any((values < minimum) | (values > maximum), axis=1)
+    if np.any(outside):
+        raise ValueError(
+            "Link7 position is outside the configured workspace: "
+            f"{values[np.flatnonzero(outside)[0]].round(4).tolist()}")
+
+
+def validate_start_envelope(position, start, max_displacement_m, max_rise_m) -> None:
+    """在发布 CANFD 指令前限制 base_link 下 Link7 相对起始位置的米制位移。"""
+    position = np.asarray(position, dtype=np.float64).reshape(3)
+    start = np.asarray(start, dtype=np.float64).reshape(3)
+    if not np.isfinite(position).all() or not np.isfinite(start).all():
+        raise ValueError("trial Link7 position must be finite")
+    if (not np.isfinite(max_displacement_m) or max_displacement_m < 0
+            or not np.isfinite(max_rise_m) or max_rise_m < 0):
+        raise ValueError("trial displacement and rise limits must be nonnegative")
+    delta = position - start
+    if max_displacement_m and np.linalg.norm(delta) > max_displacement_m:
+        raise ValueError("Link7 command exceeds the configured start displacement")
+    if max_rise_m and delta[2] > max_rise_m:
+        raise ValueError("Link7 command exceeds the configured start rise")
+
+
+def validate_gripper_targets(openness, minimum) -> None:
+    """拒绝低于当前任务允许开度的未来夹爪目标；0 闭合，1 张开。"""
+    values = np.asarray(openness, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("gripper targets must be a non-empty finite sequence")
+    if np.any(values < minimum):
+        raise ValueError(
+            "gripper target is below the configured minimum: "
+            f"{float(values.min()):.3f} < {minimum:.3f}"
+        )
+
+
+def gate_gripper_target(target, previous_command, feedback, close_allowed) -> float:
+    """视觉门控不通过时保持当前夹爪命令；允许正常张开但不新增闭合动作。"""
+    target = float(target)
+    if not np.isfinite(target) or not 0.0 <= target <= 1.0:
+        raise ValueError("gripper target must be finite and in [0, 1]")
+    hold = previous_command if previous_command is not None else feedback
+    if hold is None or not np.isfinite(hold) or not 0.0 <= hold <= 1.0:
+        hold = 1.0
+    return target if close_allowed or target >= hold else float(hold)

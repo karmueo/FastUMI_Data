@@ -1,0 +1,24 @@
+# RM75 Link7 策略推理；checkpoint 与训练 URDF 由启动者显式提供。
+dp_infer:
+  ros__parameters:
+    checkpoint: ""
+    urdf_path: ""
+    expected_urdf_sha256: ""
+    device: cuda:0
+    num_inference_steps: 8
+    image_topic: /wrist_camera/image_raw/compressed
+    image_type: compressed
+    joint_topic: /joint_states
+    gripper_topic: /motion_control/gripper_state
+    output_topic: /fastumi/policy/action_sequence
+    close_guard_topic: /fastumi/policy/gripper_close_allowed
+    reset_service: /fastumi/policy/reset_episode
+    controller_reset_service: /fastumi/rm75/placo/reset_episode
+    controller_reset_timeout_s: 1.0
+    require_controller_reset: true
+    sync_slop_s: 0.05
+    input_timeout_s: 0.2
+    history_tolerance_s: 0.015
+    max_inference_hz: 10.0
+    result_timeout_s: 0.5
+    postprocessors: ""
