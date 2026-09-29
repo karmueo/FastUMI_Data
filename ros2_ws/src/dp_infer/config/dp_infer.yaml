@@ -1,24 +1,45 @@
-# RM75 Link7 策略推理；checkpoint 与训练 URDF 由启动者显式提供。
+# ROS 2 参数文件：dp_infer 节点使用 ros__parameters 下的配置进行 RM75 Link7 策略推理。
 dp_infer:
   ros__parameters:
+    # 策略 checkpoint 文件路径；必须显式指定已有文件，组合启动时由 launch 参数传入。
     checkpoint: ""
+    # 训练时使用的 URDF 文件路径；必须显式指定，用于校验模型并计算 Link7 位姿。
     urdf_path: ""
+    # 旧 checkpoint 未内嵌训练 URDF 摘要时使用的 SHA-256 十六进制值；通常留空。
     expected_urdf_sha256: ""
+    # 模型推理设备；例如 cuda:0 表示第一块 CUDA GPU。
     device: cuda:0
+    # 每次预测的扩散去噪步数；组合启动可用同名 launch 参数覆盖。
     num_inference_steps: 8
+    # 腕部相机图像订阅话题；消息类型由 image_type 决定。
     image_topic: /wrist_camera/image_raw/compressed
+    # 图像消息类型：compressed 对应 CompressedImage，raw 对应 Image。
     image_type: compressed
+    # 七轴关节状态订阅话题，消息类型为 sensor_msgs/JointState。
     joint_topic: /joint_states
+    # 夹爪实测开度订阅话题，消息类型为 std_msgs/Float32，范围为 0（闭合）到 1（张开）。
     gripper_topic: /motion_control/gripper_state
+    # 策略动作序列发布话题，消息类型为 fastumi_interfaces/PolicyActionSequence。
     output_topic: /fastumi/policy/action_sequence
+    # 夹爪闭合许可发布话题，消息类型为 std_msgs/Bool，由新鲜的腕部图像判定。
     close_guard_topic: /fastumi/policy/gripper_close_allowed
+    # 开始新 episode 的服务名，类型为 std_srvs/Trigger；调用后清除旧观测和预测。
     reset_service: /fastumi/policy/reset_episode
+    # 控制器重置服务名，类型为 fastumi_interfaces/ResetPolicyController。
     controller_reset_service: /fastumi/rm75/placo/reset_episode
+    # 等待控制器重置响应的最长时间，单位秒；超时视为未确认。
     controller_reset_timeout_s: 1.0
+    # 是否必须收到控制器重置成功确认后才允许新 episode 发布预测。
     require_controller_reset: true
+    # 图像与关节、夹爪观测匹配时允许的最大时间差，单位秒。
     sync_slop_s: 0.05
+    # 可接受的输入观测最大年龄，单位秒；也用于闭合许可的图像新鲜度判断。
     input_timeout_s: 0.2
+    # 两帧 30 Hz 历史观测取样时允许的最大时间误差，单位秒，须小于 1/30 秒。
     history_tolerance_s: 0.015
+    # 启动模型推理的最高频率，单位 Hz。
     max_inference_hz: 10.0
+    # 推理结果相对最新图像采集时刻允许的最大年龄，单位秒；过期结果不发布。
     result_timeout_s: 0.5
+    # 可选后处理器列表，逗号分隔的 module:factory；每个无参工厂须返回含 process 方法的对象，留空表示不用。
     postprocessors: ""

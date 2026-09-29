@@ -33,56 +33,148 @@ checkpoint、训练 URDF 和控制 URDF 均在启动前校验；指定的 checkp
 
 ## 启动
 
-先按 [硬件入口](../fastumi_bringup/README.md) 启动 `hardware.launch.py`，等待 RM75
-回位完成、`/joint_states`、腕部相机和 `/motion_control/gripper_state` 有新鲜消息。
-另开终端，从仓库根目录执行：
+以下命令用于 Jetson 上已有的 H.264 腕部相机配置。从仓库根目录开始，在两个终端
+使用相同的 `ROS_DOMAIN_ID`（均未设置时为 0）。`hardware.launch.py` 会让机械臂
+回位、夹爪张开，启动前确认运动区域无人和障碍物，并使急停可用。
+
+### 第一步：启动相机、机械臂与夹爪（终端 A）
+
+首次使用先按 [硬件入口](../fastumi_bringup/README.md) 准备
+`ros2_ws/hardware.local.env`，填写 `WRIST_VIDEO_DEVICE`、
+`GRIPPER_NETWORK_INTERFACE` 等本机参数；该文件已被 Git 忽略。然后执行：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+source hardware.local.env
+ros2 launch fastumi_bringup hardware.launch.py \
+  wrist_video_device:="$WRIST_VIDEO_DEVICE" \
+  wrist_camera_mode:=h264 h264_encoder:="${H264_ENCODER:-hardware}" \
+  enable_decoder:=true start_recorder:=false \
+  gripper_network_interface:="$GRIPPER_NETWORK_INTERFACE" \
+  gripper_config_file:="$GRIPPER_CONFIG_FILE"
+```
+
+保持终端 A 运行。这个入口启动 RM75 驱动并执行初始 MoveJ 回位，启动 Unitree
+夹爪及腕部相机；`enable_decoder:=true` 同时在本机发布
+`/wrist_camera/image_decoded`，不要再单独启动 `receive.launch.py`。本次不录制，
+因此设置 `start_recorder:=false`。等待日志确认回位成功；失败时统一启动会退出。
+
+在终端 B 从仓库根目录加载同一 ROS 环境，依次检查反馈；`ros2 topic hz` 会持续
+运行，看到稳定帧率后按 Ctrl+C，再执行下一条：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ros2_ws/install/setup.bash
-checkpoint="$(realpath dataset/vr_target_umi/full_20260925_174814/checkpoints/best.ckpt)"
-training_urdf="$(realpath dataset/vr_target_umi/rm_75.urdf)"
-ros2 launch dp_infer dp_infer.launch.py \
-  checkpoint:="$checkpoint" urdf_path:="$training_urdf" dry_run:=true
+ros2 topic hz /wrist_camera/image_decoded
+ros2 topic hz /joint_states
+ros2 topic hz /motion_control/gripper_state
+ros2 topic echo --once /rm_driver/udp_feedback_valid
+ros2 topic echo --once /joint_states
+ros2 topic echo --once /motion_control/gripper_state
 ```
 
-dry-run 时控制器只发布 `/fastumi/rm75/placo/joint_command` 调试关节目标，不发布
-`/rm_driver/movej_canfd_cmd` 或夹爪指令。`dry_run` 默认是 `false`，省略该参数会
-自动控制实机。**当前 checkpoint 尚未通过抓取验收。实机试验仅完成短时运动，
-没有抓住目标；再次运行前必须让机械臂及夹爪回到起始状态，并取得现场操作人员
-对本次运动的确认。**
+确认图像持续更新、七轴反馈有效且已回到
+`[0°, 20°, 0°, 70°, 0°, 90°, 90°]` 附近（话题数值为弧度），驱动有效状态为
+`true`，夹爪实测开度不低于 0.95（1 为张开）。两终端若设置了不同的
+`ROS_DOMAIN_ID`，这些话题无法互相发现。
 
-实机控制器现要求机械臂先回到 `[0°, 20°, 0°, 70°, 0°, 90°, 90°]` 附近并
-稳定 0.5 秒，夹爪开度达到 0.95 以上；每个新 episode 都重新检查。
-该门控只读反馈，不会自动回位。配置的 `Link7` 工作区为
-`x∈[0.10,0.54]`、`y∈[-0.22,0.28]`、`z∈[0.16,0.50]` 米，
-越界会拒绝目标或停止 IK。这个范围根据本地可用示教设定，换任务前需重审。
-越界或 IK 故障会锁定当前 episode；机械臂及夹爪回位后需调用
-`/fastumi/policy/reset_episode` 才能再次执行。
+### 第二步：先 dry-run，再启动推理与实机控制（终端 B）
 
-硬件已经启动、现场人员明确确认本次回位后，可从仓库根目录运行：
+仍在仓库根目录，设置现有 checkpoint 和训练 URDF，并以此前 `latest.ckpt` 实机
+试验使用的 4 次去噪运行组合 launch：
+
+```bash
+checkpoint="$(realpath dataset/vr_target_umi/full_20260925_174814/checkpoints/latest.ckpt)"
+training_urdf="$(realpath dataset/vr_target_umi/rm_75.urdf)"
+ros2 launch dp_infer dp_infer.launch.py \
+  checkpoint:="$checkpoint" urdf_path:="$training_urdf" \
+  image_type:=raw image_topic:=/wrist_camera/image_decoded \
+  num_inference_steps:=4 dry_run:=true
+```
+
+dry-run 模式下控制器只发布 `/fastumi/rm75/placo/joint_command` 调试关节目标，不发布
+`/rm_driver/movej_canfd_cmd` 或 `/motion_control/gripper_command`。可在第三个已加载
+相同 ROS 环境的终端依次查看以下话题；`hz` 命令检查后按 Ctrl+C：
+
+```bash
+ros2 topic hz /fastumi/policy/action_sequence
+ros2 topic hz /fastumi/rm75/placo/joint_command
+ros2 topic info --verbose /rm_driver/movej_canfd_cmd
+ros2 topic info --verbose /motion_control/gripper_command
+```
+
+两条实际命令话题应没有发布者。结束终端 B 的 dry-run（Ctrl+C），再检查
+`/fastumi/policy/action_sequence`、`/rm_driver/movej_canfd_cmd` 和
+`/motion_control/gripper_command` 没有遗留发布者。确认机械臂和夹爪仍在起点、
+现场人员同意本次运动后，在终端 B 执行实机命令：
+
+```bash
+ros2 launch dp_infer dp_infer.launch.py \
+  checkpoint:="$checkpoint" urdf_path:="$training_urdf" \
+  image_type:=raw image_topic:=/wrist_camera/image_decoded \
+  num_inference_steps:=4 dry_run:=false
+```
+
+该 launch 同时启动 DP 推理和 Placo 控制器，不需要再单独启动控制器或旧版
+`rm75_deployment.launch.py`。运行时应持续看到图像、关节和夹爪反馈及策略序列；
+`/rm_driver/movej_canfd_cmd` 与 `/motion_control/gripper_command` 各只能有一个
+发布者。在第三个已加载相同 ROS 环境的终端检查：
+
+```bash
+ros2 topic info --verbose /fastumi/policy/action_sequence
+ros2 topic info --verbose /rm_driver/movej_canfd_cmd
+ros2 topic info --verbose /motion_control/gripper_command
+ros2 topic echo --once /rm_driver/udp_feedback_valid
+```
+
+前三个话题应各有一个发布者，驱动有效状态应为 `true`。`dry_run` 默认是
+`false`，所以示例中始终显式写出该参数。
+本例没有传入 `max_start_displacement_m` 和 `max_start_rise_m`；两者默认 `0`，
+表示不增加相对起点的位移和上升限界，仍受当前
+[`rm75_placo_controller.yaml`](../fastumi_rm75/config/rm75_placo_controller.yaml)
+中的 `Link7` 工作区、关节限位和起始状态门控约束。当前工作区配置与过去的
+限时试验不同，不能把以往试验范围当作本次运动边界。
+
+**当前 checkpoint 尚未通过接触或抓取验收。**直接组合启动不会像下方的
+`live_guarded_trial.py` 那样按时间、实测起点位移或球体丢失自动终止试验；
+全程现场监看，发现异常立即使用硬件急停。正常结束时在终端 B 按 Ctrl+C，
+控制器退出时会请求 RM75 停止；观察机械臂确实停稳、关节反馈不再变化，并检查
+命令话题没有遗留发布者，然后再关闭终端 A。
+
+### 下一轮测试与其他模式
+
+实机控制器要求每个新 episode 从
+`[0°, 20°, 0°, 70°, 0°, 90°, 90°]` 附近稳定 0.5 秒开始，夹爪开度至少
+0.95；门控只读反馈，不会自动回位。下一轮先退出组合 launch，再从仓库根目录
+运行回位脚本；它会张开夹爪并让 RM75 执行真实 MoveJ，须确认运动路径安全：
 
 ```bash
 model/dp/.venv/bin/python ros2_ws/src/dp_infer/test/return_to_start.py \
   --real --output dataset/vr_target_umi/dp_infer_validation/home_report.json
 ```
 
-先张开夹爪，再调用现有 RM75 初始姿态 MoveJ 节点并复查七轴和夹爪反馈。
-该脚本会产生真实硬件动作；不加 `--real` 会拒绝运行。回位完成后，实机策略运动
-仍须另行取得现场确认。
-
-仅需推理时加 `start_controller:=false`。恢复 checkpoint 原始的 16 次去噪设置时加
-`num_inference_steps:=16`；默认 8 次。`image_type:=raw` 可订阅 `rgb8`/`bgr8`
-图像，此时同时覆盖 `image_topic`，例如：
+回位后重新进行 dry-run 和发布者检查，再启动新一轮实机控制。若复用仍在运行的
+组合 launch 且机械臂与夹爪已通过其他受控方式回到起点，工作区越界或 IK 故障
+锁定 episode 后，调用以下服务清除旧轨迹；服务未成功时不要继续执行：
 
 ```bash
-ros2 launch dp_infer dp_infer.launch.py \
-  checkpoint:="$checkpoint" urdf_path:="$training_urdf" \
-  image_type:=raw image_topic:=/wrist_camera/image_raw dry_run:=true
+ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
 ```
 
-H.264 模式应启动现有本地解码节点，再将 `image_type:=raw` 和
-`image_topic:=/wrist_camera/image_decoded` 传入。`inference_python`、
+仅需推理时加 `start_controller:=false`。恢复 checkpoint 原始的 16 次去噪设置时加
+`num_inference_steps:=16`；launch 默认 8 次。非 H.264 相机模式应同时修改
+`image_type` 和 `image_topic`：JPEG 使用默认的 `compressed` 和
+`/wrist_camera/image_raw/compressed`，raw 使用 `raw` 和
+`/wrist_camera/image_raw`。H.264 若未通过硬件入口启用解码，须单独启动本地
+`receive.launch.py`，并保持只有一个解码节点。限时方向诊断仍可按下文
+[限时实机方向试验](#限时实机方向试验) 使用 `live_guarded_trial.py`，该脚本会自行
+启动解码节点。改用该脚本前，应停止当前硬件入口并以 `enable_decoder:=false`
+重新启动、等待回位成功，避免两个节点同时发布 `/wrist_camera/image_decoded`。
+
+`inference_python`、
 `controller_python`、`control_urdf_path` 可覆盖非标准部署路径；
 `device`、`joint_topic`、`gripper_topic`、`output_topic`、`postprocessors` 也可覆盖。
 `max_start_displacement_m`、`max_start_rise_m` 可设置控制器命令发布前的起点限界。

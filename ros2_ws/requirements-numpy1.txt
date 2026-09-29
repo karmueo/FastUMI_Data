@@ -5,4 +5,7 @@ scipy==1.13.1
 h5py==3.13.0
 opencv-python==4.11.0.86
 pupil-labs-uvc==1.0.4
+zarr==2.18.3
+numcodecs==0.12.1
+tqdm>=4.66,<5
 pytest>=7.4,<8

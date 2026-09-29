@@ -55,7 +55,8 @@ def _h264_packets() -> list[tuple[bytes, bool]]:
          "-show_entries", "packet=pos,size,flags", "-of", "json", "pipe:0"],
         input=encoded, capture_output=True, check=True,
     )
-    packets = json.loads(probe.stdout)["packets"]
+    # Jetson ffprobe may prepend an EGL diagnostic to stdout.
+    packets = json.loads(probe.stdout[probe.stdout.index(b"{"):])["packets"]
     assert len(packets) == 5
     return [
         (encoded[int(packet["pos"]):int(packet["pos"]) + int(packet["size"])],

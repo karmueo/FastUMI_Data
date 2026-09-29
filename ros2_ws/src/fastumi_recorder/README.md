@@ -89,9 +89,8 @@ H.264 从首个关键帧起核对解码帧；JPEG 逐帧实际解码。脚本只
 
 ## 离线转换为训练 episode
 
-仓库根目录的 `convert_hardware_mcap.py` 接受一轮 `episode_N` 或其父目录，按编号将每轮
-MCAP 转换为 `proprio.hdf5`、`gripper.mp4` 和 `conversion.json`。输出兼容
-`rm75-single-arm-v1` HDF5 结构，不生成需要人工标注的 `gripper.json`。
+仓库根目录的 `convert_hardware_mcap.py` 接受一轮 `episode_N` 或其父目录。
+默认的 `--format hdf5` 按编号将每轮 MCAP 转换为 `proprio.hdf5`、`gripper.mp4`和 `conversion.json`。输出兼容 `rm75-single-arm-v1` HDF5 结构，不生成需要人工标注的`gripper.json`。
 
 ```bash
 cd /path/to/FastUMI_Data
@@ -102,6 +101,39 @@ python convert_hardware_mcap.py \
   --input dataset/h5dy_data/1/11 \
   --output dataset/h5dy_data/1/11_training
 ```
+
+训练 RM75 Link7 五键／10D 模型时，使用 `--format umi` 一步生成合并的 Zarr。此格式要求显式指定训练 URDF；部署时也必须使用该 URDF。转换环境还需安装 `ros2_ws/requirements-numpy1.txt` 新增的 Zarr、Numcodecs 和 tqdm 依赖。
+
+```bash
+cd /path/to/FastUMI_Data
+source /opt/ros/humble/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
+source ros2_ws/install/setup.bash
+python -m pip install -r ros2_ws/requirements-numpy1.txt
+python convert_hardware_mcap.py \
+  --format umi \
+  --input dataset/h5dy_data/rm75/jingbao2 \
+  --output dataset/rm75_umi/jingbao2.zarr \
+  --urdf ros2_ws/src/fastumi_rm75/assets/rm_75_kinematic.urdf \
+  --workers 4
+```
+
+UMI 模式使用 bag 接收时间，在各必需数据流共同覆盖区间按 30 Hz 前值保持对齐；关节反馈和目标指令分别执行七轴正运动学。Tracker 不参与训练，可以缺席。图像转为 224×224 RGB，等比缩放并补黑边。
+根属性标明 `rm75-umi-pose-v1`、`base_link`、`Link7`、米、弧度、夹爪 `[0,1]` 编码及 URDF SHA-256。
+`data/` 包含 `camera0_rgb`、`robot0_eef_pos`、`robot0_eef_rot_axis_angle`、`robot0_gripper_width`、`robot0_demo_start_pose`、`action`、`timestamp` 和 `source_image_index`；`meta/episode_ends` 与`meta/episode_names` 保存各轮边界。磁盘上的 `action` 是绝对`[xyz(3), rotvec(3), gripper(1)]`；训练加载器将它转换为相对当前观测的`[xyz(3), rotation_6d(6), gripper(1)]`，预测长度为 16。
+
+合并目录内有 `conversion_report.json` 和 `rm_75.urdf`。坏轮次会跳过并在报告中写明原因；只要至少一轮有效，命令成功并打印跳过数量。全部失败时不生成 Zarr，只在输出目录旁保存
+`<名称>.zarr.report.json`。已存在的目标 Zarr 不会覆盖。训练时显式指定数据路径：
+
+```bash
+cd model/dp
+WANDB_MODE=offline uv run --no-sync python train.py \
+  --config-name=train_diffusion_unet_timm_vr_umi_workspace \
+  task.dataset_path=../../dataset/rm75_umi/jingbao2.zarr
+```
+
+使用 `train_vr_umi.sh` 时须注意该脚本目前固定读取
+`dataset/vr_target_umi/target.zarr`；上述命令适用于自定义输出路径。
 
 批量转换默认并行，最多使用 4 个进程，且不会超过 episode 数量。可用
 `--workers 2` 指定进程数，用 `--workers 1` 顺序转换；输入只有一轮时始终顺序转换。

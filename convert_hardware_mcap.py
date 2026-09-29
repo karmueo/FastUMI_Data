@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert hardware.launch.py MCAP recordings to RM75 HDF5/video episodes.
+"""Convert hardware.launch.py MCAP recordings to RM75 episodes or UMI Zarr.
 
 All output timestamps use the recorder's rosbag receive clock.  Header stamps
 are retained as diagnostics only because the recorder and Tracker may run on
@@ -97,17 +97,21 @@ def _diagnostic(values_ns: list[int]) -> dict[str, float | int]:
     }
 
 
-def _read_episode(bag: Path, spool: Any) -> dict[str, Any]:
+def _read_episode(bag: Path, spool: Any, *,
+                  require_tracker: bool = True) -> dict[str, Any]:
     reader = rosbag2_py.SequentialReader()
     reader.open(
         rosbag2_py.StorageOptions(uri=str(bag), storage_id="mcap"),
         rosbag2_py.ConverterOptions("", ""),
     )
     available = {item.name: item.type for item in reader.get_all_topics_and_types()}
-    missing = [name for name, (topic, _, _) in TOPICS.items() if topic not in available]
+    missing = [name for name, (topic, _, _) in TOPICS.items()
+               if topic not in available and (name != "tracker" or require_tracker)]
     if missing:
         raise ConversionError(f"bag 缺少必需话题: {', '.join(missing)}")
     for name, (topic, expected, _) in TOPICS.items():
+        if topic not in available:
+            continue
         if available[topic] != expected:
             raise ConversionError(f"{name} 类型应为 {expected}，实际为 {available[topic]}")
     cameras = [topic for topic in CAMERA_TOPICS if topic in available]
@@ -118,7 +122,8 @@ def _read_episode(bag: Path, spool: Any) -> dict[str, Any]:
     if available[camera_topic] != camera_type:
         raise ConversionError(f"相机类型应为 {camera_type}，实际为 {available[camera_topic]}")
 
-    by_topic = {spec[0]: (name, spec[2]) for name, spec in TOPICS.items()}
+    by_topic = {spec[0]: (name, spec[2]) for name, spec in TOPICS.items()
+                if spec[0] in available}
     by_topic[camera_topic] = ("camera", camera_class)
     series: dict[str, list[tuple[int, Any]]] = defaultdict(list)
     camera_records: list[CameraRecord] = []
@@ -351,7 +356,11 @@ def _probe_frames(path: Path, *, threads: int | None = None) -> list[dict[str, A
     )
     if result.returncode != 0:
         raise ConversionError(f"ffprobe 解码失败: {result.stderr.strip()}")
-    return json.loads(result.stdout).get("frames", [])
+    # Some Jetson FFmpeg builds print an EGL diagnostic before JSON on stdout.
+    json_start = result.stdout.find("{")
+    if json_start < 0:
+        raise ConversionError("ffprobe 未返回 JSON 帧信息")
+    return json.loads(result.stdout[json_start:]).get("frames", [])
 
 
 def _run_ffmpeg(command: list[str], payloads: Any = None) -> None:
@@ -634,12 +643,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=_positive_int,
                         default=min(4, os.cpu_count() or 1),
                         help="并行转换进程数，默认最多 4；设为 1 顺序转换")
+    parser.add_argument("--format", choices=("hdf5", "umi"), default="hdf5",
+                        help="hdf5 为每轮 HDF5/视频；umi 为合并的 Link7 训练 Zarr")
+    parser.add_argument("--urdf", type=Path,
+                        help="umi 格式必需：训练使用的 RM75 URDF")
     arguments = parser.parse_args(argv)
     source = arguments.input.expanduser().resolve()
     output = arguments.output.expanduser().resolve()
     episodes = discover_episodes(source)
     if output == source or output in episodes:
         parser.error("输出目录不能与输入 episode 或父目录相同")
+    if arguments.format == "umi":
+        if arguments.urdf is None:
+            parser.error("--format umi 必须指定 --urdf")
+        if output.suffix != ".zarr":
+            parser.error("--format umi 的 --output 必须是新的 .zarr 目录")
+        from convert_hardware_mcap_umi import convert_umi_episodes
+
+        return convert_umi_episodes(
+            episodes, output, arguments.urdf.expanduser().resolve(),
+            min(arguments.workers, len(episodes)),
+        )
     workers = min(arguments.workers, len(episodes))
     print(f"并发数: {workers}", flush=True)
     failed = 0
