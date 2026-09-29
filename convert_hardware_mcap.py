@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-"""Convert hardware.launch.py MCAP recordings to RM75 episodes or UMI Zarr.
+"""将 hardware.launch.py 录制的 MCAP 转换为 RM75 episode 或 UMI Zarr。
 
-All output timestamps use the recorder's rosbag receive clock.  Header stamps
-are retained as diagnostics only because the recorder and Tracker may run on
-different, unsynchronised hosts.
+依赖 ROS 2 消息类型和 rosbag2_py 读取录制，使用 OpenCV、ffmpeg/ffprobe 处理图像；
+HDF5 输出使用 h5py，UMI 输出由 convert_hardware_mcap_umi 处理。输出时间戳统一采用
+rosbag 接收时钟；消息头时间戳仅用于时间差诊断和视频帧率估计，不用于跨流对齐，
+因为录制器与 Tracker 可能位于未同步的主机。
+
+启动：python convert_hardware_mcap.py --input PATH --output PATH
+      [--workers N] [--format {hdf5,umi}] [--urdf PATH]
+启动参数：
+    --input PATH：必填，episode_N 目录或包含多个 episode_N 的目录。
+    --output PATH：必填，输出 episode 的父目录；UMI 格式须为新的 .zarr 目录。
+    --workers N：可选，正整数进程数，默认 min(4, CPU 数量)，每轮最多使用 episode 数量。
+    --format {hdf5,umi}：可选，默认 hdf5。
+    --urdf PATH：选择 umi 时必填，训练使用的 RM75 URDF；hdf5 路径不使用。
+输入：各 episode_N/bag 中的 MCAP、可选的 recording.json；UMI 格式还读取 URDF。
+输出：hdf5 格式写入每轮的 gripper.mp4、proprio.hdf5、conversion.json；
+      umi 格式写入合并的 Zarr；进度和错误摘要写入标准输出。
 """
 
 from __future__ import annotations
@@ -35,7 +48,9 @@ from sensor_msgs.msg import CompressedImage, Image, JointState
 from std_msgs.msg import Float32
 
 
+# RM75 的七个关节名称，状态与指令均按此顺序排列。
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 8))
+# 必需数据流的 ROS 话题、消息类型和反序列化类；UMI 路径可不要求 Tracker。
 TOPICS = {
     "joint_state": ("/joint_states", "sensor_msgs/msg/JointState", JointState),
     "joint_action": ("/rm_driver/movej_canfd_cmd", "rm_ros_interfaces/msg/Jointpos", Jointpos),
@@ -43,6 +58,7 @@ TOPICS = {
     "gripper_action": ("/motion_control/gripper_command", "std_msgs/msg/Float32", Float32),
     "tracker": ("/vive_tracker/odom", "nav_msgs/msg/Odometry", Odometry),
 }
+# 支持的相机话题及编码模式；每个输入 bag 必须恰好包含其中一个。
 CAMERA_TOPICS = {
     "/wrist_camera/image_raw": ("raw", "sensor_msgs/msg/Image", Image),
     "/wrist_camera/image_raw/compressed": (
@@ -52,16 +68,22 @@ CAMERA_TOPICS = {
         "h264", "ffmpeg_image_transport_msgs/msg/FFMPEGPacket", FFMPEGPacket
     ),
 }
+# 写入 HDF5 根属性的数据格式版本。
 FORMAT_VERSION = "rm75-single-arm-v1"
 
 
 class ConversionError(ValueError):
-    """The source episode cannot produce a complete, aligned output."""
+    """输入 episode 无法生成完整且时间对齐的输出时抛出。"""
 
 
 @dataclass(frozen=True)
 class CameraRecord:
-    """One image payload stored in a seekable spool and its original timing."""
+    """相机帧在临时缓存中的位置及原始时间信息。
+
+    bag_ns 和 header_ns 分别是接收与消息头时间戳，单位 ns；offset、size 是
+    spool 内的字节位置和长度。width、height、step 是像素尺寸和行跨度；
+    encoding 保留源编码，keyframe 和 pts 仅用于 H.264 帧。
+    """
 
     bag_ns: int
     header_ns: int
@@ -76,15 +98,38 @@ class CameraRecord:
 
 
 def _stamp_ns(stamp: Any) -> int:
+    """将 ROS 时间戳转换为纳秒。
+
+    Args:
+        stamp: 含 sec 和 nanosec 字段的 ROS 时间戳。
+
+    Returns:
+        整数纳秒时间戳。
+    """
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
 def _seconds(timestamps_ns: list[int]) -> np.ndarray:
+    """将纳秒时间戳序列转换为 float64 秒数组。
+
+    Args:
+        timestamps_ns: 纳秒时间戳列表。
+
+    Returns:
+        与输入等长的一维秒数组。
+    """
     return np.asarray(timestamps_ns, dtype=np.float64) / 1_000_000_000.0
 
 
 def _diagnostic(values_ns: list[int]) -> dict[str, float | int]:
-    """Summarise bag minus source time, without claiming clock calibration."""
+    """汇总接收时间与源时间之差，不将其视为时钟标定结果。
+
+    Args:
+        values_ns: 接收时间减源时间的纳秒差列表。
+
+    Returns:
+        样本数及毫秒单位的最小值、中位数、95 百分位和最大值；空列表仅含 count。
+    """
     if not values_ns:
         return {"count": 0}
     milliseconds = np.asarray(values_ns, dtype=np.float64) / 1_000_000.0
@@ -99,6 +144,19 @@ def _diagnostic(values_ns: list[int]) -> dict[str, float | int]:
 
 def _read_episode(bag: Path, spool: Any, *,
                   require_tracker: bool = True) -> dict[str, Any]:
+    """读取 MCAP 中的有效数据流，并将相机载荷写入可定位临时缓存。
+
+    Args:
+        bag: episode 下的 bag 目录路径。
+        spool: 支持 tell、write 的二进制临时文件，写入相机载荷后保留供后续读取。
+        require_tracker: 是否要求 Tracker 话题存在，默认要求。
+
+    Returns:
+        按接收时间排序的非图像序列、相机帧索引、计数及时间差诊断信息。
+
+    Raises:
+        ConversionError: 必需话题缺失、类型不符或相机话题数量不为一。
+    """
     reader = rosbag2_py.SequentialReader()
     reader.open(
         rosbag2_py.StorageOptions(uri=str(bag), storage_id="mcap"),
@@ -125,10 +183,12 @@ def _read_episode(bag: Path, spool: Any, *,
     by_topic = {spec[0]: (name, spec[2]) for name, spec in TOPICS.items()
                 if spec[0] in available}
     by_topic[camera_topic] = ("camera", camera_class)
+    # series 元素为（rosbag 接收时间 ns，解码值）；相机载荷单独写入 spool。
     series: dict[str, list[tuple[int, Any]]] = defaultdict(list)
     camera_records: list[CameraRecord] = []
     counts: Counter[str] = Counter()
     invalid: Counter[str] = Counter()
+    # 仅用于诊断的接收时间减消息头时间；跨主机时钟未标定。
     deltas: dict[str, list[int]] = defaultdict(list)
     pts_deltas: list[int] = []
     pts_mismatch = 0
@@ -254,6 +314,18 @@ def _read_episode(bag: Path, spool: Any, *,
 
 
 def _select(data: dict[str, Any]) -> dict[str, Any]:
+    """按关节指令时间窗选取 HDF5 数据并检查各数据流的共同覆盖区间。
+
+    Args:
+        data: _read_episode 返回的已排序录制数据。
+
+    Returns:
+        裁剪后的序列、夹爪状态与最近先前指令的配对、相机帧及时间窗，
+        时间戳单位为 ns。
+
+    Raises:
+        ConversionError: 样本不足、缺少 H.264 关键帧、相机尺寸变化或无共同时间区间。
+    """
     series = data["series"]
     for name in TOPICS:
         if not series[name]:
@@ -271,8 +343,7 @@ def _select(data: dict[str, Any]) -> dict[str, Any]:
         if not selected[name]:
             raise ConversionError(f"指令时间区间内缺少 {name} 样本")
 
-    # A command just before the action window remains the active command at
-    # the first in-window state sample.  Do not discard it while cropping.
+    # 时间窗前的最后一条夹爪指令仍可作用于窗内第一个夹爪状态，配对时保留它。
     commands = series["gripper_action"]
     command_times = [timestamp for timestamp, _ in commands]
     gripper_pairs = []
@@ -319,13 +390,23 @@ def _select(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fps(records: list[CameraRecord]) -> float:
+    """根据相机首末帧时间跨度估计视频恒定帧率。
+
+    Args:
+        records: 按接收时间排序的相机帧；消息头时间全为正时优先使用消息头时间。
+
+    Returns:
+        估计帧率，单位帧/秒；样本不足时返回 30.0。
+
+    Raises:
+        ConversionError: 可估计的帧率超出 1 至 120 帧/秒。
+    """
     source = [record.header_ns for record in records]
     if not all(timestamp > 0 for timestamp in source):
         source = [record.bag_ns for record in records]
     if len(source) < 2 or source[-1] <= source[0]:
         return 30.0
-    # Capture jitter can bias the median interval by a whole FPS.  The full
-    # span gives an MP4 duration close to the timestamped source duration.
+    # 采集抖动可能使相邻帧间隔的中位数偏离一整档帧率；用完整跨度贴近源时长。
     estimated = (len(source) - 1) * 1_000_000_000.0 / (source[-1] - source[0])
     if not 1.0 <= estimated <= 120.0:
         raise ConversionError(f"相机帧率无法估计: {estimated}")
@@ -335,6 +416,18 @@ def _fps(records: list[CameraRecord]) -> float:
 
 
 def _payload(spool: Any, record: CameraRecord) -> bytes:
+    """按相机帧索引读取临时缓存中的完整载荷。
+
+    Args:
+        spool: 支持 seek、read 的二进制临时文件；读取会改变文件位置。
+        record: 包含载荷偏移量和长度的相机帧记录。
+
+    Returns:
+        该帧的原始字节。
+
+    Raises:
+        ConversionError: 临时缓存中的载荷长度不足。
+    """
     spool.seek(record.offset)
     payload = spool.read(record.size)
     if len(payload) != record.size:
@@ -343,6 +436,18 @@ def _payload(spool: Any, record: CameraRecord) -> bytes:
 
 
 def _probe_frames(path: Path, *, threads: int | None = None) -> list[dict[str, Any]]:
+    """调用 ffprobe 获取首个视频流的逐帧包位置。
+
+    Args:
+        path: 待检查的视频或 H.264 码流路径。
+        threads: 可选的 ffprobe 线程数；None 表示不传线程参数。
+
+    Returns:
+        ffprobe JSON 中的 frames 列表。
+
+    Raises:
+        ConversionError: ffprobe 失败或标准输出中没有 JSON 对象。
+    """
     command = ["ffprobe", "-v", "error"]
     if threads is not None:
         command.extend(["-threads", str(threads)])
@@ -356,7 +461,7 @@ def _probe_frames(path: Path, *, threads: int | None = None) -> list[dict[str, A
     )
     if result.returncode != 0:
         raise ConversionError(f"ffprobe 解码失败: {result.stderr.strip()}")
-    # Some Jetson FFmpeg builds print an EGL diagnostic before JSON on stdout.
+    # 部分 Jetson FFmpeg 构建会在标准输出的 JSON 前打印 EGL 诊断信息。
     json_start = result.stdout.find("{")
     if json_start < 0:
         raise ConversionError("ffprobe 未返回 JSON 帧信息")
@@ -364,6 +469,17 @@ def _probe_frames(path: Path, *, threads: int | None = None) -> list[dict[str, A
 
 
 def _run_ffmpeg(command: list[str], payloads: Any = None) -> None:
+    """运行 ffmpeg，并可向其标准输入逐块写入视频帧。
+
+    Args:
+        command: 完整的 ffmpeg 命令参数列表，包含输出路径。
+        payloads: 可选的字节块可迭代对象；提供时经标准输入输送。
+
+    Raises:
+        ConversionError: ffmpeg 退出码非零。
+
+    子进程标准输出被丢弃；失败时从标准错误读取详细信息。
+    """
     with tempfile.TemporaryFile() as error_file:
         process = subprocess.Popen(
             command,
@@ -389,6 +505,19 @@ def _run_ffmpeg(command: list[str], payloads: Any = None) -> None:
 
 
 def _decode_frame(spool: Any, record: CameraRecord, mode: str) -> np.ndarray:
+    """从临时缓存解码 JPEG 或原始相机帧为 BGR 图像。
+
+    Args:
+        spool: 存放相机载荷的可定位二进制临时文件。
+        record: 帧偏移、尺寸、行跨度和编码信息。
+        mode: 相机模式，调用方在此传入 jpeg 或 raw。
+
+    Returns:
+        高 × 宽 × 3 的 uint8 BGR 数组。
+
+    Raises:
+        ConversionError: 载荷截断或 JPEG 无法解码。
+    """
     payload = _payload(spool, record)
     if mode == "jpeg":
         image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -410,6 +539,19 @@ def _decode_frame(spool: Any, record: CameraRecord, mode: str) -> np.ndarray:
 
 def _write_video(path: Path, records: list[CameraRecord], mode: str,
                  spool: Any, fps: float, *, threads: int | None = None) -> None:
+    """把相机帧写为 MP4，并校验输出帧数与输入记录数一致。
+
+    Args:
+        path: 目标 MP4 路径；H.264 模式还会暂时创建同名 .h264 文件。
+        records: 按时间排序的相机帧，H.264 模式需从关键帧开始。
+        mode: h264、jpeg 或 raw 相机模式。
+        spool: 存放相机载荷的可定位二进制临时文件。
+        fps: 写入视频的恒定帧率，单位帧/秒。
+        threads: 可选的 ffmpeg/ffprobe 线程数。
+
+    Raises:
+        ConversionError: 帧无法解码、H.264 包映射不一致、工具失败或输出帧数不符。
+    """
     ffmpeg_command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     if threads is not None:
         ffmpeg_command.extend(["-filter_threads", "1"])
@@ -439,6 +581,14 @@ def _write_video(path: Path, records: list[CameraRecord], mode: str,
         height, width = first.shape[:2]
 
         def frames():
+            """依次产出尺寸一致的 BGR 帧字节，供 ffmpeg 标准输入读取。
+
+            Yields:
+                每帧按行排列的 BGR 原始字节。
+
+            Raises:
+                ConversionError: 后续帧尺寸变化或无法解码。
+            """
             yield first.tobytes()
             for record in records[1:]:
                 image = _decode_frame(spool, record, mode)
@@ -463,6 +613,15 @@ def _write_video(path: Path, records: list[CameraRecord], mode: str,
 
 
 def _write_hdf5(path: Path, selected: dict[str, Any]) -> None:
+    """将裁剪后的本体感知数据和相机时间戳写入 HDF5。
+
+    Args:
+        path: 目标 proprio.hdf5 路径，以写入模式创建。
+        selected: _select 返回的序列、夹爪配对和相机记录。
+
+    关节数组每行为七个关节的值，Tracker 位置每行为三维 xyz；夹爪值范围为
+    0 至 1。时间戳均为 rosbag 接收时间，存储单位为秒；图像内容在独立 MP4 中。
+    """
     import h5py
 
     series = selected["series"]
@@ -479,6 +638,15 @@ def _write_hdf5(path: Path, selected: dict[str, Any]) -> None:
 
         def timed(parent: Any, name: str, values: np.ndarray,
                   timestamps: list[int], value_name: str) -> None:
+            """在父组下写入值数组和对应的秒级时间戳。
+
+            Args:
+                parent: 目标 HDF5 父组。
+                name: 新建子组的名称。
+                values: 待写入的数据数组。
+                timestamps: 与 values 行对应的接收时间戳，单位 ns。
+                value_name: 值数据集的名称。
+            """
             group = parent.create_group(name)
             group.create_dataset(value_name, data=values)
             group.create_dataset("timestamp", data=_seconds(timestamps))
@@ -509,7 +677,17 @@ def _write_hdf5(path: Path, selected: dict[str, Any]) -> None:
 
 
 def discover_episodes(source: Path) -> list[Path]:
-    """Accept one episode or a directory containing numbered episodes."""
+    """查找单个 episode 或目录下带有 bag 的编号 episode。
+
+    Args:
+        source: episode_N 目录或其父目录。
+
+    Returns:
+        按 episode 编号升序排列的路径列表。
+
+    Raises:
+        ConversionError: 没有找到符合 episode_N/bag/metadata.yaml 结构的目录。
+    """
     if (source / "bag" / "metadata.yaml").is_file():
         episodes = [source]
     elif source.is_dir():
@@ -526,7 +704,22 @@ def discover_episodes(source: Path) -> list[Path]:
 
 def convert_episode(source: Path, output_dir: Path, *,
                     video_threads: int | None = None) -> dict[str, Any]:
-    """Convert one episode into a staging directory, then publish it."""
+    """在临时目录中转换单轮录制，完成后发布到输出目录。
+
+    Args:
+        source: 含 bag 及可选 recording.json 的 episode_N 目录。
+        output_dir: 输出 episode 的父目录。
+        video_threads: 可选的 ffmpeg/ffprobe 线程数。
+
+    Returns:
+        conversion.json 中写入的转换统计和时间诊断字典。
+
+    Raises:
+        FileExistsError: 同名目标 episode 已存在。
+        ConversionError: 输入数据不完整、无法对齐或视频转换失败。
+
+    成功时输出 gripper.mp4、proprio.hdf5 和 conversion.json；失败时清理临时目录。
+    """
     destination = output_dir / source.name
     if destination.exists():
         raise FileExistsError(f"目标已存在，拒绝覆盖: {destination}")
@@ -542,6 +735,7 @@ def convert_episode(source: Path, output_dir: Path, *,
                          data["camera_mode"], spool, fps, threads=video_threads)
             _write_hdf5(stage / "proprio.hdf5", selected)
 
+        # 可选元数据只用于提取 recording_id，不参与时间对齐。
         recording_path = source / "recording.json"
         recording = (json.loads(recording_path.read_text(encoding="utf-8"))
                      if recording_path.is_file() else {})
@@ -591,7 +785,17 @@ def convert_episode(source: Path, output_dir: Path, *,
 
 
 def _positive_int(value: str) -> int:
-    """Parse a positive process count for the command line."""
+    """解析命令行中的正整数进程数。
+
+    Args:
+        value: --workers 的字符串值。
+
+    Returns:
+        大于零的整数。
+
+    Raises:
+        argparse.ArgumentTypeError: 无法解析为正整数。
+    """
     try:
         number = int(value)
     except ValueError as error:
@@ -602,13 +806,24 @@ def _positive_int(value: str) -> int:
 
 
 def _init_worker() -> None:
-    """Keep OpenCV from creating a full CPU-sized thread pool per process."""
+    """将每个转换进程的 OpenCV 内部线程数限制为一。"""
     cv2.setNumThreads(1)
 
 
 def convert_episodes(episodes: list[Path], output_dir: Path,
                      workers: int):
-    """Yield completed conversions, with errors isolated to each episode."""
+    """按完成顺序逐轮转换 episode，并分别报告成功或失败。
+
+    Args:
+        episodes: 待转换的 episode 目录列表。
+        output_dir: 输出 episode 的父目录。
+        workers: 并行进程数；为 1 时在当前进程中顺序转换。
+
+    Yields:
+        (episode 路径、成功时的报告或 None、失败时的异常或 None) 三元组。
+
+    多进程模式使用 spawn 上下文，并按进程数分配视频处理线程。
+    """
     if workers == 1:
         for episode in episodes:
             try:
@@ -635,6 +850,19 @@ def convert_episodes(episodes: list[Path], output_dir: Path,
 
 
 def main(argv: list[str] | None = None) -> int:
+    """解析命令行并执行 HDF5 或 UMI 格式转换。
+
+    Args:
+        argv: 可选的命令行参数列表；None 时读取进程的命令行参数。
+
+    Returns:
+        全部成功时为 0，有 episode 转换失败时为 1；UMI 路径返回其转换器状态。
+
+    Raises:
+        ConversionError: 未找到输入 episode。
+
+    参数格式或输入输出路径冲突时由 argparse 终止；HDF5 路径逐轮输出进度摘要。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path,
                         help="episode_N 目录或包含多个 episode_N 的目录")
