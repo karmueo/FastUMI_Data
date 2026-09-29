@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# 使用全部 RM75 末端数据从头训练 120 轮；默认双卡 BF16，不继承验证实验模型。
+# 训练 RM75 末端策略；可选从已有 checkpoint 开始独立微调。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 NUM_PROCESSES="${NUM_PROCESSES:-2}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-32}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+NUM_EPOCHS="${NUM_EPOCHS:-120}"
+LEARNING_RATE="${LEARNING_RATE:-3.0e-4}"
+FINETUNE_CKPT="${FINETUNE_CKPT:-}"
 
-for name in NUM_PROCESSES TRAIN_BATCH_SIZE VAL_BATCH_SIZE; do
+for name in NUM_PROCESSES TRAIN_BATCH_SIZE VAL_BATCH_SIZE NUM_EPOCHS; do
   value="${!name}"
   if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
     echo "$name must be a positive integer, got: $value" >&2
@@ -25,8 +28,15 @@ case "$MIXED_PRECISION" in
     ;;
 esac
 
-DATASET="$(realpath ../../dataset/vr_target_umi/target.zarr)"
-RUN_ROOT="$(realpath ../../dataset/vr_target_umi)/runs"
+DATASET="$(realpath "${DATASET_PATH:-../../dataset/h5dy_data/rm75_umi/jingbao_merge.zarr}")"
+if [[ -n "$FINETUNE_CKPT" ]]; then
+  if [[ ! -f "$FINETUNE_CKPT" ]]; then
+    echo "FINETUNE_CKPT must name an existing checkpoint file: $FINETUNE_CKPT" >&2
+    exit 2
+  fi
+  FINETUNE_CKPT="$(realpath "$FINETUNE_CKPT")"
+fi
+RUN_ROOT="$(realpath ../../dataset/h5dy_data/rm75_umi)/runs"
 RUN_DIR="${1:-$RUN_ROOT/full_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$(dirname -- "$RUN_DIR")"
 mkdir "$RUN_DIR"
@@ -47,6 +57,10 @@ printf '  train batch per GPU: %s\n' "$TRAIN_BATCH_SIZE"
 printf '  validation batch per GPU: %s\n' "$VAL_BATCH_SIZE"
 printf '  global train batch: %s\n' "$GLOBAL_BATCH_SIZE"
 printf '  mixed precision: %s\n' "$MIXED_PRECISION"
+printf '  dataset: %s\n' "$DATASET"
+printf '  epochs: %s\n' "$NUM_EPOCHS"
+printf '  learning rate: %s\n' "$LEARNING_RATE"
+printf '  fine-tune checkpoint: %s\n' "${FINETUNE_CKPT:-none}"
 printf '  visible GPUs: %s\n' "${CUDA_VISIBLE_DEVICES:-all}"
 printf '  Hugging Face Hub cache: %s\n' "$RESOLVED_HF_HUB_CACHE"
 printf '  run directory: %s\n' "$RUN_DIR"
@@ -62,13 +76,22 @@ if ((NUM_PROCESSES > 1)); then
   ACCELERATE_ARGS+=(--multi_gpu)
 fi
 
+TRAIN_ARGS=(
+  --config-name=train_diffusion_unet_timm_vr_umi_workspace
+  "task.dataset_path=$DATASET"
+  "hydra.run.dir=$RUN_DIR"
+  "training.num_epochs=$NUM_EPOCHS"
+  training.resume=false
+  "optimizer.lr=$LEARNING_RATE"
+  "dataloader.batch_size=$TRAIN_BATCH_SIZE"
+  "val_dataloader.batch_size=$VAL_BATCH_SIZE"
+)
+if [[ -n "$FINETUNE_CKPT" ]]; then
+  TRAIN_ARGS+=("training.finetune_ckpt_path=$FINETUNE_CKPT")
+fi
+
 exec env -u PYTHONPATH \
   OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
   HF_HUB_OFFLINE=1 WANDB_MODE=offline WANDB_DIR="$RUN_DIR" \
   "$SCRIPT_DIR/.venv/bin/accelerate" "${ACCELERATE_ARGS[@]}" train.py \
-  --config-name=train_diffusion_unet_timm_vr_umi_workspace \
-  "task.dataset_path=$DATASET" \
-  "hydra.run.dir=$RUN_DIR" \
-  training.num_epochs=120 training.resume=false \
-  "dataloader.batch_size=$TRAIN_BATCH_SIZE" \
-  "val_dataloader.batch_size=$VAL_BATCH_SIZE"
+  "${TRAIN_ARGS[@]}"

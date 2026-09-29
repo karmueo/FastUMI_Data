@@ -2,6 +2,7 @@ __pycache__/
 .pytest_cache/
 .vscode/
 .worktrees/
+.venv/
 *.pyc
 
 # ROS 2 和 Python 构建产物。

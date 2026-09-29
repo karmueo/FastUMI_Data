@@ -1,14 +1,11 @@
 import os
 import json
-import torch
 import cv2
 import h5py
 import argparse
 from tqdm import tqdm
 from time import sleep
 import numpy as np
-import pyrealsense2 as rs
-import apriltag
 import rospy
 
 from geometry_msgs.msg import PoseStamped
@@ -22,28 +19,20 @@ from collections import deque
 from datetime import datetime
 import pandas as pd
 
-# Load configuration from config.json
-with open('config/config.json', 'r') as f:
+# Parse arguments before loading the selected configuration.
+parser = argparse.ArgumentParser()
+parser.add_argument('--config', default='config/config.json')
+parser.add_argument('--task', type=str, default="test3")  # open_lid, open_fridge, open_drawer, pick_place_pot
+parser.add_argument('--num_episodes', type=int, default=2)
+args = parser.parse_args()
+
+with open(args.config, 'r') as f:
     config = json.load(f)
-
-# Set environment variables
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = "1"
-
-# Set device
-if torch.cuda.is_available():
-    device = 'cuda'
-else:
-    device = 'cpu'
 
 ROBOT_TYPE = config['device_settings']["robot_type"]
 TASK_CONFIG = config['task_config']
 
 
-# Parse command line arguments
-parser = argparse.ArgumentParser()
-parser.add_argument('--task', type=str, default="test3")  # open_lid, open_fridge, open_drawer, pick_place_pot
-parser.add_argument('--num_episodes', type=int, default=2)
-args = parser.parse_args()
 task = args.task
 num_episodes = args.num_episodes
 

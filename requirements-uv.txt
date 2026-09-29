@@ -1,0 +1,9 @@
+# Root scripts and datatool share the constrained offline data dependencies.
+-r requirements-data.txt
+
+# Direct dependencies not covered by requirements-data.txt.
+ikpy
+matplotlib
+numba
+pandas
+tqdm

@@ -6,7 +6,7 @@ name: train_diffusion_unet_timm_vr_umi
 exp_name: vr_link7_pose
 task:
   name: vr_umi
-  dataset_path: ../../dataset/vr_target_umi/target.zarr
+  dataset_path: ../../dataset/h5dy_data/rm75_umi/jingbao_merge.zarr
   action_layout: pose10
   env_runner: null
   # 数据已经按 30 Hz 同步，禁用额外的传感器延迟平移。

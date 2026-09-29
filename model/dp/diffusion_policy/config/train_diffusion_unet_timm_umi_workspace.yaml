@@ -269,6 +269,8 @@ training:
   resume_: False
   # 恢复训练时必须通过命令行显式指定 checkpoint 路径。
   ckpt_path: null
+  # 独立微调时只加载策略权重；与 resume 互斥，训练进度从零开始。
+  finetune_ckpt_path: null
 
 # Weights & Biases 日志配置。
 logging:

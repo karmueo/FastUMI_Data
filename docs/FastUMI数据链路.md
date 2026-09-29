@@ -118,21 +118,13 @@ fi
 保留图像转换、鱼眼校正、时间戳、截图和 publisher 的 GTest；导入历史 C++ 代码的
 版权、cpplint 与 uncrustify 格式检查已排除，避免与功能无关的大规模重排。
 
-HDF5 到 Zarr 的离线导出可使用项目根目录下独立的 uv 虚拟环境。以下离线导出命令
-均在仓库根目录执行。该环境仅供离线导出使用，ROS2 MCAP 转换仍使用系统 Python 和
-Jazzy 依赖。仓库提供受约束的 Zarr v2 依赖：
-
-如已按旧步骤创建 `.venv`，请先执行以下命令重建环境，再继续执行后续激活和依赖
-安装命令。`--clear` 会清空 `.venv` 中已安装的包：
+根目录脚本和 `datatool` 共用项目根目录下的 uv 虚拟环境。以下命令均在仓库根目录
+执行；ROS2 MCAP 转换仍使用系统 Python 和 Jazzy 依赖。依赖清单复用受约束的
+Zarr v2 依赖：
 
 ```bash
-uv venv --clear --python 3.9 .venv
-```
-
-```bash
-uv venv --python 3.9 .venv
-source .venv/bin/activate
-uv pip install -r requirements-data.txt
+uv venv --python 3.10 .venv
+uv pip install --python .venv/bin/python -r requirements-uv.txt
 ```
 
 ROS2 MCAP 转换需要 `rclpy`、`rosbag2_py` 和消息类型支持，建议留在 ROS2
@@ -748,12 +740,12 @@ HDF5 主结构：
 本步骤使用仓库根目录的独立离线脚本：
 
 ```bash
-python data_processing_tcp_to_dp.py [参数]
+.venv/bin/python data_processing_tcp_to_dp.py [参数]
 ```
 
 | 层级 | 名称 | 位置或调用方式 | 作用 |
 | --- | --- | --- | --- |
-| Python 脚本 | `data_processing_tcp_to_dp.py` | 在仓库根目录执行 `python data_processing_tcp_to_dp.py ...` | 解析导出参数，发现 HDF5 episode，并把全部 episode 增量导出到一个 Diffusion Policy Zarr。 |
+| Python 脚本 | `data_processing_tcp_to_dp.py` | 在仓库根目录执行 `.venv/bin/python data_processing_tcp_to_dp.py ...` | 解析导出参数，发现 HDF5 episode，并把全部 episode 增量导出到一个 Diffusion Policy Zarr。 |
 | 输入发现函数 | `discover_hdf5_files()` | 同一脚本 | 接受单个 `.hdf5`/`.h5` 文件，或递归查找目录中的 `episode_*.hdf5`，再按 session 路径和 episode 编号稳定排序。 |
 | 导出函数 | `export_zarr()` | 同一脚本 | 分 episode、分图像批次写入 Zarr，生成数值状态、轴角旋转、RGB 图像和 `episode_ends`；完成后原子替换正式目标。 |
 
@@ -779,8 +771,7 @@ SciPy 和 `imagecodecs`。脚本启动时总会从相对路径 `config/config.js
 导出一个任务下的全部 session：
 
 ```bash
-source .venv/bin/activate
-python data_processing_tcp_to_dp.py \
+.venv/bin/python data_processing_tcp_to_dp.py \
   --input dataset/pick_place \
   --output dataset/pick_place/pick_place_dp.zarr \
   --resolution 224,224 \
@@ -794,7 +785,7 @@ python data_processing_tcp_to_dp.py \
 SESSION_ROOT=/home/scl/datasets/ros2bag/pick_place/20260731T052137Z
 CALIBRATION_ID=dual_aruco_tcp_20260807_160129
 DERIVED_DIR=${SESSION_ROOT}/derived/${CALIBRATION_ID}
-/home/scl/work/UMI/FastUMI_Data/.venv/bin/python data_processing_tcp_to_dp.py \
+.venv/bin/python data_processing_tcp_to_dp.py \
   --input "$DERIVED_DIR/episodes" \
   --output "$DERIVED_DIR/pick_place_dp.zarr" \
   --resolution 224,224 --force
@@ -895,8 +886,9 @@ MoveIt2/仿真、低速空载和低速任务测试。
 ## 8. 验收检查
 
 ```bash
-python -m compileall \
-  data_processing_tcp_to_dp.py \
+.venv/bin/python -m compileall \
+  data_processing_tcp_to_dp.py
+python3 -m compileall \
   ros2_ws/src/fastumi_data \
   ros2_ws/src/fastumi_rm75
 

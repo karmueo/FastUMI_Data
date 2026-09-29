@@ -20,6 +20,7 @@ import random
 import shutil
 from typing import Optional
 
+import dill
 import hydra
 import numpy as np
 import torch
@@ -217,6 +218,37 @@ def resumed_training_position(epoch, global_step, next_epoch=None, next_global_s
     return next_epoch, next_global_step
 
 
+def _check_finetune_shape_meta(source_cfg, target_cfg):
+    """检查源模型与当前任务的观测键、观测形状和动作形状。"""
+    source_meta = OmegaConf.select(source_cfg, "shape_meta")
+    target_meta = OmegaConf.select(target_cfg, "shape_meta")
+    if source_meta is None or target_meta is None:
+        raise ValueError("Fine-tuning requires shape_meta in both checkpoint and training config")
+
+    source_obs = source_meta.get("obs", {})
+    target_obs = target_meta.get("obs", {})
+    if set(source_obs) != set(target_obs):
+        raise ValueError(
+            "Fine-tuning observation keys do not match: "
+            f"checkpoint={sorted(source_obs)}, training={sorted(target_obs)}"
+        )
+    for key in source_obs:
+        source_shape = tuple(source_obs[key].get("shape", ()))
+        target_shape = tuple(target_obs[key].get("shape", ()))
+        if source_shape != target_shape:
+            raise ValueError(
+                f"Fine-tuning observation shape for {key} does not match: "
+                f"checkpoint={source_shape}, training={target_shape}"
+            )
+    source_action = tuple(source_meta.get("action", {}).get("shape", ()))
+    target_action = tuple(target_meta.get("action", {}).get("shape", ()))
+    if source_action != target_action:
+        raise ValueError(
+            "Fine-tuning action shape does not match: "
+            f"checkpoint={source_action}, training={target_action}"
+        )
+
+
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = ["global_step", "epoch", "best_loss", "checkpoint_next_epoch",
                     "checkpoint_next_global_step"]
@@ -224,6 +256,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
+
+        finetune_ckpt_path = cfg.training.get("finetune_ckpt_path")
+        if cfg.training.resume and finetune_ckpt_path:
+            raise ValueError("training.resume and training.finetune_ckpt_path are mutually exclusive")
+        if finetune_ckpt_path and not pathlib.Path(finetune_ckpt_path).is_file():
+            raise FileNotFoundError(f"Fine-tuning checkpoint does not exist: {finetune_ckpt_path}")
 
         # set seed
         seed = cfg.training.seed
@@ -236,8 +274,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             torch.set_float32_matmul_precision("high")
             torch.backends.cudnn.allow_tf32 = True
 
-        # configure model
-        self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(cfg.policy)
+        # 完整 checkpoint 将覆盖全部策略权重；跳过不必要的 Hub 权重下载。
+        policy_cfg = copy.deepcopy(cfg.policy)
+        obs_encoder_target = OmegaConf.select(policy_cfg, "obs_encoder._target_")
+        if (cfg.training.resume or finetune_ckpt_path) and obs_encoder_target == (
+                "diffusion_policy.model.vision.timm_obs_encoder.TimmObsEncoder"):
+            OmegaConf.update(policy_cfg, "obs_encoder.load_pretrained_weights", False, force_add=True)
+        self.model: DiffusionUnetImagePolicy = hydra.utils.instantiate(policy_cfg)
 
         self.ema_model: DiffusionUnetImagePolicy = None
         if cfg.training.use_ema:
@@ -273,12 +316,42 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         self.checkpoint_next_epoch = None
         self.checkpoint_next_global_step = None
 
-        # do not save optimizer if resume=False
-        if not cfg.training.resume and not cfg.training.get("save_optimizer", False):
+        # 独立微调保存新优化器，供微调任务中断后继续训练。
+        if (not cfg.training.resume and not cfg.training.get("finetune_ckpt_path")
+                and not cfg.training.get("save_optimizer", False)):
             self.exclude_keys = ["optimizer"]
+
+    def load_finetune_checkpoint(self, path):
+        """仅导入兼容策略权重，保留本次训练配置和新建的优化器。"""
+        checkpoint_path = pathlib.Path(path)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Fine-tuning checkpoint does not exist: {checkpoint_path}")
+
+        payload = torch.load(checkpoint_path, map_location="cpu", pickle_module=dill)
+        source_cfg = payload.get("cfg")
+        if source_cfg is None:
+            raise ValueError(f"Fine-tuning checkpoint has no training config: {checkpoint_path}")
+        _check_finetune_shape_meta(source_cfg, self.cfg)
+
+        state_dicts = payload.get("state_dicts", {})
+        key = "ema_model" if state_dicts.get("ema_model") is not None else "model"
+        weights = state_dicts.get(key)
+        if weights is None:
+            raise ValueError(f"Fine-tuning checkpoint has no model weights: {checkpoint_path}")
+        try:
+            self.model.load_state_dict(weights, strict=True)
+            if self.ema_model is not None:
+                self.ema_model.load_state_dict(weights, strict=True)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Fine-tuning checkpoint policy is incompatible with current config: {exc}"
+            ) from exc
+        return key
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
+
+        finetune_ckpt_path = cfg.training.get("finetune_ckpt_path")
 
         accelerator = Accelerator(log_with="wandb")
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
@@ -289,7 +362,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             init_kwargs={"wandb": wandb_cfg},
         )
 
-        # resume training
+        # Continue a run with its full training state, or start a new run from policy weights.
         if cfg.training.resume:
             # try:
             #     lastest_ckpt_path = self.get_checkpoint_path()
@@ -308,6 +381,12 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                 self.epoch, self.global_step, self.checkpoint_next_epoch,
                 self.checkpoint_next_global_step)
             accelerator.print(f"Continuing at epoch {self.epoch}, step {self.global_step}")
+        elif finetune_ckpt_path:
+            source_key = self.load_finetune_checkpoint(finetune_ckpt_path)
+            accelerator.print(
+                f"Fine-tuning from {finetune_ckpt_path} ({source_key}); "
+                "starting at epoch 0, step 0 with a new optimizer"
+            )
 
         # 新关节任务显式启用完整验证，旧任务保持原有默认采样行为。
         validation_enabled = cfg.training.get("enable_validation", False)

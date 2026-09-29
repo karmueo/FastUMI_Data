@@ -9,12 +9,11 @@ FastUMI is a script-oriented Python repository for ROS-based trajectory capture 
 Create the supported Python environment from the repository root:
 
 ```bash
-conda create -n FastUMI python=3.8
-conda activate FastUMI
-pip install -r requirements.txt
+uv venv --python 3.10 .venv
+uv pip install --python .venv/bin/python -r requirements-uv.txt
 ```
 
-Start ROS with `roscore`, then launch the T265 and USB camera nodes using the commands in `README.md`. Record a task with `python data_collection.py --task test --num_episodes 2`. After updating paths and calibration values in `config/config.json`, run `python data_processing_to_tcp.py`, `python data_processing_to_joint.py`, or `python data_processing_tcp_to_dp.py` as needed. Run scripts from the repository root because they use relative paths.
+Start ROS with `roscore`, then launch the T265 and USB camera nodes using the commands in `README.md`. Record a task with `.venv/bin/python data_collection.py --task test --num_episodes 2` on a host with compatible ROS 1 Python modules. After updating paths and calibration values in `config/config.json`, run `.venv/bin/python data_processing_to_tcp.py`, `.venv/bin/python data_processing_to_joint.py`, or `.venv/bin/python data_processing_tcp_to_dp.py` as needed. Run scripts from the repository root because they use relative paths. Use `.venv/bin/python` for scripts in `datatool/` as well.
 
 ## Coding Style & Naming Conventions
 
@@ -22,7 +21,7 @@ Use four-space indentation and PEP 8 conventions. Name modules, functions, and l
 
 ## Testing Guidelines
 
-No automated test suite or coverage threshold is currently configured. Before submitting, run `python -m compileall data_collection.py data_processing_*.py datatool` and exercise changed processing code on a small sample HDF5 file. Hardware-facing changes require a ROS smoke test that confirms expected topics, timestamps, output frame counts, and file structure. Add deterministic tests under `tests/` as `test_<module>.py` when introducing pure transformation logic.
+No coverage threshold is currently configured. Before submitting, run `.venv/bin/python -m compileall data_collection.py data_processing_*.py datatool` and exercise changed processing code on a small sample HDF5 file. Run offline tests with `.venv/bin/python -m pytest`; on hosts with a sourced ROS 2 environment, unset `PYTHONPATH` and disable external pytest plugin autoload for these tests. Hardware-facing changes require a ROS smoke test that confirms expected topics, timestamps, output frame counts, and file structure. Add deterministic tests under `tests/` as `test_<module>.py` when introducing pure transformation logic.
 
 ## Commit & Pull Request Guidelines
 

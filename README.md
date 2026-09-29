@@ -89,11 +89,16 @@ Ensure that ROS is installed on your system, see:
 
 ### 1.2 🔭 Python Environment
 
-Create a Virtual Environment and Install Dependencies
+From the repository root, create the shared uv environment for the top-level
+scripts and `datatool`:
 
-    conda create -n FastUMI python=3.8.0
-    conda activate FastUMI
-    pip install -r requirements.txt
+    uv venv --python 3.10 .venv
+    uv pip install --python .venv/bin/python -r requirements-uv.txt
+
+Run these scripts from the repository root with `.venv/bin/python`, for example
+`.venv/bin/python datatool/data_trajectory.py`. The historical ROS 1 collection
+script also uses this interpreter; ROS 1 Python modules and hardware setup must
+be provided separately on a compatible host.
 
 ### 1.3 🛒 Install the necessary ROS packages
 
@@ -147,7 +152,7 @@ Launch RViz:
 - Update the data saving path in the script.
 - Run the data collection script:
 
-      python data_collection.py
+      .venv/bin/python data_collection.py
 
 Alternatively, use the provided shell script.
 

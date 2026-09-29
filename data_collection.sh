@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Default values
-CONFIG="config.json"
+CONFIG="config/config.json"
 TASK="test"
 NUM_EPISODES=2
 
@@ -11,7 +11,7 @@ function show_help {
     echo "Record robot trajectory data"
     echo ""
     echo "Options:"
-    echo "  -c, --config        Configuration file path (default: config.json)"
+    echo "  -c, --config        Configuration file path (default: config/config.json)"
     echo "  -t, --task          Task name (default: test)"
     echo "  -n, --num-episodes  Number of episodes to record (default: 2)"
     echo "  -h, --help          Show this help message"
@@ -44,14 +44,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Check if config file exists
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT" || exit 1
+
+# Check if config file and project interpreter exist
 if [ ! -f "$CONFIG" ]; then
     echo "Error: Configuration file '$CONFIG' not found!"
     exit 1
 fi
+if [ ! -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+    echo "Error: uv environment missing. Run 'uv venv --python 3.10 .venv' first!" >&2
+    exit 1
+fi
 
 # Execute the Python script
-python3 data_collection.py \
+exec "$PROJECT_ROOT/.venv/bin/python" data_collection.py \
     --config "$CONFIG" \
     --task "$TASK" \
     --num_episodes "$NUM_EPISODES"

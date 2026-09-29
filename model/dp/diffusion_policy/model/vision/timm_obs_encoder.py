@@ -75,6 +75,7 @@ class TimmObsEncoder(ModuleAttrMixin):
         downsample_ratio: int = 32,
         position_encording: str = "learnable",
         consistent_preprocessing: bool = False,
+        load_pretrained_weights: bool = True,
     ):
         """
         Assumes rgb input: B,T,C,H,W
@@ -91,7 +92,7 @@ class TimmObsEncoder(ModuleAttrMixin):
         assert global_pool == ""
         model = timm.create_model(
             model_name=model_name,
-            pretrained=pretrained,
+            pretrained=pretrained and load_pretrained_weights,
             global_pool=global_pool,  # '' means no pooling
             num_classes=0,  # remove classification layer
         )
