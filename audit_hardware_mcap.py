@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""检查 ROS 2 MCAP episode 的相机和关节数据，并交互处理异常目录。"""
+"""审计 ROS 2 MCAP episode 中的相机和关节数据，并交互处理异常目录。
+
+依赖 rosbag2_py 和 ROS 2 消息类型读取 bag；JPEG 使用 OpenCV 验证，
+H.264 使用外部 ffprobe 核对解码帧。导入模块可调用独立扫描和处理函数。
+
+启动：python audit_hardware_mcap.py --input DIR [--camera-gap-ms MS]
+    [--joint-state-gap-ms MS] [--joint-action-gap-ms MS] [--workers N]
+启动参数：
+    -h, --help：可选，显示 argparse 帮助信息并退出。
+    --input DIR：必填，包含 episode_N 目录的现有数据根目录。
+    --camera-gap-ms MS：可选，相机相邻时间戳最大间隔，默认 200.0 ms。
+    --joint-state-gap-ms MS：可选，关节状态相邻时间戳最大间隔，默认 200.0 ms。
+    --joint-action-gap-ms MS：可选，已弃用的兼容参数；不检查关节指令间隔。
+    --workers N：可选，扫描进程数，默认 min(4, CPU 数量)，最少为 1。
+输入：递归发现的 episode_N/recording.json 与 bag 下的 MCAP 和元数据；
+    交互终端上的处理范围、操作及删除确认。
+输出：扫描进度和异常写入标准输出，处理错误写入标准错误；交互选择后可删除
+    异常 episode 或将其移至数据根目录的 .quarantine。
+"""
 
 from __future__ import annotations
 
@@ -27,12 +45,15 @@ from rm_ros_interfaces.msg import Jointpos
 from sensor_msgs.msg import CompressedImage, Image, JointState
 
 
+# 必须存在且位置有限的七个关节名称。
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 8))
+# 话题映射值依次为报告标签、ROS 2 类型名和反序列化消息类。
 JOINT_TOPICS = {
     "/joint_states": ("joint_state", "sensor_msgs/msg/JointState", JointState),
     "/rm_driver/movej_canfd_cmd": (
         "joint_action", "rm_ros_interfaces/msg/Jointpos", Jointpos),
 }
+# 三种允许的相机编码话题；每轮恰好应出现其中一种。
 CAMERA_TOPICS = {
     "/wrist_camera/image_raw": ("raw", "sensor_msgs/msg/Image", Image),
     "/wrist_camera/image_raw/compressed": (
@@ -46,13 +67,14 @@ CAMERA_TOPICS = {
 class Thresholds:
     """相机和关节状态相邻消息的最大允许间隔，单位为毫秒。"""
 
+    # bag 与消息源时间戳共用各自流的相邻间隔阈值。
     camera_ms: float = 200.0
     joint_state_ms: float = 200.0
 
 
 @dataclass(frozen=True)
 class Finding:
-    """单轮采集的一项可定位异常。"""
+    """单轮采集的一项异常，包含机器可识别代码和可读详情。"""
 
     code: str
     detail: str
@@ -60,25 +82,46 @@ class Finding:
 
 @dataclass
 class EpisodeReport:
-    """一轮采集的检查结果和处理前目录快照。"""
+    """一轮采集的路径、异常、消息计数及处理前目录快照。
+
+    snapshot 的每项为相对路径、字节数、纳秒级修改时间，用于处理前复核。
+    """
 
     path: Path
     findings: list[Finding] = field(default_factory=list)
+    # 各被选中话题的实际读取消息数，按 camera、joint_state、joint_action 分类。
     counts: dict[str, int] = field(default_factory=dict)
     snapshot: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def abnormal(self) -> bool:
-        """只要发现一项问题，即需要人工决定如何处理该轮。"""
+        """返回是否存在至少一项异常，需要人工决定如何处理。"""
         return bool(self.findings)
 
 
 def _finding(report: EpisodeReport, code: str, detail: str) -> None:
+    """向检查结果追加一项异常。
+
+    Args:
+        report: 被原地更新的 episode 检查结果。
+        code: 供筛选使用的异常代码。
+        detail: 展示给用户的异常描述。
+    """
     report.findings.append(Finding(code, detail))
 
 
 def _snapshot(path: Path) -> tuple[tuple[str, int, int], ...]:
-    """记录普通文件的大小和修改时间，防止扫描后文件被替换。"""
+    """记录目录内普通文件的相对路径、大小和修改时间。
+
+    Args:
+        path: 待扫描的 episode 目录。
+
+    Returns:
+        按相对路径排序的文件信息元组；符号链接文件不计入。
+
+    Raises:
+        OSError: 遍历目录或读取文件状态失败。
+    """
     return tuple(sorted(
         (item.relative_to(path).as_posix(), item.stat().st_size, item.stat().st_mtime_ns)
         for item in path.rglob("*") if item.is_file() and not item.is_symlink()
@@ -86,7 +129,14 @@ def _snapshot(path: Path) -> tuple[tuple[str, int, int], ...]:
 
 
 def discover_episodes(root: Path) -> list[Path]:
-    """递归寻找编号目录，不进入隐藏目录或 episode 内部。"""
+    """递归寻找编号目录，不进入隐藏目录或 episode 内部。
+
+    Args:
+        root: 数据根目录；遍历时不跟随目录符号链接。
+
+    Returns:
+        按父目录和 episode 编号排序的目录路径列表。
+    """
     episodes = []
     for parent, directories, _ in os.walk(root, followlinks=False):
         visible = []
@@ -102,12 +152,27 @@ def discover_episodes(root: Path) -> list[Path]:
 
 
 def _stamp_ns(stamp: object) -> int:
+    """将含 sec 和 nanosec 字段的 ROS 时间戳转换为纳秒整数。
+
+    Args:
+        stamp: ROS 时间戳消息。
+
+    Returns:
+        从时间戳起点计的纳秒数。
+    """
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
 def _check_timing(report: EpisodeReport, label: str, timestamps: list[int],
                   gap_ms: float) -> None:
-    """检查非正时间、倒退、重复和超过阈值的间隔。"""
+    """检查非正时间、倒退、重复和超过阈值的间隔，并追加异常。
+
+    Args:
+        report: 被原地更新的检查结果。
+        label: 用于异常代码和描述的消息流名称。
+        timestamps: 按读取顺序排列的纳秒时间戳。
+        gap_ms: 相邻时间戳允许的最大间隔，单位 ms。
+    """
     if not timestamps:
         _finding(report, f"{label}_empty", f"{label} 没有样本")
         return
@@ -130,6 +195,14 @@ def _check_timing(report: EpisodeReport, label: str, timestamps: list[int],
 
 
 def _valid_joint_state(message: JointState) -> bool:
+    """检查关节状态含七个唯一命名关节及有限的位置值。
+
+    Args:
+        message: 待检查的 JointState 消息。
+
+    Returns:
+        名称与位置数量匹配且所需关节位置均有效时为 True。
+    """
     names = list(message.name)
     positions = list(message.position)
     return (len(names) == len(positions) and len(set(names)) == len(names)
@@ -138,11 +211,28 @@ def _valid_joint_state(message: JointState) -> bool:
 
 
 def _valid_joint_action(message: Jointpos) -> bool:
+    """检查关节指令的自由度、关节数量及位置值。
+
+    Args:
+        message: 待检查的 Jointpos 消息。
+
+    Returns:
+        声明七自由度且七个关节值均有限时为 True。
+    """
     return (int(message.dof) == 7 and len(message.joint) == 7
             and all(math.isfinite(value) for value in message.joint))
 
 
 def _valid_camera(message: object, mode: str) -> bool:
+    """按传输模式验证相机消息的尺寸、编码和数据负载。
+
+    Args:
+        message: 与 mode 对应的 Image、CompressedImage 或 FFMPEGPacket。
+        mode: 相机模式，取 raw、jpeg 或 h264。
+
+    Returns:
+        消息结构和负载满足对应模式的检查时为 True。
+    """
     if mode == "raw":
         channels = {"bgr8": 3, "rgb8": 3, "mono8": 1}.get(message.encoding.lower())
         return bool(channels and message.width > 0 and message.height > 0
@@ -159,13 +249,22 @@ def _valid_camera(message: object, mode: str) -> bool:
 
 
 def _check_h264(report: EpisodeReport, packets: list[tuple[bytes, bool]]) -> None:
-    """从首个关键帧起，核对 FFmpeg 解码帧与 ROS 包的原始偏移。"""
+    """从首个关键帧起，核对 ffprobe 解码帧与 ROS 包的原始偏移。
+
+    Args:
+        report: 被原地更新的检查结果。
+        packets: 按读取顺序排列的 H.264 负载和关键帧标记。
+
+    在系统临时目录写入比特流并调用 ffprobe；缺少关键帧、探测失败或偏移
+    不一致时，将异常加入 report。临时目录在退出时清理。
+    """
     first_key = next((i for i, (_, keyframe) in enumerate(packets) if keyframe), None)
     if first_key is None:
         _finding(report, "camera_no_keyframe", "H.264 中没有关键帧")
         return
     with tempfile.TemporaryDirectory(prefix="fastumi-audit-") as directory:
         bitstream = Path(directory) / "camera.h264"
+        # 每个 ROS 包在临时 H.264 比特流中的起始字节偏移。
         offsets = []
         with bitstream.open("wb") as stream:
             for payload, _ in packets[first_key:]:
@@ -193,7 +292,18 @@ def _check_h264(report: EpisodeReport, packets: list[tuple[bytes, bool]]) -> Non
 
 
 def audit_episode(path: Path, thresholds: Thresholds) -> EpisodeReport:
-    """只读取一轮的相机和关节消息，其他话题不反序列化。"""
+    """检查一轮录制的目录、MCAP 话题、消息内容和时间戳。
+
+    Args:
+        path: episode_N 目录路径。
+        thresholds: 相机与关节状态相邻时间戳的间隔阈值，单位 ms。
+
+    Returns:
+        包含异常、已选话题消息计数及目录快照的检查结果。
+
+    只反序列化匹配类型的相机和关节消息；读取或解码错误记录为异常。
+    本函数不修改 episode 文件，H.264 验证可能调用 ffprobe。
+    """
     report = EpisodeReport(path)
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
         _finding(report, "symlink", "episode 路径包含符号链接")
@@ -223,6 +333,7 @@ def audit_episode(path: Path, thresholds: Thresholds) -> EpisodeReport:
         reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id="mcap"),
                     rosbag2_py.ConverterOptions("", ""))
         metadata = rosbag2_py.Info().read_metadata(str(bag), "mcap")
+        # 元数据中的话题消息数用于与实际读取数交叉核对。
         expected_counts = {
             item.topic_metadata.name: item.message_count
             for item in metadata.topics_with_message_count
@@ -249,10 +360,14 @@ def audit_episode(path: Path, thresholds: Thresholds) -> EpisodeReport:
             selected[camera_topic] = CAMERA_TOPICS[camera_topic]
         if selected:
             reader.set_filter(rosbag2_py.StorageFilter(topics=list(selected)))
+        # bag 时间戳来自 rosbag2，source 时间戳来自消息头或 H.264 PTS；单位 ns。
         bag_times = {"camera": [], "joint_state": [], "joint_action": []}
         source_times = {"camera": [], "joint_state": []}
+        # 反序列化失败或内容无效的消息数量，按消息流累计。
         invalid = {"camera": 0, "joint_state": 0, "joint_action": 0}
+        # H.264 包的 PTS 与 header 时间戳不一致的次数。
         pts_header_mismatch = 0
+        # 有效 H.264 包的负载和关键帧标志，供 ffprobe 核对帧偏移。
         packets: list[tuple[bytes, bool]] = []
         while reader.has_next():
             topic, raw, bag_ns = reader.read_next()
@@ -315,7 +430,17 @@ def audit_episode(path: Path, thresholds: Thresholds) -> EpisodeReport:
 
 
 def _lock_recorder(root: Path) -> list[object]:
-    """检查任一上级录制目录的锁；处理期间保留文件描述符。"""
+    """检查数据根目录及上级目录的录制器锁并保留文件描述符。
+
+    Args:
+        root: 待处理的数据根目录。
+
+    Returns:
+        已取得非阻塞排他锁的文件流列表，由调用方负责关闭。
+
+    Raises:
+        RuntimeError: 锁文件无法打开或锁已被占用。
+    """
     locked = []
     try:
         for parent in (root, *root.parents):
@@ -336,7 +461,23 @@ def _lock_recorder(root: Path) -> list[object]:
 
 
 def process_abnormal(root: Path, reports: list[EpisodeReport], action: str) -> int:
-    """先校验所有异常目录，再执行统一删除或隔离。"""
+    """先复核所有异常目录，再统一删除或移动到隔离目录。
+
+    Args:
+        root: 数据根目录，也是 .quarantine 的所在目录。
+        reports: 带扫描时目录快照的检查结果；仅处理异常轮次。
+        action: 处理方式，取 delete 或 move。
+
+    Returns:
+        成功处理的异常目录数量。
+
+    Raises:
+        ValueError: action 无效。
+        RuntimeError: 录制器占用、目录变化、符号链接或隔离目标冲突。
+        OSError: 删除、移动或创建目录失败。
+
+    处理期间持有录制器锁，并将每个已处理目录打印到标准输出。
+    """
     if action not in ("delete", "move"):
         raise ValueError("action 只能是 delete 或 move")
     abnormal = [report for report in reports if report.abnormal]
@@ -344,6 +485,7 @@ def process_abnormal(root: Path, reports: list[EpisodeReport], action: str) -> i
         return 0
     locks = _lock_recorder(root)
     try:
+        # 先收集并验证所有源与目标，避免校验失败时只处理了部分目录。
         destinations = []
         for report in abnormal:
             path = report.path
@@ -378,6 +520,18 @@ def process_abnormal(root: Path, reports: list[EpisodeReport], action: str) -> i
 
 
 def _positive_ms(value: str) -> float:
+    """将启动参数解析为有限的正毫秒值。
+
+    Args:
+        value: 命令行传入的数值字符串。
+
+    Returns:
+        单位为 ms 的正浮点数。
+
+    Raises:
+        ValueError: 字符串无法转换为浮点数。
+        argparse.ArgumentTypeError: 数值非有限值或不大于零。
+    """
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("阈值必须是有限正数（毫秒）")
@@ -385,6 +539,18 @@ def _positive_ms(value: str) -> float:
 
 
 def _positive_int(value: str) -> int:
+    """将并行进程数解析为正整数。
+
+    Args:
+        value: 命令行传入的整数字符串。
+
+    Returns:
+        大于零的进程数。
+
+    Raises:
+        ValueError: 字符串无法转换为整数。
+        argparse.ArgumentTypeError: 进程数不大于零。
+    """
     number = int(value)
     if number <= 0:
         raise argparse.ArgumentTypeError("并行进程数必须是正整数")
@@ -393,7 +559,18 @@ def _positive_int(value: str) -> int:
 
 def scan_episodes(episodes: list[Path], thresholds: Thresholds,
                   workers: int):
-    """并行检查相互独立的 episode，按完成顺序返回扫描进度。"""
+    """逐轮扫描 episode；多进程时按完成顺序产生结果。
+
+    Args:
+        episodes: 待检查的 episode 目录列表。
+        thresholds: 时间间隔阈值，单位 ms。
+        workers: 扫描进程数；为 1 时在当前进程顺序检查。
+
+    Yields:
+        输入列表中的零基索引和对应的 EpisodeReport。
+
+    多进程模式使用 spawn 启动子进程，任务异常会在获取结果时传播。
+    """
     if workers == 1:
         for index, episode in enumerate(episodes):
             yield index, audit_episode(episode, thresholds)
@@ -409,7 +586,20 @@ def scan_episodes(episodes: list[Path], thresholds: Thresholds,
 
 def select_abnormal(root: Path, abnormal: list[EpisodeReport], scope: str,
                     names: str = "") -> list[EpisodeReport]:
-    """从异常轮次中选择全部、含相机异常或明确指定的目录。"""
+    """按范围从异常轮次中选择待处理目录。
+
+    Args:
+        root: 用于解析相对路径的数据根目录。
+        abnormal: 已判定异常的检查结果列表。
+        scope: a 表示全部、c 表示含相机异常、s 表示明确指定。
+        names: scope 为 s 时的编号、目录名或相对路径，逗号或空白分隔。
+
+    Returns:
+        保持 abnormal 原有顺序的选中结果。
+
+    Raises:
+        ValueError: 范围无效、未指定目录、名称不唯一或名称不在异常列表中。
+    """
     if scope == "a":
         return abnormal
     if scope == "c":
@@ -441,7 +631,18 @@ def select_abnormal(root: Path, abnormal: list[EpisodeReport], scope: str,
 
 
 def main(argv: list[str] | None = None) -> int:
-    """扫描、报告并在交互终端选择处理范围和操作。"""
+    """解析参数、扫描录制，并在交互终端选择异常目录处理方式。
+
+    Args:
+        argv: 可传入的参数列表；为 None 时使用进程命令行参数。
+
+    Returns:
+        0 表示全部正常或处理成功，1 表示存在未处理异常，
+        2 表示目录处理失败。参数错误由 argparse 以 SystemExit 退出。
+
+    扫描结果写入标准输出；处理错误写入标准错误。非交互输入不执行
+    删除或移动。交互选择删除时还需输入指定的 DELETE 确认文本。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, help="采集数据根目录")
     parser.add_argument("--camera-gap-ms", type=_positive_ms, default=200.0)
