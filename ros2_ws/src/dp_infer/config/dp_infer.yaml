@@ -11,6 +11,8 @@ dp_infer:
     device: cuda:0
     # 每次预测的扩散去噪步数；组合启动可用同名 launch 参数覆盖。
     num_inference_steps: 8
+    # 运行时修改去噪步数的服务名，类型为 fastumi_interfaces/SetNumInferenceSteps。
+    set_inference_steps_service: /fastumi/policy/set_inference_steps
     # 腕部相机图像订阅话题；消息类型由 image_type 决定。
     image_topic: /wrist_camera/image_raw/compressed
     # 图像消息类型：compressed 对应 CompressedImage，raw 对应 Image。
@@ -25,6 +27,13 @@ dp_infer:
     close_guard_topic: /fastumi/policy/gripper_close_allowed
     # 开始新 episode 的服务名，类型为 std_srvs/Trigger；调用后清除旧观测和预测。
     reset_service: /fastumi/policy/reset_episode
+    # 组合 launch 会开启任务门控，加载后先等待 start_task 服务。
+    task_control_enabled: false
+    start_service: /fastumi/policy/start_task
+    stop_service: /fastumi/policy/stop_task
+    return_service: /fastumi/policy/return_to_start
+    controller_start_service: /fastumi/rm75/placo/start_task
+    controller_return_service: /fastumi/rm75/placo/return_to_start
     # 控制器重置服务名，类型为 fastumi_interfaces/ResetPolicyController。
     controller_reset_service: /fastumi/rm75/placo/reset_episode
     # 等待控制器重置响应的最长时间，单位秒；超时视为未确认。

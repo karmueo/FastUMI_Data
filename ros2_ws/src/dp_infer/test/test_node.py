@@ -12,7 +12,8 @@ import pytest
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from fastumi_interfaces.srv import ResetPolicyController
+from rclpy.parameter import Parameter
+from fastumi_interfaces.srv import ResetPolicyController, SetNumInferenceSteps
 from std_srvs.srv import Trigger
 
 from dp_infer.core import InferenceContext, decode_actions
@@ -71,9 +72,91 @@ def test_default_interfaces_and_message_stamp(node):
     assert stamp_ns(message.time_from_start[-1]) == 500_000_000
 
 
+def test_set_inference_steps_service_validates_and_syncs_parameter(node):
+    """服务只接受 1～50，成功后 ROS 参数与下一次推理配置一致。"""
+    instance, _ = node
+    assert instance.parameter("set_inference_steps_service") == "/fastumi/policy/set_inference_steps"
+    for steps in (1, 50, 16):
+        response = instance.on_set_inference_steps(
+            SetNumInferenceSteps.Request(num_inference_steps=steps),
+            SetNumInferenceSteps.Response())
+        assert response.success and "next inference" in response.message
+        assert instance.parameter("num_inference_steps") == steps
+        assert instance._requested_steps == steps
+    for steps in (0, -1, 51):
+        response = instance.on_set_inference_steps(
+            SetNumInferenceSteps.Request(num_inference_steps=steps),
+            SetNumInferenceSteps.Response())
+        assert not response.success and "[1, 50]" in response.message
+        assert instance.parameter("num_inference_steps") == 16
+        assert instance._requested_steps == 16
+    rejected = instance.set_parameters_atomically([
+        Parameter("num_inference_steps", value=True)])
+    assert not rejected.successful and instance._requested_steps == 16
+
+
+def test_set_inference_steps_ros_service_round_trip(node):
+    """真实 ROS 服务请求可更新配置，并向客户端返回结果。"""
+    instance, _ = node
+    caller = Node("set_inference_steps_caller")
+    client = caller.create_client(
+        SetNumInferenceSteps, "/fastumi/policy/set_inference_steps")
+    executor = SingleThreadedExecutor()
+    executor.add_node(instance)
+    executor.add_node(caller)
+    try:
+        deadline = time.monotonic() + 2
+        while not client.service_is_ready() and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.01)
+        assert client.service_is_ready()
+        future = client.call_async(SetNumInferenceSteps.Request(num_inference_steps=12))
+        while not future.done() and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=0.01)
+        assert future.done() and future.result().success
+        assert instance.parameter("num_inference_steps") == 12
+    finally:
+        executor.remove_node(instance)
+        executor.remove_node(caller)
+        executor.shutdown()
+        caller.destroy_node()
+
+
+def test_set_inference_steps_keeps_inflight_and_uses_latest_on_next_submit(node, monkeypatch):
+    """在途结果照常发布；连续修改只影响下一次提交的任务。"""
+    instance, messages = node
+    now = instance.get_clock().now().nanoseconds
+    context = InferenceContext(np.eye(4), now, instance.buffer.episode_id, 1)
+    instance.future = Future()
+    instance.active_context = context
+    instance.active_num_inference_steps = 8
+    instance.pending = ({}, context)
+    instance.engine.predict = lambda *_: None
+    submissions = []
+
+    def submit(*args):
+        submissions.append(args)
+        return Future()
+
+    monkeypatch.setattr(instance.worker, "submit", submit)
+    for steps in (16, 4):
+        response = instance.on_set_inference_steps(
+            SetNumInferenceSteps.Request(num_inference_steps=steps),
+            SetNumInferenceSteps.Response())
+        assert response.success
+    instance.tick()
+    assert not submissions and instance.active_num_inference_steps == 8
+    instance.future.set_result(_prediction(context))
+    instance.tick()
+    assert len(messages) == 1 and messages[0].sequence_id == 1
+    assert len(submissions) == 1 and submissions[0][-1] == 4
+    assert instance.active_num_inference_steps == 4
+
+
 def test_reset_expired_result_and_fresh_publish(node):
     """重置或结果超时丢弃旧任务；新鲜结果完整发布。"""
     instance, messages = node
+    warnings = []
+    instance.warn = warnings.append
     now = instance.get_clock().now().nanoseconds
     old = InferenceContext(np.eye(4), now, 0, 1)
     instance.future = Future()
@@ -84,12 +167,17 @@ def test_reset_expired_result_and_fresh_publish(node):
     instance.future.set_result(_prediction(old))
     instance.tick()
     assert messages == []
+    assert "episode changed" in warnings[-1]
+    assert "predicted_episode=0 current_episode=1" in warnings[-1]
     expired = InferenceContext(np.eye(4), now - 600_000_000, 1, 2)
     instance.active_context = expired
     instance.future = Future()
     instance.future.set_result(_prediction(expired))
     instance.tick()
     assert messages == []
+    assert "result expired" in warnings[-1]
+    assert "limit_ms=500.0" in warnings[-1]
+    assert "denoise_steps=8" in warnings[-1]
     fresh = InferenceContext(np.eye(4), instance.get_clock().now().nanoseconds, 1, 3)
     instance.active_context = fresh
     instance.future = Future()
@@ -168,6 +256,110 @@ def test_reset_response_waits_for_controller_acknowledgement():
     asyncio.run(exercise())
 
 
+def test_managed_task_starts_stops_and_drops_inflight_result(node):
+    """组合入口待命，停止后旧模型结果不得重新发布。"""
+    instance, messages = node
+    instance._task_control_enabled = True
+    instance.task_state = "idle"
+    now = instance.get_clock().now().nanoseconds
+    _add_frame(instance.buffer, now - 20_000_000)
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert start.success and instance.task_state == "running"
+    episode = instance.buffer.episode_id
+    old = InferenceContext(np.eye(4), now, episode, 1)
+    instance.future = Future()
+    instance.active_context = old
+    stop = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert stop.success and instance.task_state == "idle"
+    assert instance.buffer.episode_id > episode
+    instance.future.set_result(_prediction(old))
+    instance.tick()
+    assert messages == []
+    repeated = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert repeated.success
+    assert instance.buffer.episode_id == episode + 1
+    reset = asyncio.run(instance.on_reset(Trigger.Request(), Trigger.Response()))
+    assert reset.success and instance.task_state == "idle"
+    home = asyncio.run(instance.on_return_to_start(Trigger.Request(), Trigger.Response()))
+    assert not home.success and "unavailable" in home.message
+
+
+def test_stop_interrupts_pending_start_and_return(node):
+    """旧服务确认不得覆盖后续停止建立的待命状态。"""
+    async def exercise():
+        instance, _ = node
+        instance._task_control_enabled = True
+        instance._require_controller_reset = True
+        instance.task_state = "idle"
+        _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+        start_future = asyncio.Future()
+        calls = []
+
+        async def controller_call(client, timeout):
+            calls.append(client)
+            if client is instance.controller_start_client:
+                return await start_future
+            return True, "stopped"
+
+        instance._controller_call = controller_call
+        start_task = asyncio.create_task(instance.on_start_task(
+            Trigger.Request(), Trigger.Response()))
+        await asyncio.sleep(0)
+        assert instance.task_state == "starting"
+        stop = await instance.on_stop_task(Trigger.Request(), Trigger.Response())
+        assert stop.success and instance.task_state == "idle"
+        start_future.set_result((True, "late start"))
+        assert not (await start_task).success
+        assert instance.task_state == "idle"
+
+        home_future = asyncio.Future()
+
+        async def home_call(client, timeout):
+            if client is instance.controller_return_client:
+                return await home_future
+            return True, "stopped"
+
+        instance._controller_call = home_call
+        home_task = asyncio.create_task(instance.on_return_to_start(
+            Trigger.Request(), Trigger.Response()))
+        await asyncio.sleep(0)
+        assert instance.task_state == "homing"
+        stopped = await instance.on_stop_task(Trigger.Request(), Trigger.Response())
+        assert stopped.success and instance.task_state == "idle"
+        home_future.set_result((True, "late home"))
+        assert not (await home_task).success
+        assert instance.task_state == "idle"
+
+    asyncio.run(exercise())
+
+
+def test_idle_stop_invalidates_a_start_that_timed_out(node):
+    """开始响应超时后，停止仍须让控制器拒绝迟到的旧 episode。"""
+    instance, _ = node
+    instance._task_control_enabled = True
+    instance._require_controller_reset = True
+    instance.task_state = "idle"
+    _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+    calls = []
+
+    async def controller_call(client, _timeout):
+        calls.append((client, instance.buffer.episode_id))
+        if client is instance.controller_start_client:
+            return False, "Controller service timed out"
+        return True, "Driver stop acknowledged"
+
+    instance._controller_call = controller_call
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert not start.success and instance.task_state == "idle"
+
+    stop = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert stop.success and instance.task_state == "idle"
+    assert calls == [
+        (instance.controller_start_client, 1),
+        (instance.controller_reset_client, 2),
+    ]
+
+
 def test_reset_service_waits_for_controller_service(node):
     """单线程执行器也能处理控制器确认，外部服务随后才返回成功。"""
     instance, _ = node
@@ -202,6 +394,58 @@ def test_reset_service_waits_for_controller_service(node):
         executor.remove_node(instance)
         executor.remove_node(controller)
         executor.remove_node(caller)
+        executor.shutdown()
+        caller.destroy_node()
+        controller.destroy_node()
+
+
+def test_managed_public_services_coordinate_with_controller(node):
+    """单线程执行器可完成开始、停机、回位的内部服务往返。"""
+    instance, _ = node
+    instance._task_control_enabled = True
+    instance._require_controller_reset = True
+    instance.task_state = "idle"
+    controller = Node("task_controller_stub")
+    caller = Node("task_caller")
+    events = []
+
+    def handler(name):
+        def handle(request, response):
+            events.append((name, request.episode_id))
+            response.success = True
+            response.message = name
+            return response
+        return handle
+
+    for name, topic in (
+            ("start", "/fastumi/rm75/placo/start_task"),
+            ("stop", "/fastumi/rm75/placo/reset_episode"),
+            ("home", "/fastumi/rm75/placo/return_to_start")):
+        controller.create_service(ResetPolicyController, topic, handler(name))
+    clients = {
+        name: caller.create_client(Trigger, f"/fastumi/policy/{name}")
+        for name in ("start_task", "stop_task", "return_to_start")
+    }
+    executor = SingleThreadedExecutor()
+    for participant in (instance, controller, caller):
+        executor.add_node(participant)
+    try:
+        deadline = time.monotonic() + 3
+        while not all(client.service_is_ready() for client in clients.values()):
+            executor.spin_once(timeout_sec=0.01)
+            assert time.monotonic() < deadline
+        _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+        for name in ("start_task", "stop_task", "return_to_start"):
+            future = clients[name].call_async(Trigger.Request())
+            while not future.done() and time.monotonic() < deadline:
+                executor.spin_once(timeout_sec=0.01)
+            assert future.done() and future.result().success
+        assert [name for name, _ in events] == ["start", "stop", "stop", "home"]
+        assert [episode for _, episode in events] == [1, 2, 3, 4]
+        assert instance.task_state == "idle"
+    finally:
+        for participant in (instance, controller, caller):
+            executor.remove_node(participant)
         executor.shutdown()
         caller.destroy_node()
         controller.destroy_node()

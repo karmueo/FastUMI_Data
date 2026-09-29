@@ -31,6 +31,7 @@ rosidl_generate_interfaces(
   "srv/DeleteRecording.srv"
   "srv/GetRecordingStatus.srv"
   "srv/ResetPolicyController.srv"
+  "srv/SetNumInferenceSteps.srv"
   "srv/ListRecordings.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
 )

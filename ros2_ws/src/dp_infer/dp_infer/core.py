@@ -255,8 +255,10 @@ class PolicyEngine:
             raise ValueError("Policy returned non-finite actions")
         return prediction
 
-    def predict(self, observations, context):
-        """执行一次推理与后处理，返回绝对动作序列；异常由 ROS 层记录并丢弃。"""
+    def predict(self, observations, context, num_inference_steps=None):
+        """在工作线程设置本次去噪步数，再推理并返回绝对动作序列。"""
+        if num_inference_steps is not None:
+            self.policy.num_inference_steps = num_inference_steps
         prediction = self.predict_raw(observations)
         sequence = decode_actions(prediction[0], context)
         for processor in self.processors:

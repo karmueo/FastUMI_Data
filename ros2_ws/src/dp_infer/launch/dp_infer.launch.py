@@ -9,6 +9,7 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 
+from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from dp_infer.urdf_contract import validate_kinematic_equivalence
 
 
@@ -64,6 +65,7 @@ def _start(context):
     parameter_names = (
         "device", "image_topic", "image_type", "joint_topic", "gripper_topic",
         "output_topic", "close_guard_topic", "num_inference_steps", "postprocessors",
+        "set_inference_steps_service",
     )
     overrides = {
         name: LaunchConfiguration(name).perform(context)
@@ -75,6 +77,7 @@ def _start(context):
         "-p", f"checkpoint:={checkpoint}",
         "-p", f"urdf_path:={training_urdf}",
         "-p", f"require_controller_reset:={enabled}",
+        "-p", "task_control_enabled:=true",
         "-p", "controller_reset_service:="
         + LaunchConfiguration("controller_reset_service").perform(context),
     ]
@@ -108,6 +111,9 @@ def _start(context):
             controller_python, "-m", "fastumi_rm75.rm75_placo_controller",
             "--ros-args", "--params-file", str(control_config),
             "-p", f"dry_run:={dry_run}",
+            "-p", "task_control_enabled:=true",
+            "-p", "start_joint_positions:=[" + ",".join(
+                str(value) for value in INITIAL_JOINT_POSITIONS) + "]",
             "-p", f"urdf_path:={control_urdf}",
             "-p", f"joint_state_topic:={overrides['joint_topic']}",
             "-p", f"gripper_state_topic:={overrides['gripper_topic']}",
@@ -144,6 +150,7 @@ def generate_launch_description():
         "gripper_topic": "/motion_control/gripper_state",
         "output_topic": "/fastumi/policy/action_sequence",
         "close_guard_topic": "/fastumi/policy/gripper_close_allowed",
+        "set_inference_steps_service": "/fastumi/policy/set_inference_steps",
         "controller_reset_service": "/fastumi/rm75/placo/reset_episode",
         "max_start_displacement_m": "0.0", "max_start_rise_m": "0.0",
         "postprocessors": "",

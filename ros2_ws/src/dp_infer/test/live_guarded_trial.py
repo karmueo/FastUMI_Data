@@ -20,6 +20,7 @@ from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Bool, Empty, Float32
+from std_srvs.srv import Trigger
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
 from dp_infer.visual_guard import ball_center_bgr
@@ -43,6 +44,15 @@ def target_lost_during_control(real, first_command_at, ball, ball_at, now) -> bo
     """预热阶段不因断帧终止；首条命令后要求最近一次有效球检测不超过 300 ms。"""
     return bool(real and first_command_at is not None
                 and (ball is None or now - ball_at > 0.3))
+
+
+def request_guarded_stop(monitor, task_stop, real):
+    """实机先直发驱动停机，再异步请求任务服务确认。"""
+    if real:
+        monitor.request_stop()
+    if task_stop.service_is_ready():
+        return task_stop.call_async(Trigger.Request())
+    return None
 
 
 def ball_center(image: Image) -> tuple[float, float] | None:
@@ -331,6 +341,21 @@ def main():
             controller = subprocess.Popen(launch_command, cwd=root, env=environment,
                                           stdout=launch_log, stderr=subprocess.STDOUT,
                                           start_new_session=True)
+            task_start = monitor.create_client(Trigger, "/fastumi/policy/start_task")
+            task_stop = monitor.create_client(Trigger, "/fastumi/policy/stop_task")
+            deadline = time.monotonic() + 60
+            while not task_start.service_is_ready() and time.monotonic() < deadline:
+                rclpy.spin_once(monitor, timeout_sec=0.05)
+                if controller.poll() is not None:
+                    raise RuntimeError("policy launch exited before start_task was ready")
+            if not task_start.service_is_ready():
+                raise TimeoutError("start_task service did not appear")
+            start_future = task_start.call_async(Trigger.Request())
+            deadline = time.monotonic() + 5
+            while not start_future.done() and time.monotonic() < deadline:
+                rclpy.spin_once(monitor, timeout_sec=0.05)
+            if not start_future.done() or not start_future.result().success:
+                raise RuntimeError("start_task failed before guarded trial")
             deadline = time.monotonic() + 60
             while True:
                 rclpy.spin_once(monitor, timeout_sec=0.03)
@@ -377,13 +402,16 @@ def main():
                                         args.max_displacement_m):
                     reason = "arm_left_small_trial_region"
                     break
-            if args.real:
-                monitor.request_stop()
+            stop_future = request_guarded_stop(monitor, task_stop, args.real)
             control_end_at = time.monotonic()
             monitor.control_end_at = control_end_at
             xyz_at_stop = monitor.xyz.copy() if monitor.xyz is not None else None
             image_age_ms_at_stop = round((control_end_at - monitor.last_image_at) * 1000, 1)
             ball_age_ms_at_stop = round((control_end_at - monitor.ball_at) * 1000, 1)
+            if stop_future is not None:
+                stop_deadline = time.monotonic() + 4
+                while not stop_future.done() and time.monotonic() < stop_deadline:
+                    rclpy.spin_once(monitor, timeout_sec=0.05)
             controller_exit = terminate(controller)
             controller = None
             if args.real:

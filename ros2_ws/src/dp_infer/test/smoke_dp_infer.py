@@ -18,6 +18,7 @@ from rclpy.executors import SingleThreadedExecutor
 from rm_ros_interfaces.msg import Jointpos
 from sensor_msgs.msg import CompressedImage, JointState
 from std_msgs.msg import Bool, Float32
+from std_srvs.srv import Trigger
 
 
 JOINT_NAMES = [f"joint{index}" for index in range(1, 8)]
@@ -57,8 +58,8 @@ def run(args):
     if not args.episode.is_dir() or not args.checkpoint.is_file() or not args.urdf.is_file():
         raise FileNotFoundError("episode, checkpoint and URDF must exist")
     frames = load_frames(args.episode, args.frames)
-    if len(frames) < 2:
-        raise ValueError("at least two recorded frames are required")
+    if len(frames) < 6:
+        raise ValueError("at least six recorded frames are required to start the task")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     rclpy.init()
     node = rclpy.create_node("dp_infer_smoke_replay")
@@ -77,6 +78,7 @@ def run(args):
     images = node.create_publisher(CompressedImage, "/wrist_camera/image_raw/compressed", 10)
     joints = node.create_publisher(JointState, "/joint_states", 10)
     grippers = node.create_publisher(Float32, "/motion_control/gripper_state", 10)
+    start_client = node.create_client(Trigger, "/fastumi/policy/start_task")
     predictions, debug_joints = [], []
     arm_commands, gripper_commands, close_permissions = [], [], []
     node.create_subscription(
@@ -120,6 +122,7 @@ def run(args):
             # 为 DDS 发现和控制器的关节订阅再留少量时间。
             time.sleep(0.5)
             started = time.monotonic()
+            started_task = False
             for index, (jpeg, angles, openness) in enumerate(frames):
                 stamp = node.get_clock().now().to_msg()
                 joint = JointState()
@@ -133,8 +136,20 @@ def run(args):
                 image.format = "jpeg"
                 image.data = jpeg
                 images.publish(image)
+                if index >= 5 and not started_task:
+                    if not start_client.wait_for_service(timeout_sec=2.0):
+                        raise TimeoutError("start_task service did not appear")
+                    future = start_client.call_async(Trigger.Request())
+                    deadline = time.monotonic() + 4
+                    while not future.done() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not future.done() or not future.result().success:
+                        raise RuntimeError("start_task failed during replay")
+                    started_task = True
                 until = started + (index + 1) / 30.0
                 time.sleep(max(0, until - time.monotonic()))
+            if not started_task:
+                raise RuntimeError("at least six replay frames are needed to start the task")
             time.sleep(0.8)
     finally:
         if process is not None and process.poll() is None:

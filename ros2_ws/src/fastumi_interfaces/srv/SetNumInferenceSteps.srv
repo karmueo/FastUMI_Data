@@ -1,0 +1,4 @@
+int32 num_inference_steps
+---
+bool success
+string message

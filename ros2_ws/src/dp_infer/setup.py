@@ -37,5 +37,8 @@ setup(
     description="订阅 FastUMI 观测并发布 RM75 Link7 扩散策略推荐序列。",
     license="Apache-2.0",
     cmdclass={"install_scripts": RosInstallScripts},
-    entry_points={"console_scripts": ["dp_infer_node = dp_infer.cli:main"]},
+    entry_points={"console_scripts": [
+        "dp_infer_node = dp_infer.cli:main",
+        "keyboard_control = dp_infer.keyboard_control:main",
+    ]},
 )

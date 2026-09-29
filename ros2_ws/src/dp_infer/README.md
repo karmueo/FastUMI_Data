@@ -5,7 +5,7 @@
 `dp_infer` 读取训练 checkpoint，用 Jetson GPU 推理绝对 `base_link → Link7`
 末端目标，并发布 `/fastumi/policy/action_sequence`。组合 launch 同时运行现有
 `fastumi_rm75` Placo 控制器，将位姿转换为 RM75 七轴 CANFD 指令，夹爪目标发送至
-Unitree。默认有新鲜观测和有效预测时自动控制；首次联调请使用 `dry_run:=true`。
+Unitree。组合 launch 加载完成后先待命，调用开始任务服务才运行策略；首次联调请使用 `dry_run:=true`。
 
 ## 环境与构建
 
@@ -22,7 +22,10 @@ cd ros2_ws
 source /opt/ros/humble/setup.bash
 source .venv-numpy1/bin/activate
 source install/setup.bash
-python -m colcon build --symlink-install --packages-select dp_infer
+python -m colcon build --symlink-install --base-paths src/fastumi_interfaces --packages-select fastumi_interfaces
+python -m colcon build --symlink-install --base-paths src/fastumi_bringup --packages-select fastumi_bringup
+python -m colcon build --symlink-install --base-paths src/fastumi_rm75 --packages-select fastumi_rm75
+python -m colcon build --symlink-install --base-paths src/dp_infer --packages-select dp_infer
 source install/setup.bash
 ```
 
@@ -97,9 +100,10 @@ ros2 launch dp_infer dp_infer.launch.py \
 
 dry-run 模式下控制器只发布 `/fastumi/rm75/placo/joint_command` 调试关节目标，不发布
 `/rm_driver/movej_canfd_cmd` 或 `/motion_control/gripper_command`。可在第三个已加载
-相同 ROS 环境的终端依次查看以下话题；`hz` 命令检查后按 Ctrl+C：
+相同 ROS 环境的终端先调用开始服务，再查看以下话题；`hz` 命令检查后按 Ctrl+C：
 
 ```bash
+ros2 service call /fastumi/policy/start_task std_srvs/srv/Trigger '{}'
 ros2 topic hz /fastumi/policy/action_sequence
 ros2 topic hz /fastumi/rm75/placo/joint_command
 ros2 topic info --verbose /rm_driver/movej_canfd_cmd
@@ -119,7 +123,12 @@ ros2 launch dp_infer dp_infer.launch.py \
 ```
 
 该 launch 同时启动 DP 推理和 Placo 控制器，不需要再单独启动控制器或旧版
-`rm75_deployment.launch.py`。运行时应持续看到图像、关节和夹爪反馈及策略序列；
+`rm75_deployment.launch.py`。等待输入就绪后在第三个终端调用开始服务；运行时应持续看到图像、关节和夹爪反馈及策略序列：
+
+```bash
+ros2 service call /fastumi/policy/start_task std_srvs/srv/Trigger '{}'
+```
+
 `/rm_driver/movej_canfd_cmd` 与 `/motion_control/gripper_command` 各只能有一个
 发布者。在第三个已加载相同 ROS 环境的终端检查：
 
@@ -140,29 +149,51 @@ ros2 topic echo --once /rm_driver/udp_feedback_valid
 
 **当前 checkpoint 尚未通过接触或抓取验收。**直接组合启动不会像下方的
 `live_guarded_trial.py` 那样按时间、实测起点位移或球体丢失自动终止试验；
-全程现场监看，发现异常立即使用硬件急停。正常结束时在终端 B 按 Ctrl+C，
-控制器退出时会请求 RM75 停止；观察机械臂确实停稳、关节反馈不再变化，并检查
+全程现场监看，发现异常立即使用硬件急停。正常结束时调用停止任务服务；
+服务等待驱动停机结果，随后观察机械臂确实停稳、关节反馈不再变化。退出终端 B 后检查
 命令话题没有遗留发布者，然后再关闭终端 A。
 
 ### 下一轮测试与其他模式
 
 实机控制器要求每个新 episode 从
 `[0°, 20°, 0°, 70°, 0°, 90°, 90°]` 附近稳定 0.5 秒开始，夹爪开度至少
-0.95；门控只读反馈，不会自动回位。下一轮先退出组合 launch，再从仓库根目录
-运行回位脚本；它会张开夹爪并让 RM75 执行真实 MoveJ，须确认运动路径安全：
+0.95。任务停止后可在原 launch 中执行回位，再开始下一轮。回位会同时发送夹爪全开与
+RM75 MoveJ。回位前确认运动路径安全，并暂停独立键盘回位节点及其他运动命令发送端：
 
 ```bash
-model/dp/.venv/bin/python ros2_ws/src/dp_infer/test/return_to_start.py \
-  --real --output dataset/vr_target_umi/dp_infer_validation/home_report.json
+ros2 service call /fastumi/policy/stop_task std_srvs/srv/Trigger '{}'
+ros2 service call /fastumi/policy/return_to_start std_srvs/srv/Trigger '{}'
+ros2 service call /fastumi/policy/start_task std_srvs/srv/Trigger '{}'
 ```
 
-回位后重新进行 dry-run 和发布者检查，再启动新一轮实机控制。若复用仍在运行的
-组合 launch 且机械臂与夹爪已通过其他受控方式回到起点，工作区越界或 IK 故障
-锁定 episode 后，调用以下服务清除旧轨迹；服务未成功时不要继续执行：
+回位服务确认新鲜反馈、关节误差不超过 0.035 rad、夹爪开度至少 0.95，且稳定
+0.5 秒后才返回成功。回位失败或被停止服务打断时保持待命或故障状态，不继续策略。
+旧 `/fastumi/policy/reset_episode` 服务仍可清除旧轨迹，但不会自动开始任务。
+`dry_run:=true` 或 `start_controller:=false` 时回位服务返回失败；仅推理模式的开始和停止仍可使用。
+
+### 键盘控制任务
+
+`dp_infer.launch.py` 运行后，可在另一个已加载相同 ROS 环境、`ROS_DOMAIN_ID`
+一致的交互终端启动键盘节点：
 
 ```bash
-ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+ros2 run dp_infer keyboard_control
 ```
+
+保持这个终端处于焦点。按 **回车** 调用开始任务服务，按 **Backspace** 调用停止任务
+服务，按 **空格** 调用回到初始状态服务。按 **右方向键** 将去噪步数乘以 2，按
+**左方向键** 将其除以 2 并向下取整，结果限制在 2～32。每次方向键都会先读取
+推理节点的 `num_inference_steps`，调用设置服务后再次读取并显示实际配置值；
+快速连按按顺序处理，按 Backspace 会清除尚未开始的方向键请求。键盘节点启动时
+也会显示当前值。终端会先提示任务请求已发送，再显示服务返回的
+`success` 和 `message`；服务不可用或等待超时也会提示。回位等待期间仍可按
+Backspace 请求停止。回位响应超时后，须按 Backspace 并收到停止成功的结果，才能
+再次开始或回位。按 Ctrl+C 退出，终端输入设置会恢复。该节点只调用现有服务，
+不会随 launch 自动启动；回位前仍需确认路径安全，并暂停其他运动命令发送端。
+如果推理节点改名或调整了步数服务名，可在 `ros2 run dp_infer keyboard_control`
+后使用 `--ros-args -p inference_parameter_node:=/节点名 -p set_inference_steps_service:=/服务名`。
 
 仅需推理时加 `start_controller:=false`。恢复 checkpoint 原始的 16 次去噪设置时加
 `num_inference_steps:=16`；launch 默认 8 次。非 H.264 相机模式应同时修改
@@ -173,6 +204,18 @@ ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
 [限时实机方向试验](#限时实机方向试验) 使用 `live_guarded_trial.py`，该脚本会自行
 启动解码节点。改用该脚本前，应停止当前硬件入口并以 `enable_decoder:=false`
 重新启动、等待回位成功，避免两个节点同时发布 `/wrist_camera/image_decoded`。
+
+运行期间可在已加载相同 ROS 环境的终端修改后续推理的去噪步数，无需重启：
+
+```bash
+ros2 service call /fastumi/policy/set_inference_steps \
+  fastumi_interfaces/srv/SetNumInferenceSteps '{num_inference_steps: 16}'
+```
+
+只接受 1～50 的整数。服务成功表示新值已保存到节点的 `num_inference_steps`
+ROS 参数；正在执行的推理仍使用原步数，下一次提交的推理才使用新值。
+输出始终是 16 个连续动作，与去噪步数不同。服务名可通过 launch 参数
+`set_inference_steps_service` 覆盖。
 
 `inference_python`、
 `controller_python`、`control_urdf_path` 可覆盖非标准部署路径；
@@ -193,9 +236,10 @@ ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
 模型取两帧约 30 Hz 观测，图像转 224×224 RGB，关节经训练 URDF 做 FK。
 输出含 16 个绝对 `Link7` 位姿及开度；`header.stamp` 是最新图像采集时间，
 每个 `time_from_start[i]=i/30` 秒。位置单位米、四元数顺序 xyzw。结果过期、
-输入缺失或无效时不发布。`/fastumi/policy/reset_episode`（`std_srvs/Trigger`）
-先清除历史，并等待控制器通过 `/fastumi/rm75/placo/reset_episode` 确认停止旧轨迹；
-确认失败时服务返回失败，推理保持暂停。下一组观测重新建立起始位姿。
+输入缺失或无效时不发布。组合 launch 中，`/fastumi/policy/start_task`、
+`/fastumi/policy/stop_task`、`/fastumi/policy/return_to_start` 均为 `std_srvs/Trigger`。
+停止和旧 `/fastumi/policy/reset_episode` 会清除历史，并等待控制器与驱动确认停机；
+确认失败时服务返回失败，推理保持暂停。每次开始使用新的 episode 和起始位姿。
 仅推理模式无需控制器确认。闭合许可仅使用采集时间在输入超时范围内的图像。
 控制器按目标时间插值，在反馈超时、
 IK 失败或序列结束时停止。闭合许可由腕部原始图像中的白色球体及蓝橙标记定位；

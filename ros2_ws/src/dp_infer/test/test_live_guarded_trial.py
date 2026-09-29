@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 from sensor_msgs.msg import Image
 
-from live_guarded_trial import TrialMonitor, ball_center, outside_trial_region, target_lost_during_control
+from live_guarded_trial import (TrialMonitor, ball_center, outside_trial_region,
+                                request_guarded_stop, target_lost_during_control)
 
 
 def _image(encoding, *, with_ball=True):
@@ -85,3 +86,26 @@ def test_startup_video_gap_cannot_stop_a_trial_before_the_first_command():
     assert target_lost_during_control(True, 2.0, (900, 400), 2.0, 2.31)
     assert not target_lost_during_control(True, 2.0, (900, 400), 2.0, 2.29)
     assert not target_lost_during_control(False, 2.0, None, 2.0, 3.0)
+
+
+def test_guarded_stop_reaches_driver_before_policy_service_wait():
+    """任务服务不可用或延迟时，实机停机请求仍立即发给驱动。"""
+    events = []
+    monitor = SimpleNamespace(request_stop=lambda: events.append("driver_stop"))
+
+    class TaskStopClient:
+        def __init__(self, ready):
+            self.ready = ready
+
+        def service_is_ready(self):
+            return self.ready
+
+        def call_async(self, _request):
+            events.append("task_stop")
+            return object()
+
+    assert request_guarded_stop(monitor, TaskStopClient(False), True) is None
+    assert events == ["driver_stop"]
+    events.clear()
+    assert request_guarded_stop(monitor, TaskStopClient(True), True) is not None
+    assert events == ["driver_stop", "task_stop"]

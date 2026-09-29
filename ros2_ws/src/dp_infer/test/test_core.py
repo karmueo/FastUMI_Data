@@ -11,6 +11,7 @@ from scipy.spatial.transform import Rotation
 
 from dp_infer.core import (
     InferenceContext, OBS_SHAPES, Observation, build_observations,
+    PolicyEngine,
     compressed_image_to_rgb, decode_actions, image_to_rgb, letterbox_rgb,
     ordered_joints,
     validate_contract, validate_urdf,
@@ -50,6 +51,24 @@ def _add_frame(buffer, stamp_ns, pose=None, with_gripper=True):
     buffer.add_pose(stamp_ns, pose)
     if with_gripper:
         buffer.add_gripper(stamp_ns, 0.4)
+
+
+def test_policy_engine_applies_steps_before_prediction():
+    """推理入口在同一工作线程中更新策略步数并生成动作。"""
+    engine = PolicyEngine.__new__(PolicyEngine)
+    engine.policy = SimpleNamespace(num_inference_steps=8)
+    engine.processors = []
+    seen = []
+
+    def predict_raw(_observations):
+        seen.append(engine.policy.num_inference_steps)
+        actions = np.tile(np.r_[np.zeros(3), [1, 0, 0, 0, 1, 0], 0.4], (1, 16, 1))
+        return actions
+
+    engine.predict_raw = predict_raw
+    context = InferenceContext(np.eye(4), 0, 0, 0)
+    sequence = engine.predict({}, context, 16)
+    assert seen == [16] and sequence.positions.shape == (16, 3)
 
 
 def test_image_stride_color_and_joint_order():

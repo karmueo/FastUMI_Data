@@ -7,6 +7,7 @@ rm75_placo_controller:
     velocity_scale: 0.25
     joint_state_timeout_s: 0.25
     require_start_state: true
+    task_control_enabled: false
     start_joint_positions: [0.0, 0.3490658504, 0.0, 1.2217304764, 0.0, 1.5707963268, 1.5707963268]
     start_joint_tolerance_rad: 0.035
     start_joint_settle_s: 0.5
@@ -26,6 +27,8 @@ rm75_placo_controller:
     joint_state_topic: /joint_states
     gripper_state_topic: /motion_control/gripper_state
     reset_service: /fastumi/rm75/placo/reset_episode
+    start_service: /fastumi/rm75/placo/start_task
+    return_service: /fastumi/rm75/placo/return_to_start
     policy_topic: /fastumi/policy/action_sequence
     joint_command_topic: /rm_driver/movej_canfd_cmd
     gripper_command_topic: /motion_control/gripper_command

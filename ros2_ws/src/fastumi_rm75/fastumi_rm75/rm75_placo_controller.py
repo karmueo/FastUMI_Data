@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import time
 
+from rclpy.task import Future
 from ament_index_python.packages import (
     PackageNotFoundError,
     get_package_share_directory,
@@ -15,13 +16,14 @@ from fastumi_interfaces.srv import ResetPolicyController
 import numpy as np
 import placo
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
-from rm_ros_interfaces.msg import Jointpos
+from rm_ros_interfaces.msg import Jointpos, Movej
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty, Float32
 
@@ -89,8 +91,15 @@ class Rm75PlacoController(Node):
         )
         self.declare_parameter("stop_topic", "/rm_driver/move_stop_cmd")
         self.declare_parameter("reset_service", "/fastumi/rm75/placo/reset_episode")
+        self.declare_parameter("start_service", "/fastumi/rm75/placo/start_task")
+        self.declare_parameter("return_service", "/fastumi/rm75/placo/return_to_start")
+        self.declare_parameter("task_control_enabled", False)
 
         self._dry_run = bool(self.get_parameter("dry_run").value)
+        self._task_control_enabled = bool(self.get_parameter("task_control_enabled").value)
+        self._task_enabled = not self._task_control_enabled
+        self._enabled_episode = None
+        self._task_io_group = ReentrantCallbackGroup()
         self._base_frame = str(self.get_parameter("base_frame").value)
         self._end_frame = str(self.get_parameter("end_frame").value)
         rate_hz = float(self.get_parameter("control_rate_hz").value)
@@ -228,6 +237,8 @@ class Rm75PlacoController(Node):
         self._stop_publisher = self.create_publisher(
             Empty, str(self.get_parameter("stop_topic").value), command_qos
         )
+        self._movej_publisher = self.create_publisher(
+            Movej, "/rm_driver/movej_cmd", command_qos)
         self.create_subscription(
             JointState,
             str(self.get_parameter("joint_state_topic").value),
@@ -252,12 +263,28 @@ class Rm75PlacoController(Node):
             self._on_policy,
             command_qos,
         )
+        self.create_subscription(
+            Bool, "/rm_driver/udp_feedback_valid", self._on_udp_valid, command_qos,
+            callback_group=self._task_io_group)
+        self.create_subscription(
+            Bool, "/rm_driver/movej_result", self._on_movej_result, command_qos,
+            callback_group=self._task_io_group)
+        self.create_subscription(
+            Bool, "/rm_driver/move_stop_result", self._on_move_stop_result, command_qos,
+            callback_group=self._task_io_group)
         self.create_service(
             ResetPolicyController,
             str(self.get_parameter("reset_service").value),
-            self._on_reset,
+            self._on_reset_service, callback_group=self._task_io_group,
         )
+        self.create_service(
+            ResetPolicyController, str(self.get_parameter("start_service").value),
+            self._on_start_task, callback_group=self._task_io_group)
+        self.create_service(
+            ResetPolicyController, str(self.get_parameter("return_service").value),
+            self._on_return_to_start, callback_group=self._task_io_group)
         self.create_timer(1.0 / rate_hz, self._tick)
+        self.create_timer(0.05, self._home_tick, callback_group=self._task_io_group)
 
         self._feedback_positions = None
         self._feedback_monotonic = float("-inf")
@@ -275,6 +302,16 @@ class Rm75PlacoController(Node):
         self._latest_sequence = None
         self._minimum_episode = 0
         self._last_gripper = None
+        self._stop_future = None
+        self._hold_confirmed = True
+        self._home_future = None
+        self._home_episode = None
+        self._home_started_at = None
+        self._home_command_sent_at = None
+        self._home_accepted = False
+        self._home_settled_since = None
+        self._valid_feedback = False
+        self._valid_feedback_at = float("-inf")
         self.get_logger().warning(
             "RM75 Placo controller ready: "
             f"dry_run={self._dry_run}, rate={rate_hz:g} Hz, "
@@ -330,6 +367,22 @@ class Rm75PlacoController(Node):
         else:
             self._gripper_state = None
 
+    def _on_udp_valid(self, message: Bool) -> None:
+        self._valid_feedback = bool(message.data)
+        self._valid_feedback_at = time.monotonic()
+
+    def _on_movej_result(self, message: Bool) -> None:
+        if self._home_future is None or self._home_command_sent_at is None:
+            return
+        if message.data:
+            self._home_accepted = True
+        else:
+            self._finish_home(False, "MoveJ failed")
+
+    def _on_move_stop_result(self, message: Bool) -> None:
+        if self._stop_future is not None and not self._stop_future.done():
+            self._stop_future.set_result(bool(message.data))
+
     def _on_close_approval(self, message: Bool) -> None:
         """保存视觉近端许可，离开夹爪中心或图像缺流时自动失效。"""
         self._close_allowed = bool(message.data)
@@ -376,10 +429,20 @@ class Rm75PlacoController(Node):
 
     def _on_reset(self, request, response):
         """同步停止当前轨迹，并只接受本次重置后的 episode。"""
-        self._stop_control("episode reset")
         episode_id = int(request.episode_id)
+        managed = getattr(self, "_task_control_enabled", False)
+        if managed and episode_id < self._minimum_episode:
+            response.success = False
+            response.message = "stale stop request"
+            return response
+        if managed:
+            self._task_enabled = False
+            self._enabled_episode = None
+            self._finish_home(False, "Return interrupted by stop", stop_arm=False)
+        self._stop_control("episode reset")
         if episode_id < self._minimum_episode or (
-                self._latest_episode is not None and episode_id <= self._latest_episode):
+                not managed and self._latest_episode is not None
+                and episode_id <= self._latest_episode):
             response.success = False
             response.message = "reset episode must exceed the last accepted episode"
             return response
@@ -389,12 +452,158 @@ class Rm75PlacoController(Node):
         self._faulted_episode = None
         self._episode_started_at = None
         self._close_allowed = False
+        if managed and not self._dry_run:
+            self._hold_confirmed = self._hold_gripper()
+            self._stop_future = Future()
+            self._stop_publisher.publish(Empty())
         response.success = True
         response.message = f"Stopped controller before episode {episode_id}"
         return response
 
+    async def _on_reset_service(self, request, response):
+        """实际停机需要收到驱动结果后才对外报告成功。"""
+        response = self._on_reset(request, response)
+        if not response.success or not self._task_control_enabled or self._dry_run:
+            return response
+        future = self._stop_future
+        timer = self.create_timer(1.0, lambda: future.cancel(),
+                                  callback_group=self._task_io_group)
+        try:
+            await future
+            response.success = bool(not future.cancelled() and future.result()
+                                    and self._hold_confirmed)
+            if not response.success:
+                response.message = ("Gripper feedback is stale; holding position is unconfirmed"
+                                    if not self._hold_confirmed else
+                                    "Driver stop was not acknowledged")
+        finally:
+            self.destroy_timer(timer)
+            if self._stop_future is future:
+                self._stop_future = None
+        return response
+
+    def _on_start_task(self, request, response):
+        """仅从已稳定的任务起点为指定 episode 开启控制。"""
+        episode_id = int(request.episode_id)
+        if self._home_future is not None or episode_id < self._minimum_episode:
+            response.success, response.message = False, "Controller is returning or episode is stale"
+        elif self._task_enabled and self._enabled_episode == episode_id:
+            response.success, response.message = True, "Task is already enabled"
+        elif self._task_enabled:
+            response.success, response.message = False, "Another task is active"
+        elif not self._feedback_is_fresh() or not self._start_state_ready(episode_id):
+            response.success, response.message = False, "RM75 or gripper is not stable at start"
+        else:
+            self._minimum_episode = episode_id
+            self._latest_episode = episode_id
+            self._latest_sequence = -1
+            self._faulted_episode = None
+            self._episode_started_at = None
+            self._task_enabled = True
+            self._enabled_episode = episode_id
+            response.success, response.message = True, f"Started episode {episode_id}"
+        return response
+
+    def _hold_gripper(self):
+        """停止时将夹爪目标改为新鲜的实际开度。"""
+        if (self._gripper_state is not None and
+                time.monotonic() - self._gripper_monotonic <= self._gripper_timeout_s):
+            self._gripper_publisher.publish(Float32(data=float(self._gripper_state)))
+            return True
+        return False
+
+    def _finish_home(self, success, message, *, stop_arm=True):
+        """完成或取消回位，迟到的 MoveJ 结果不再改变状态。"""
+        future = self._home_future
+        if future is None:
+            return
+        if not success and stop_arm and not self._dry_run:
+            self._stop_publisher.publish(Empty())
+            self._hold_gripper()
+        self._home_future = None
+        self._home_episode = None
+        self._home_command_sent_at = None
+        future.set_result((success, message))
+
+    async def _on_return_to_start(self, request, response):
+        """异步等待驱动 MoveJ 和真实关节、夹爪反馈到位。"""
+        episode_id = int(request.episode_id)
+        if not self._task_control_enabled or self._dry_run:
+            response.success, response.message = False, "Physical return is unavailable in dry run"
+            return response
+        if self._home_future is not None or episode_id < self._minimum_episode:
+            response.success, response.message = False, "Return is busy or episode is stale"
+            return response
+        self._task_enabled = False
+        self._enabled_episode = None
+        self._minimum_episode = episode_id
+        self._stop_control("return to start")
+        self._home_future = Future()
+        self._home_episode = episode_id
+        self._home_started_at = time.monotonic()
+        self._home_command_sent_at = None
+        self._home_accepted = False
+        self._home_settled_since = None
+        future = self._home_future
+        success, message = await future
+        response.success, response.message = success, message
+        return response
+
+    def _home_tick(self):
+        """按反馈驱动非阻塞回位状态机。"""
+        if self._home_future is None:
+            return
+        now = time.monotonic()
+        ready = (self._feedback_positions is not None and self._feedback_is_fresh()
+                 and self._valid_feedback and now - self._valid_feedback_at <= 0.5
+                 and self._gripper_state is not None
+                 and now - self._gripper_monotonic <= self._gripper_timeout_s)
+        if not ready:
+            if self._home_command_sent_at is not None:
+                self._finish_home(False, "Feedback lost during return")
+            elif now - self._home_started_at > 30.0:
+                self._finish_home(False, "Timed out waiting for return feedback")
+            return
+        if self._home_command_sent_at is None and not self._home_accepted:
+            if (self._movej_publisher.get_subscription_count() == 0 or
+                    self._gripper_publisher.get_subscription_count() == 0):
+                if now - self._home_started_at > 30.0:
+                    self._finish_home(False, "Return command subscribers are unavailable")
+                return
+            self._gripper_publisher.publish(Float32(data=1.0))
+            error = float(np.max(np.abs(self._feedback_positions - self._start_joints)))
+            if error > 0.01:
+                command = Movej()
+                command.joint = self._start_joints.astype(float).tolist()
+                command.speed = 20
+                command.block = True
+                command.trajectory_connect = 0
+                command.dof = 7
+                self._home_command_sent_at = now
+                self._movej_publisher.publish(command)
+            else:
+                self._home_command_sent_at = now
+                self._home_accepted = True
+        if now - self._home_command_sent_at > 120.0:
+            self._finish_home(False, "Return timed out")
+            return
+        if not self._home_accepted:
+            return
+        at_start = (np.max(np.abs(self._feedback_positions - self._start_joints))
+                    <= self._start_joint_tolerance and
+                    self._gripper_state >= self._start_gripper_min)
+        if not at_start:
+            self._home_settled_since = None
+        elif self._home_settled_since is None:
+            self._home_settled_since = now
+        elif now - self._home_settled_since >= self._start_settle_s:
+            self._finish_home(True, "RM75 and gripper reached start state")
+
     def _on_policy(self, message: PolicyActionSequence) -> None:
         episode_id, sequence_id = int(message.episode_id), int(message.sequence_id)
+        if getattr(self, "_task_control_enabled", False) and (
+                not self._task_enabled or episode_id != self._enabled_episode):
+            return
         if episode_id < self._minimum_episode:
             return
         if self._latest_episode is not None and episode_id > self._latest_episode:

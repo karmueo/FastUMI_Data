@@ -1,6 +1,5 @@
 """启动 Jetson 机械臂、夹爪、末端相机，回位成功后提供录制服务。"""
 
-import math
 from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
@@ -17,9 +16,9 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from fastumi_usb_camera.capture import is_physical_video_device_path
+from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 
 
-INITIAL_JOINT_POSITIONS = [math.radians(value) for value in (0, 20, 0, 70, 0, 90, 90)]
 CAMERA_MODES = {
     'raw': ('false', 'false', '/wrist_camera/image_raw', 'raw'),
     'jpeg': ('false', 'true', '/wrist_camera/image_raw/compressed', 'jpeg'),
@@ -129,7 +128,7 @@ def _launch_hardware(context):
         actions.append(_include('rm_driver', 'rm_75_driver.launch.py'))
         if _enabled(context, 'move_to_initial_pose'):
             home = Node(package='rm_bringup', executable='rm_75_initial_pose',
-                        output='screen', parameters=[{'initial_joint_positions': INITIAL_JOINT_POSITIONS}])
+                        output='screen', parameters=[{'initial_joint_positions': list(INITIAL_JOINT_POSITIONS)}])
             actions.extend([
                 RegisterEventHandler(OnProcessExit(
                     target_action=home,

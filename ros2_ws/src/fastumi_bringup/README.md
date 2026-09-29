@@ -60,6 +60,27 @@ fi
 ros2 launch fastumi_bringup hardware.launch.py "${launch_args[@]}"
 ```
 
+## 空格键回位
+
+硬件 bringup 启动后，在 **第二个交互终端** 加载相同的 ROS 2 环境，启动键盘监听：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+ros2 run fastumi_bringup keyboard_home
+```
+
+保持焦点在这个终端，按空格键使 RM75 回到本 bringup 的七关节初始位姿
+`[0, 20, 0, 70, 0, 90, 90]` 度，同时向夹爪发送最大开度 `1.0`。
+即使机械臂已在初始位姿，空格键仍会打开夹爪。Ctrl+C 退出监听并恢复终端输入设置。
+节点不随 `hardware.launch.py` 自动启动，也不接受管道或非交互终端输入。
+按键时若机械臂反馈、驱动或夹爪命令订阅者未就绪，节点不会下发任一命令；
+运动过程中重复按空格键不会排队。夹爪控制节点按自身限速逐步打开，回位节点不等待夹爪到位确认。
+MoveJ 失败或等待结果超过 120 秒后，节点停止接受回位命令，需检查机械臂后重启。
+驱动没有运动指令仲裁，**回位前须暂停遥操及其他机械臂、夹爪命令发送端**。
+
 `hardware.local.env` 被 Git 忽略。
 末端相机填写 USB 4.2 对应的完整`/dev/v4l/by-path/*-video-index0`，可以通过命令`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS。默认 `jpeg` 发布相机原生 JPEG。
 选择 `h264` 时约 4 Mbps，Jetson 默认使用 NVIDIA GStreamer 硬件编码；排障或非 Jetson 环境才设置 `h264_encoder:=software`。本地解码仅在 `h264` 模式下可开启，例如 `wrist_camera_mode:=h264 enable_decoder:=true`。
