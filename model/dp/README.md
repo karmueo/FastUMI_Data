@@ -197,6 +197,7 @@ uv run --no-sync python convert_vr_target_to_umi.py \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 NUM_PROCESSES=1 \
+HF_HUB_CACHE=/absolute/path/to/Hub根目录 \
 DATASET_PATH=/absolute/path/to/new_pose10.zarr \
 bash model/dp/train_vr_umi.sh /absolute/path/to/new_run
 ```
@@ -209,6 +210,7 @@ bash model/dp/train_vr_umi.sh /absolute/path/to/new_run
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 NUM_PROCESSES=2 \
+HF_HUB_CACHE=/absolute/path/to/Hub根目录 \
 DATASET_PATH=/absolute/path/to/new_pose10.zarr \
 FINETUNE_CKPT=/absolute/path/to/source/checkpoints/best.ckpt \
 LEARNING_RATE=3e-5 NUM_EPOCHS=50 \
