@@ -231,6 +231,44 @@ uv run --no-sync python evaluate_vr_umi.py \
 
 结果包含位置、旋转和夹爪误差，以及首批 10D 预测。需要绘图时使用 `plot_vr_umi_validation.py --help`。
 
+### 5.5 模型导出与误差验证
+
+从 `model/dp` 目录运行；`uv run --group onnx` 会同步 ONNX 依赖：
+
+```bash
+RUN_DIR=../../dataset/h5dy_data/rm75_umi/runs/0929
+ONNX_DIR="$RUN_DIR/onnx/latest"
+DATASET=../../dataset/h5dy_data/rm75_umi/jingbao_merge.zarr
+env -u PYTHONPATH uv run --group onnx --locked python export_onnx.py \
+  --checkpoint "$RUN_DIR/checkpoints/latest.ckpt" --output-dir "$ONNX_DIR"
+env -u PYTHONPATH uv run --group onnx --locked python verify_onnx.py \
+  --checkpoint "$RUN_DIR/checkpoints/latest.ckpt" --onnx-dir "$ONNX_DIR" --dataset "$DATASET"
+```
+
+产物为 `obs_encoder.onnx`、`denoiser.onnx` 和记录形状、DDIM 配置及归一化参数的 `manifest.json`。两图使用固定 batch=1、FP32；部署时编码一次观测，在外部执行 DDIM 循环并反归一化动作。验证使用训练时的验证划分和相同初始噪声，将逐阶段误差写入 `validation_report.json`；超出默认 `atol=1e-4`、`rtol=1e-3` 时返回非零退出码。
+
+在装有 `trtexec` 的目标机器上，TensorRT 10 使用 `--fp16` 分别构建两图：
+
+```bash
+for part in obs_encoder denoiser; do
+  trtexec --onnx="$ONNX_DIR/$part.onnx" --fp16 \
+    --saveEngine="$ONNX_DIR/$part.fp16.plan"
+done
+```
+
+TensorRT 11 先用另行安装的 NVIDIA ModelOpt AutoCast 标注混合精度，再构建引擎：
+
+```bash
+for part in obs_encoder denoiser; do
+  python -m modelopt.onnx.autocast --onnx_path "$ONNX_DIR/$part.onnx" \
+    --output_path "$ONNX_DIR/$part.mixed.onnx"
+  trtexec --onnx="$ONNX_DIR/$part.mixed.onnx" \
+    --saveEngine="$ONNX_DIR/$part.mixed.plan"
+done
+```
+
+TensorRT 11 已移除 `--fp16`；安装与迁移方式见 [NVIDIA TensorRT 10→11 迁移指南](https://docs.nvidia.com/deeplearning/tensorrt/latest/api/migration/tensorrt-10x-to-11x-trtexec.html)。FP16 引擎仍需单独验证数值误差。
+
 ## 6. Target 六类双表示
 
 ### 6.1 从头训练
