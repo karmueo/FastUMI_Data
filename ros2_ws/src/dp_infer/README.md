@@ -192,8 +192,11 @@ ros2 run dp_infer keyboard_control
 Backspace 请求停止。回位响应超时后，须按 Backspace 并收到停止成功的结果，才能
 再次开始或回位。按 Ctrl+C 退出，终端输入设置会恢复。该节点只调用现有服务，
 不会随 launch 自动启动；回位前仍需确认路径安全，并暂停其他运动命令发送端。
-如果推理节点改名或调整了步数服务名，可在 `ros2 run dp_infer keyboard_control`
-后使用 `--ros-args -p inference_parameter_node:=/节点名 -p set_inference_steps_service:=/服务名`。
+未指定 `inference_parameter_node` 时，键盘工具自动查找步数设置服务所属的唯一节点，
+兼容 `dp_infer`、`dp_infer_tensorrt` 和改名后的推理节点。多个节点提供同一步数服务时
+不能确定目标，请只保留一个服务端，或为各后端配置不同的服务名。
+需要手动指定时，可在 `ros2 run dp_infer keyboard_control` 后使用
+`--ros-args -p inference_parameter_node:=/节点名 -p set_inference_steps_service:=/服务名`。
 
 仅需推理时加 `start_controller:=false`。恢复 checkpoint 原始的 16 次去噪设置时加
 `num_inference_steps:=16`；launch 默认 8 次。非 H.264 相机模式应同时修改

@@ -105,16 +105,18 @@ class KeyboardControl(Node):
 
     def __init__(self):
         super().__init__("dp_keyboard_control")
-        self.declare_parameter("inference_parameter_node", "/dp_infer")
+        self.declare_parameter("inference_parameter_node", "")
         self.declare_parameter(
             "set_inference_steps_service", "/fastumi/policy/set_inference_steps")
         self.task_clients = {
             operation: self.create_client(Trigger, name)
             for operation, name in SERVICE_NAMES.items()
         }
-        parameter_node = self.get_parameter("inference_parameter_node").value.rstrip("/")
-        self.steps_parameter_client = self.create_client(
-            GetParameters, f"{parameter_node}/get_parameters")
+        self.parameter_node = self.get_parameter("inference_parameter_node").value.rstrip("/")
+        self.steps_parameter_node = self.parameter_node
+        self.steps_parameter_client = (self.create_client(
+            GetParameters, f"{self.parameter_node}/get_parameters")
+            if self.parameter_node else None)
         self.steps_service_client = self.create_client(
             SetNumInferenceSteps,
             self.get_parameter("set_inference_steps_service").value)
@@ -126,6 +128,34 @@ class KeyboardControl(Node):
         self.startup_steps_deadline = time.monotonic() + STEPS_RESPONSE_TIMEOUT_SECONDS
         self._emit("键盘控制已就绪：回车开始任务，Backspace 停止任务，空格回到初始状态，"
                    "左右方向键调整去噪步数；Ctrl+C 退出")
+
+    def _resolve_parameter_client(self):
+        """自动读取步数服务所属节点的参数，避免混用两个推理后端。"""
+        if self.parameter_node:
+            return True
+        owners = []
+        for name, namespace in self.get_node_names_and_namespaces():
+            try:
+                services = self.get_service_names_and_types_by_node(name, namespace)
+            except RuntimeError:
+                # 节点可能在两次图查询之间退出，下轮重新发现，保持键盘监听。
+                return False
+            if any(service == self.steps_service_client.srv_name
+                   and "fastumi_interfaces/srv/SetNumInferenceSteps" in types
+                   for service, types in services):
+                owners.append(f"{namespace.rstrip('/')}/{name}")
+        # 多个服务器不能确定设置服务会路由到谁；不读取另一后端的值。
+        if len(owners) != 1:
+            return False
+        target = owners[0]
+        if target != self.steps_parameter_node:
+            if self.steps_parameter_client is not None:
+                self.destroy_client(self.steps_parameter_client)
+            self.steps_parameter_client = self.create_client(
+                GetParameters, f"{target}/get_parameters")
+            self.steps_parameter_node = target
+            self._emit(f"去噪步数：已连接推理节点 {target}")
+        return True
 
     @staticmethod
     def _emit(message):
@@ -178,6 +208,8 @@ class KeyboardControl(Node):
 
     def _request_steps(self, phase, direction="", target=0, success=False, message=""):
         """异步发起一次参数读取或设置请求，返回是否已发出。"""
+        if phase in ("startup", "before") and not self._resolve_parameter_client():
+            return False
         client = (self.steps_service_client if phase == "set"
                   else self.steps_parameter_client)
         if not client.service_is_ready():
@@ -203,13 +235,15 @@ class KeyboardControl(Node):
                 self.startup_steps_pending = False
             elif time.monotonic() >= self.startup_steps_deadline:
                 self.startup_steps_pending = False
-                self._emit("当前 num_inference_steps：未确认（参数服务不可用）")
+                self._emit("当前 num_inference_steps：未确认（参数服务不可用，或步数服务"
+                           "尚未发现唯一所属节点；可指定 inference_parameter_node）")
             return
         if not self.step_directions:
             return
         direction = self.step_directions.popleft()
         if not self._request_steps("before", direction=direction):
-            self._emit("调整去噪步数：失败，当前值未确认；未发送设置请求")
+            self._emit("调整去噪步数：失败，当前值未确认；未发送设置请求。"
+                       "请检查推理节点和 inference_parameter_node")
 
     @staticmethod
     def _steps_from_response(result):

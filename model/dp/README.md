@@ -1,39 +1,71 @@
 # FastUMI Diffusion Policy
 
-本目录是从 UMI 项目的 `src/policies/dp` 目录迁移的独立 DP 项目；迁移基线为上游提交 `f506bab`。根仓库保留的 MIT 许可证同样适用于本项目。
+独立的 Diffusion Policy 训练与推理项目，迁移自 UMI `src/policies/dp`（提交 `f506bab`），沿用仓库 MIT 许可证。
 
-## 环境
+**执行目录：**除特别说明外，以下命令均在 `model/dp` 中运行。从仓库根目录进入：
 
-`jetson_dev` 分支面向 Jetson AGX Orin 原生部署，验证基线为 JetPack 6.2.1、
-Ubuntu 22.04、CUDA 12.6、ROS 2 Humble 和系统 Python 3.10。项目的 uv 锁文件仅解析
-Linux/aarch64；不支持 x86_64、Python 3.12 或 CUDA 13。
+```bash
+cd model/dp
+```
 
-先确认 JetPack 与 Humble 已安装，并准备 PyTorch 所需的系统库：
+**路径约定：**替换示例中的 `/path/to/...`；派生数据、训练记录和模型报告放在 `dataset/`，不纳入提交。
+
+## 目录
+
+- [1. 环境准备](#1-环境准备)
+- [2. 数据准备](#2-数据准备)
+- [3. 模型训练](#3-模型训练)
+- [4. 评估与绘图](#4-评估与绘图)
+- [5. TensorRT 转换与测试](#5-tensorrt-转换与测试)
+- [6. 仿真与 ROS 2 推理](#6-仿真与-ros-2-推理)
+- [7. 日志与训练产物](#7-日志与训练产物)
+- [8. 测试](#8-测试)
+
+## 1. 环境准备
+
+### 1.1 支持平台
+
+| 项目 | 支持版本 |
+|---|---|
+| 分支 / 架构 | `jetson_dev` / Linux aarch64（Jetson AGX Orin） |
+| 系统 | JetPack 6.2.1、Ubuntu 22.04 |
+| CUDA / Python | CUDA 12.6 / 系统 Python 3.10 |
+| ROS | ROS 2 Humble |
+| PyTorch / torchvision | 2.8.0 / 0.23.0 |
+| TensorRT | 10.x，本机验证版本 10.3 |
+
+当前 `uv.lock` 仅支持 Linux aarch64，不支持 x86_64、Python 3.12 或 CUDA 13。训练章节提供工作流命令；AGX 验证范围为 CUDA 推理和 ROS 2 部署。
+
+### 1.2 安装依赖
+
+**操作命令：**确认已安装 JetPack、Humble 和 `uv`，然后执行：
 
 ```bash
 test -f /etc/nv_tegra_release
 test -f /opt/ros/humble/setup.bash
 sudo apt-get update
 sudo apt-get install -y python3-dev libopenblas-dev
-```
 
-以下命令从 FastUMI 仓库根目录执行。`--clear` 会重建项目本地的 `.venv`；
-`--system-site-packages` 使 Python 3.10 环境能够使用 Humble 的系统依赖：
-
-```bash
-cd model/dp
 uv venv --clear --python /usr/bin/python3 --system-site-packages .venv
 uv sync --all-groups --locked
 source /opt/ros/humble/setup.bash
 uv lock --check
 ```
 
-`torch==2.8.0` 与 `torchvision==0.23.0` 从 Jetson JP6/CUDA 12.6 索引解析，
-wheel URL 和哈希由 `uv.lock` 固定。首次同步需要下载较大的 Jetson PyTorch wheel。
-非 ROS 命令通过 `uv run --no-sync` 或 `.venv/bin/python` 运行；ROS 命令还须在同一
-终端先 source Humble。可用下面的命令验证 Python、CUDA 和 ROS Python 接口：
+| 参数 | 用途 |
+|---|---|
+| `--clear` | 重建本地 `.venv`，已有环境会被清除 |
+| `--python /usr/bin/python3` | 使用系统 Python 3.10 |
+| `--system-site-packages` | 使用系统 ROS 与 TensorRT Python 依赖 |
+| `--all-groups --locked` | 按锁文件安装主依赖、测试和绘图依赖 |
+| `uv run --no-sync` | 后续命令使用已安装环境，不重复同步 |
+
+**输出：**项目环境 `.venv/`。PyTorch wheel 从 Jetson JP6/CUDA 12.6 索引下载；ROS Python 包由 Humble 提供。
+
+### 1.3 检查环境
 
 ```bash
+source /opt/ros/humble/setup.bash
 uv run --no-sync python - <<'PY'
 import rclpy
 import torch
@@ -42,170 +74,119 @@ import torchvision
 assert torch.__version__.split("+")[0] == "2.8.0"
 assert torchvision.__version__.split("+")[0] == "0.23.0"
 assert torch.cuda.is_available()
-value = (torch.ones(1, device="cuda") * 2).item()
-print(f"torch={torch.__version__}, torchvision={torchvision.__version__}, cuda={torch.version.cuda}, value={value}")
+print("torch:", torch.__version__)
+print("torchvision:", torchvision.__version__)
+print("CUDA:", torch.version.cuda)
+print("GPU:", torch.cuda.get_device_name(0))
+print("CUDA result:", (torch.ones(1, device="cuda") * 2).item())
 PY
 ```
 
-该 AGX 环境用于 CUDA 推理和 ROS 2 部署；下文训练命令保留为工作流参考，不属于 AGX
-性能验收范围。项目不依赖原 UMI 仓库或其环境。
+**输出：**软件版本、GPU 名称和 CUDA 计算结果 `2.0`；检查失败时退出。
 
-## FastUMI canonical 训练路径
+## 2. 数据准备
 
-canonical checkpoint 的任务配置是 `task: umi`，观测键严格为：
+### 2.1 数据与模型契约
 
-- `camera0_rgb`
-- `robot0_eef_pos`
-- `robot0_eef_rot_axis_angle`
-- `robot0_gripper_width`
-- `robot0_eef_rot_axis_angle_wrt_start`
+| 模型 | 观测 | 模型动作输出 |
+|---|---|---|
+| canonical UMI | 下表五键，历史 2 帧 | 每臂 `[B,16,10]`：xyz + rotation-6D + gripper |
+| RM75 关节 | `camera0_rgb` `[B,2,3,224,224]`、`robot0_joint_pos` `[B,2,7]`、`robot0_gripper_position` `[B,2,1]` | `[B,16,8]`：绝对七关节目标 + 夹爪 |
+| RM75 Link7 | UMI 五键，历史 2 帧 | `[B,16,10]`：相对当前观测末端的位姿 + 夹爪 |
+| legacy FastUMI | 仅 `camera0_rgb` | 7D：xyz + rotvec + gripper |
 
-动作是每个机械臂 10 维 `[xyz + rotation_6d + gripper]`。训练示例使用只读 Zarr，输出必须显式指向仓库外的临时目录：
+UMI 五键：
+
+| 键 | 内容 |
+|---|---|
+| `camera0_rgb` | RGB 图像 |
+| `robot0_eef_pos` | 末端位置 |
+| `robot0_eef_rot_axis_angle` | 末端旋转观测 |
+| `robot0_gripper_width` | 夹爪状态 |
+| `robot0_eef_rot_axis_angle_wrt_start` | 相对 episode 起始末端的旋转 |
+
+RM75 数据约定：
+
+- RGB 为 float32 CHW、范围 `[0,1]`；等比缩放并补黑边到 224×224。
+- 采样频率为 30 Hz；关节单位为弧度。关节模型采样锚点对应动作第 0 步，历史不足复制首帧，尾部动作不足舍弃。
+- Link7 存储动作是 7D `[xyz, rotvec, gripper]`；模型动作是 10D，rotation-6D 使用旋转矩阵前两行。
+- Link7 数据位姿参考系为 `base_link`，末端为 `Link7`，工具偏移为零；位置单位米，旋转向量单位弧度。
+- RM75 的 `robot0_gripper_width` 是归一化编码 `[0,1]`，**不是米制宽度**。部署使用相同 URDF、参考系和夹爪编码。
+
+### 2.2 转换 RM75 关节数据
+
+**输入：**原始目录中的 `episode_*/proprio.hdf5` 和 `gripper.mp4`；不读取 `gripper.json`。
 
 ```bash
-cd model/dp
+uv run --no-sync python convert_vr_target.py \
+  --input /path/to/Target \
+  --output ../../dataset/vr_target/target.zarr
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--input` | 是 | 无 | 原始 episode 根目录 |
+| `--output` | 是 | 无 | 新建 Zarr 路径，必须不存在 |
+| `--frequency` | 否 | `30.0` | 对齐频率，Hz，须大于 0 |
+| `--image-size` | 否 | `224` | 输出图像边长；当前模型使用 224 |
+
+**输出：**`target.zarr` 和同级 `target.zarr.report.json`。共同时间区间按前值保持对齐；仅 `complete=true` 的结果可训练。失败后换新输出路径重试。
+
+### 2.3 转换 RM75 Link7 位姿数据
+
+**输入：**已完成的关节 Zarr 和 RM75 URDF；按 `joint1`～`joint7` 分别对状态及控制目标执行正运动学，无需 ROS 或 STL 网格。
+
+```bash
+uv run --no-sync python convert_vr_target_to_umi.py \
+  --input ../../dataset/vr_target/target.zarr \
+  --urdf /path/to/rm_75.urdf \
+  --output ../../dataset/vr_target_umi/target.zarr
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--input` | 是 | 无 | 完整的关节 Zarr |
+| `--urdf` | 是 | 无 | 训练与部署共用的 RM75 URDF |
+| `--output` | 是 | 无 | 新建位姿 Zarr 路径，必须不存在 |
+
+**输出：**`target.zarr`，以及同级 `rm_75.urdf`、`conversion_report.json`。保留并验证图像、时间轴、视频索引和 episode 边界；源数据只读。
+
+## 3. 模型训练
+
+### 3.1 canonical UMI
+
+```bash
 CONFIG_NAME=train_diffusion_unet_timm_umi_workspace
-RUN_DIR="wandb/${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S)"
-WANDB_DIR="$RUN_DIR" \
-WANDB_MODE=offline \
-uv run python train.py \
+RUN_DIR="$(realpath -m ../../dataset/canonical/runs/${CONFIG_NAME}_$(date +%Y%m%d_%H%M%S))"
+mkdir -p "$RUN_DIR"
+WANDB_DIR="$RUN_DIR" WANDB_MODE=offline \
+uv run --no-sync python train.py \
   --config-name="$CONFIG_NAME" \
   task.dataset_path=/absolute/path/to/fastumi_dp_train.zarr.zip \
   logging.mode=offline \
   hydra.run.dir="$RUN_DIR"
 ```
 
-这里同时设置 `WANDB_MODE=offline` 和 Hydra 覆盖项 `logging.mode=offline`，
-确保 W&B 以离线模式记录。`RUN_DIR` 根据 `--config-name` 和当前时间生成，效果与
-Hydra 的 `${now:%Y%m%d_%H%M%S}` 时间格式一致；每次训练会使用独立目录。设置
-`WANDB_DIR="$RUN_DIR"` 后，离线 run
-通常保存在：
+**参数：**使用 `task: umi` 的五键/10D 配置；数据集路径和输出目录按实际位置替换。通用覆盖项见 [3.5](#35-训练参数与短程检查)。
 
-```text
-wandb/<配置名>_<时间戳>/wandb/offline-run-<时间戳>-<run-id>/
-```
+**输出：**`$RUN_DIR` 中的 checkpoint、配置和日志，见 [7.1](#71-训练目录)。训练不写入数据集。
 
-训练结束后，先登录 W&B，再同步终端提示的离线 run 目录：
+### 3.2 RM75 关节
+
+**手动训练：**
 
 ```bash
-uv run wandb login
-find "$RUN_DIR/wandb" -maxdepth 1 -type d -name 'offline-run-*'
-uv run wandb sync "$RUN_DIR/wandb/offline-run-<时间戳>-<run-id>"
-```
-
-`wandb sync` 完成后会打印对应的网页地址。当前训练配置默认上传到
-`umi` project，可在网页中查看 `train_loss`、验证指标和动作 MSE 等曲线。
-需要同步多个 run 时，应分别对每个 `offline-run-*` 目录执行一次
-`wandb sync`。当前机器尚未登录时，`wandb login` 会提示输入 API key。
-
-不上传 W&B 时，可读取 Hydra 输出目录中的
-`$RUN_DIR/logs.json.txt`，使用绘图脚本查看本地指标。该文件保存
-训练过程的逐步 JSON 日志，不提供 W&B 网页的交互式面板。
-
-GPU smoke 应额外传入 `task.dataset.normalizer_num_workers=0`、`dataloader.num_workers=0`、`val_dataloader.num_workers=0`、对应的 `persistent_workers=false` 以及 `training.num_epochs=1`。没有本地 Timm 预训练权重时可显式传入 `policy.obs_encoder.pretrained=false`；常规训练保持配置默认的预训练权重。数据集不会被写入。
-
-## 推理与 ROS 2
-
-canonical 仿真入口是：
-
-```bash
-uv run python infer_sim.py --help
-```
-
-`infer_fastumi_sim.py` 是旧 checkpoint 专用适配器，只接受观测 `{camera0_rgb}` 与 7 维动作 `[xyz + rotvec + gripper]`。它与 canonical 的 5-key/10D checkpoint 不兼容，验证失败时不会自动降级或转换：
-
-```bash
-uv run python infer_fastumi_sim.py --help
-```
-
-真实机器人入口 `infer_real.py` 是 RM75 + Unitree 的纯推理 ROS 2 入口。默认加载
-`~/data/model/DP/checkpoints/best.ckpt`，读取相机、关节与夹爪状态并持续发布
-`/fastumi/policy/action_sequence`：
-
-```bash
-bash model/dp/run_infer_real.sh
-```
-
-该入口不创建机器人执行器，也不发布关节或夹爪命令。实机控制由 ROS 工作区的
-`fastumi_rm75/rm75_placo_controller` 独立承担。
-
-ROS 2 依赖不通过 PyPI 安装。运行 ROS 节点前先执行：
-
-```bash
-source /opt/ros/humble/setup.bash
-cd model/dp
-uv run --no-sync python infer_fastumi_sim.py --ckpt_path /path/to/legacy.ckpt
-```
-
-`rclpy`、`geometry_msgs`、`sensor_msgs` 和 `std_msgs` 由 Humble 提供。
-
-## 测试
-
-```bash
-cd model/dp
-env -u PYTHONPATH uv run --no-sync pytest
-FASTUMI_DATASET=/absolute/path/to/fastumi_dp_train.zarr.zip env -u PYTHONPATH uv run --no-sync pytest tests/test_fastumi_contract.py
-```
-
-第二条命令会对指定真实数据集做只读采样验证。
-
-## RM75 遥操关节训练
-
-`convert_vr_target.py` 读取每个 `episode_*/proprio.hdf5` 和 `gripper.mp4`，完全忽略
-`gripper.json`。状态、动作和图像在共同覆盖区间按 30 Hz 前值保持对齐，RGB 等比缩放并
-补黑边为 224×224。转换异常会停止，未完成的 Zarr 不允许用于训练；重试时请指定新输出路径。
-
-```bash
-cd model/dp
-uv run python convert_vr_target.py \
-  --input /path/to/Target \
-  --output ../../dataset/vr_target/target.zarr
-```
-
-输入契约为 `camera0_rgb: [B,2,3,224,224]`（RGB，float32，[0,1]）、
-`robot0_joint_pos: [B,2,7]`（弧度）和 `robot0_gripper_position: [B,2,1]`（采集编码 [0,1]）。
-输出 `action_pred: [B,16,8]` 是绝对七关节目标加夹爪目标，保持 HDF5 字段顺序和单位，
-时间步长为 1/30 秒。采样锚点对应动作第 0 步；历史不足时复制 episode 首帧，尾部动作不足时舍弃。
-该 checkpoint 使用独立关节契约，需要对应的机器人控制适配；现有位姿推理入口不接受此模型。
-
-训练按 episode 固定 seed 42，90% 训练、10% 验证，归一化仅拟合训练 episode。
-新任务使用 CLIP 权重自带图像均值和标准差，训练增强与确定性的验证/推理预处理分开。
-
-```bash
-cd model/dp
-RUN_DIR="$(realpath ../../dataset/vr_target)/runs/$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="$(realpath -m ../../dataset/vr_target/runs/$(date +%Y%m%d_%H%M%S))"
 mkdir -p "$RUN_DIR"
-OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 WANDB_MODE=offline WANDB_DIR="$RUN_DIR" \
-HF_HUB_OFFLINE=1 uv run --no-sync python train.py \
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+WANDB_MODE=offline WANDB_DIR="$RUN_DIR" HF_HUB_OFFLINE=1 \
+uv run --no-sync python train.py \
   --config-name=train_diffusion_unet_timm_vr_joint_workspace \
+  task.dataset_path="$(realpath ../../dataset/vr_target/target.zarr)" \
   hydra.run.dir="$RUN_DIR"
 ```
 
-完整配置为 120 epoch、batch 32、EMA、TF32 矩阵乘，每轮完整验证 loss，每 5 轮（epoch 0、5、10…）
-完整验证集扩散采样。若出现显存不足，batch 依次降低到 16、8，并保存实际运行覆盖参数。
-`HF_HUB_OFFLINE=1` 适用于本地已缓存预训练权重的环境；首次安装需先准备该权重。
-GPU smoke 可覆盖 `training.num_epochs=1 training.max_train_steps=3 training.max_val_steps=2`
-以及 `dataloader.num_workers=0 dataloader.persistent_workers=false`
-和对应的 `val_dataloader` 参数，并指定独立 smoke 输出目录。
-
-输出包括 `dataset_split.json`、`normalizer.pkl`、`logs.json.txt`、Hydra 配置、离线 W&B 日志，
-以及 `checkpoints/best.ckpt`、`latest.ckpt` 和按验证 loss 保留的最佳 3 个 checkpoint。
-checkpoint 包含 EMA、模型、优化器和数据契约；结束时同步写入最终 checkpoint。
-归一化总动作 MSE、关节/夹爪分量 MSE 用于尺度均衡比较，`val_joint_mse_rad2` 和
-`val_gripper_mse` 报告原始单位误差。
-
-```bash
-uv run python evaluate_vr_joint.py \
-  --checkpoint "$RUN_DIR/checkpoints/best.ckpt" \
-  --dataset ../../dataset/vr_target/target.zarr \
-  --output "$RUN_DIR/evaluation"
-```
-
-评估保存 `metrics.json` 和首批 `predictions.npz`（预测及真实 16×8 动作）。
-`--max-steps 2` 可用于 checkpoint smoke；正式评估省略此参数。
-全部派生数据和运行输出位于 Git 忽略的 `dataset/` 中。离线指标不代表实机任务成功率。
-
-可使用顺序启动器完成训练和训练后的完整评估（`--output` 必须为新目录）：
+**训练后自动评估：**需要顺序完成训练和最佳模型评估时，改用：
 
 ```bash
 uv run --no-sync python run_vr_joint.py \
@@ -213,138 +194,430 @@ uv run --no-sync python run_vr_joint.py \
   --output ../../dataset/vr_target/runs/my_baseline
 ```
 
-启动器保存 `launch.json` 中的精确命令及环境覆盖，以及 `run_status.json` 的
-`training` / `evaluation` / `complete` / `failed` 状态。
-训练中逐步进度见 `logs.json.txt` 和 `training.console.log`；
-正常结束会自动评估最佳模型，将结果写入 `evaluation/metrics.json` 和完成状态文件。
+| 启动器参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--dataset` | 是 | 无 | 关节 Zarr |
+| `--output` | 是 | 无 | 本次运行的新目录，必须不存在 |
+| `--batch-size` | 否 | `32` | 训练、验证与评估 batch；支持 `32`、`16`、`8` |
 
-## RM75 Link7 末端位姿训练（UMI 五键 / 10D）
+**默认配置：**120 epoch、EMA、TF32；seed 42，按 episode 划分 90%/10%，归一化只拟合训练集。每轮验证 loss，每 5 轮完整动作采样；图像训练增强与验证/推理预处理分开。
 
-`convert_vr_target_to_umi.py` 读取已同步的关节 Zarr，使用提供的 RM75 URDF，按
-`joint1`～`joint7` 顺序分别对观测关节角与控制目标执行正运动学。仅解析运动链，
-无需 ROS 或 STL 网格。输出位置单位为米、旋转向量单位为弧度，参考系为 `base_link`，
-末端为 `Link7`，工具偏移为零。
+**输出：**标准训练产物；启动器额外保存 `launch.json`、`run_status.json`、`training.console.log`、`evaluation.console.log` 和 `evaluation/`。状态为 `training`、`evaluation`、`complete` 或 `failed`。
 
-转换保留 30 Hz 图像、时间轴、源视频索引和 episode 边界，并逐块验证复制字段一致。
-存储动作是 `[xyz(3), rotvec(3), gripper(1)]`；模型输出是
-`[xyz(3), rotation_6d(6), gripper(1)]`，形状为 `[B,16,10]`。旋转 6D 采用 UMI
-旋转矩阵前两行的编码，输出位姿相对当前观测末端。模型输入保持原来的五个键，
-每路观测历史为 2 帧；末端状态和动作标签来自 HDF5 的不同字段，分别处理。
+### 3.3 Link7 分阶段验证
 
-为兼容五键结构，夹爪字段仍命名为 `robot0_gripper_width`，本数据实际数值是
-**原始归一化编码 `[0,1]`，并非米制宽度**；该定义随数据属性及 checkpoint 配置保存。
-部署时必须使用相同末端参考点、动作参考系和夹爪编码，不能仅凭键名套用原硬件参数。
+**前提：**数据集必须包含 200 段；seed 42 划分 180/20，再选取 32/8 子集。两阶段使用同一个新验证目录，先 `overfit`，通过后再 `small`。
 
 ```bash
-cd model/dp
-uv sync --all-groups
-uv run --no-sync python convert_vr_target_to_umi.py \
-  --input ../../dataset/vr_target/target.zarr \
-  --urdf /path/to/rm_75.urdf \
-  --output ../../dataset/vr_target_umi/target.zarr
-```
-
-输出路径必须不存在。当前机器已经完成转换时，直接使用生成的数据；旧关节数据、
-旧训练记录和原始采集数据保持保留，转换前备份及 SHA-256 清单位于
-`dataset/backups/vr_joint_<时间戳>/`。
-
-验证入口固定 seed 42，将 200 段分为 180/20，然后从两组内选取 32/8 小规模子集，
-写入 `split.json`。下面两步使用同一个新验证目录，依次执行：
-
-```bash
+VALIDATION_DIR=../../dataset/vr_target_umi/validation_new
 uv run --no-sync python validate_vr_umi.py \
   --dataset ../../dataset/vr_target_umi/target.zarr \
-  --output ../../dataset/vr_target_umi/validation_new --stage overfit
+  --output "$VALIDATION_DIR" --stage overfit
 uv run --no-sync python validate_vr_umi.py \
   --dataset ../../dataset/vr_target_umi/target.zarr \
-  --output ../../dataset/vr_target_umi/validation_new --stage small
+  --output "$VALIDATION_DIR" --stage small
 ```
 
-固定批次阶段冻结编码器、关闭增强，优化 1000 步，动作 MSE 需下降至少 80%。
-小规模阶段重新初始化模型、重新拟合 32 段训练数据的归一化参数，训练至少 20 轮，
-最多 40 轮；验证 loss 与固定验证样本动作 MSE 的末三轮均值须比首三轮均值各下降至少
-30%。学习率按 40 轮预算调度，第 20 轮起达到条件即停止。验证阶段不会启动全量训练。
-每阶段保存 `result.json`；未通过指标要求时脚本以非零状态退出。
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--dataset` | 是 | 无 | Link7 位姿 Zarr |
+| `--output` | 是 | 无 | 两阶段共用的验证目录；重试使用新目录 |
+| `--stage` | 是 | 无 | `overfit` 或 `small` |
 
-**全量训练由用户启动：** 默认使用两个 Accelerate DDP 进程、BF16，以及每张 GPU
-32 个样本（全局 batch 64）。Hydra 的 `dataloader.batch_size` 和
-`val_dataloader.batch_size` 都是每进程、即每张 GPU 的 batch，不是全局 batch。
-离线训练前须确保预训练 ViT 已在 Hugging Face Hub 缓存中；缓存不在默认位置时通过
-`HF_HUB_CACHE` 指向 Hub 根目录（该目录下应直接包含 `models--timm--...`）。
+| 阶段 | 操作 | 通过条件 |
+|---|---|---|
+| `overfit` | 冻结编码器、关闭增强，固定批次优化 1000 步 | 动作 MSE 下降至少 80% |
+| `small` | 重新初始化模型及训练集归一化，训练 20～40 轮 | 验证 loss、固定验证动作 MSE 的末三轮均值比首三轮各下降至少 30% |
+
+**输出：**`split.json`、`overfit/result.json`、`small/result.json`、各阶段配置/日志/checkpoint，以及 `small/evaluation/`。第 20 轮起满足条件可提前结束；未通过返回非零状态。验证不自动启动全量训练。
+
+### 3.4 Link7 全量训练
+
+**前提：**预训练 ViT 权重已缓存；自定义缓存目录使用 `HF_HUB_CACHE`。脚本从头训练，不继承验证阶段模型或归一化参数。
 
 ```bash
-# 从 FastUMI 仓库根目录执行。
-HF_HUB_CACHE=/path/to/huggingface/hub \
-CUDA_VISIBLE_DEVICES=0,1 \
-bash model/dp/train_vr_umi.sh
+# 单卡（AGX Orin 使用此配置）
+NUM_PROCESSES=1 CUDA_VISIBLE_DEVICES=0 bash train_vr_umi.sh
+
+# 双卡（脚本默认进程数为 2）
+CUDA_VISIBLE_DEVICES=0,1 bash train_vr_umi.sh
+
+# 自定义输出目录：将新目录作为唯一位置参数传入
+NUM_PROCESSES=1 bash train_vr_umi.sh /path/to/new_run
 ```
 
-也可传入一个尚不存在的输出目录：`bash model/dp/train_vr_umi.sh /path/to/new_run`。
-进程数、每卡训练 batch、每卡验证 batch 和混合精度可以分别通过
-`NUM_PROCESSES`、`TRAIN_BATCH_SIZE`、`VAL_BATCH_SIZE`、`MIXED_PRECISION` 覆盖；
-例如单卡兼容模式使用 `NUM_PROCESSES=1`。支持的混合精度值为 `no`、`fp16` 和
-`bf16`。脚本启动时会打印解析后的进程数、每卡/global batch、可见 GPU、精度、缓存
-及输出目录。
+以上命令按设备与输出需求选择一条执行。
 
-脚本从头运行 120 轮，每卡 batch 32，使用全部 180/20 episode 划分，采用原 UMI 预训练视觉
-编码器和 Diffusion UNet、AdamW、EMA、2000 步 warmup、cosine 学习率、TF32 加速。
-默认使用本机缓存的预训练权重、离线 W&B 日志，不加载小规模模型或其归一化统计。
-结果位于 `dataset/vr_target_umi/runs/full_<时间戳>/`，每轮保存 `latest.ckpt`，
-按验证 loss 保存 `best.ckpt` 和最佳 3 个 checkpoint。
+| 参数 / 环境变量 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| 位置参数 `RUN_DIR` | 否 | `dataset/vr_target_umi/runs/full_<时间戳>` | 新运行目录，必须不存在 |
+| `NUM_PROCESSES` | 否 | `2` | GPU 进程数；单卡设 `1` |
+| `TRAIN_BATCH_SIZE` | 否 | `32` | 每张 GPU 的训练 batch |
+| `VAL_BATCH_SIZE` | 否 | `32` | 每张 GPU 的验证 batch |
+| `MIXED_PRECISION` | 否 | `bf16` | 支持 `no`、`fp16`、`bf16` |
+| `CUDA_VISIBLE_DEVICES` | 否 | 全部可见 GPU | 选择参与训练的 GPU |
+| `HF_HUB_CACHE` | 否 | Hub 默认缓存目录 | 目录下直接包含 `models--timm--...`；也支持 `HF_HOME` |
 
-### 训练结束后查看 W&B 曲线
+**默认配置：**120 epoch、90%/10% episode 划分、预训练视觉编码器、Diffusion UNet、AdamW、EMA、2000 步 warmup、cosine 学习率、TF32、离线 W&B。200 段数据对应 180/20 划分。
 
-训练默认使用离线 W&B。训练完成后，将启动时打印的 `run directory` 赋给
-`RUN_DIR`，登录 W&B 并同步该次训练的离线 run：
+**输出：**启动时打印 GPU、精度、缓存及运行目录；每轮保存 `latest.ckpt`，按验证 loss 保存 `best.ckpt` 和最佳 3 个 checkpoint。全局训练 batch = `NUM_PROCESSES × TRAIN_BATCH_SIZE`。
+
+### 3.5 训练参数与短程检查
+
+`train.py` 使用 Hydra：`--config-name` 选择配置，`key=value` 覆盖配置项。
+
+| Hydra 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--config-name` | 是（上述命令） | 未指定工作流 | 选择 canonical、关节或 Link7 配置 |
+| `task.dataset_path` | canonical 须覆盖 | canonical：`example_demo_session/dataset.zarr.zip`；RM75：`../../dataset/vr_target/target.zarr` 或 `../../dataset/vr_target_umi/target.zarr` | 训练数据集 |
+| `hydra.run.dir` | 建议显式设置 | `data/outputs/<日期>/<时间>_<name>_<task_name>` | 本次运行目录；上述命令覆盖到 `dataset/` |
+| `training.num_epochs` | 否 | `120` | 训练轮数 |
+| `dataloader.batch_size` | 否 | `32` | 每进程训练 batch；显存不足可设 `16`、`8` |
+| `val_dataloader.batch_size` | 否 | canonical：`4`；RM75：`32` | 每进程验证 batch |
+| `training.max_train_steps` / `training.max_val_steps` | 否 | `null`（不限制） | 每轮最大训练 / 验证批次数 |
+| `task.dataset.normalizer_num_workers` | 否 | canonical：`32`；Link7：`4`；关节：不支持此覆盖项 | 归一化统计进程数 |
+| `dataloader.num_workers` / `val_dataloader.num_workers` | 否 | 训练：`8`；验证：canonical `8`、RM75 `4` | 数据加载进程数 |
+| `dataloader.persistent_workers` / `val_dataloader.persistent_workers` | 否 | `true` | worker 数为 0 时必须同时设 `false` |
+| `policy.obs_encoder.pretrained` | 否 | `true` | 正常训练使用预训练权重；无缓存的短程检查可设 `false` |
+| `logging.mode` | 否 | canonical：`online`；RM75：`offline` | W&B 模式；上述命令统一离线记录 |
+
+| 环境变量 | 使用方式 | 用途 |
+|---|---|---|
+| `WANDB_MODE` / `WANDB_DIR` | `offline` / 本次 `RUN_DIR` | 离线日志模式与保存位置 |
+| `HF_HUB_OFFLINE` | 已缓存权重时设 `1` | 禁止下载；关节启动器和 Link7 脚本固定启用 |
+| `OMP_NUM_THREADS` / `MKL_NUM_THREADS` | RM75 示例及启动器设 `4` | 限制 CPU 计算线程 |
+
+**短程检查：**在对应 `train.py` 命令末尾追加以下覆盖项，另设独立 `hydra.run.dir`：
 
 ```bash
-# 从 FastUMI 仓库根目录执行；替换为训练启动时打印的实际目录。
-RUN_DIR=/absolute/path/to/dataset/vr_target_umi/runs/full_<时间戳>
-cd model/dp
-uv run --no-sync wandb login
-find "$RUN_DIR/wandb" -maxdepth 1 -type d -name 'offline-run-*'
-uv run --no-sync wandb sync "$RUN_DIR/wandb/offline-run-<时间戳>-<run-id>"
+training.num_epochs=1 training.max_train_steps=3 training.max_val_steps=2 \
+dataloader.num_workers=0 dataloader.persistent_workers=false \
+val_dataloader.num_workers=0 val_dataloader.persistent_workers=false
 ```
 
-`wandb sync` 成功后会在终端打印该 run 的网页地址；也可登录 W&B 后进入
-`fastumi-vr-umi` project，在 Runs 中打开对应 run。Workspace 中重点查看
-`train_loss`、`val_loss` 和 `lr`；`fixed_val_action_mse_error` 及其
-`_pos`、`_rot`、`_width` 分量每轮记录，适合观察动作预测是否持续收敛。
-`val_action_mse_error`、`val_position_rmse_m`、`val_rotation_error_deg` 和
-`val_gripper_mse` 默认每 5 轮记录一次，因此曲线点数少于 loss 曲线属于正常现象。
-若目录中存在多个 `offline-run-*`，应根据目录时间选择本次训练的 run，并逐个同步
-需要保留的其他 run。无法上传时，仍可从 `$RUN_DIR/logs.json.txt` 查看相同的本地指标。
+canonical / Link7 还可追加 `task.dataset.normalizer_num_workers=0`。查看所选配置的全部参数：
 
 ```bash
-cd model/dp
+uv run --no-sync python train.py \
+  --config-name=train_diffusion_unet_timm_umi_workspace --cfg job
+```
+
+**输出：**短程运行使用相同产物格式；`--cfg job` 只打印配置，不启动训练。
+
+## 4. 评估与绘图
+
+### 4.1 模型评估
+
+按 checkpoint 类型选择评估入口，默认评估完整验证集；快速检查增加 `--max-steps 2`。
+
+```bash
+# 关节模型
+uv run --no-sync python evaluate_vr_joint.py \
+  --checkpoint /path/to/run/checkpoints/best.ckpt \
+  --dataset ../../dataset/vr_target/target.zarr \
+  --output /path/to/run/evaluation
+
+# Link7 模型
 uv run --no-sync python evaluate_vr_umi.py \
   --checkpoint /path/to/run/checkpoints/best.ckpt \
   --dataset ../../dataset/vr_target_umi/target.zarr \
   --output /path/to/run/evaluation
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--checkpoint` | 是 | 无 | 对应类型的本地 checkpoint；优先加载 EMA 权重 |
+| `--dataset` | 是 | 无 | 对应 Zarr；使用 checkpoint 配置中的验证划分 |
+| `--output` | 是 | 无 | 评估文件目录 |
+| `--device` | 否 | `cuda:0` | 推理设备 |
+| `--batch-size` | 否 | `32` | 评估 batch |
+| `--max-steps` | 否 | 不限制 | 最大评估批次数 |
+| `--num-workers` | 否 | `4` | 仅关节入口支持；Link7 固定为 4 |
+
+**输出：**
+
+| 文件 / 指标 | 关节模型 | Link7 模型 |
+|---|---|---|
+| `metrics.json` | 验证 loss、归一化动作及分量 MSE、关节 MSE（rad²）、夹爪 MSE | 验证 loss、归一化动作及分量 MSE、位置 RMSE（米）、旋转角误差（度）、夹爪 MSE |
+| `predictions.npz` | 首批预测与真实 `[B,16,8]` 动作 | 首批预测与真实 `[B,16,10]` 动作、解码后的相对变换 |
+
+离线误差不代表实机任务成功率。
+
+### 4.2 Link7 数据与验证曲线
+
+```bash
 uv run --no-sync python plot_vr_umi_validation.py \
   --dataset ../../dataset/vr_target_umi/target.zarr \
-  --validation ../../dataset/vr_target_umi/validation \
+  --validation ../../dataset/vr_target_umi/validation_new \
   --output ../../dataset/vr_target_umi/plots
 ```
 
-离线评估使用 checkpoint 自带的验证划分，输出归一化动作 MSE、位置 RMSE（米）、
-平均旋转测地角（度）、夹爪 MSE，以及首批 `[B,16,10]` 预测和解码变换。
-绘图需要 `validation` 依赖组中的 Matplotlib。损失下降证明离线学习流程有效，
-机器人任务成功率需要单独实机验证。
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--dataset` | 是 | 无 | Link7 位姿 Zarr |
+| `--validation` | 是 | 无 | [3.3](#33-link7-分阶段验证) 的验证目录 |
+| `--output` | 是 | 无 | PNG 与统计文件目录 |
 
-## RM75 Link7 ROS2 在线推理
+**输出：**`data_trajectories.png`、`trajectory_statistics.json`；已运行阶段对应生成 `overfit_curves.png`、`small_training_curves.png`。Matplotlib 已由 `validation` 依赖组安装。
 
-`infer_vr_umi_ros2.py` 订阅 RGB、七轴 `JointState` 和归一化 `Float32` 夹爪反馈，
-使用 VR UMI 五键/10D 模型，发布带观测时间的完整 16 步绝对 Link7 位姿和夹爪目标。
-支持可扩展后处理、episode 重置与过期结果丢弃。
-构建、启动、消息契约和真实模型回放验证见 [ROS2 推理说明](vr_umi_ros/README.md)。
+## 5. TensorRT 转换与测试
 
-RM75 与 Unitree 部署时，先启动纯推理入口，再在安装 Placo 的独立 Python 环境中启动
-`rm75_placo_controller`。推理入口只发布绝对 Link7 与夹爪目标：
+### 5.1 输入与运行要求
+
+使用 `scl_dev` 中 `export_onnx.py` / `verify_onnx.py` 生成的 Link7 ONNX 包；当前章节从已有 ONNX 开始，无需重新读取训练数据或安装 ONNX Runtime。
 
 ```bash
-bash model/dp/run_infer_real.sh
+ONNX_DIR=../../dataset/h5dy_data/rm75_umi/runs/0929_2/onnx/latest
+CKPT=../../dataset/h5dy_data/rm75_umi/runs/0929_2/checkpoints/latest.ckpt
 ```
 
-控制节点默认连接实机；首次联调使用 `dry_run:=true`。完整接口、环境和验收顺序见
-[ROS2 推理说明](vr_umi_ros/README.md) 与 `ros2_ws/src/fastumi_rm75/README.md`。
+| 输入 / 要求 | 内容 |
+|---|---|
+| ONNX 图 | `obs_encoder.onnx`、`denoiser.onnx` |
+| 来源与接口 | `manifest.json`；文件哈希、输入输出名称/形状/类型须匹配 |
+| 验证样本 | `validation_samples.npz`，默认复用 8 组观测与初始噪声 |
+| checkpoint | 与 manifest 哈希一致的可信本地训练产物（通过 dill 加载） |
+| 执行环境 | CUDA GPU、TensorRT 10.x；其他主版本报错 |
+| 模型接口 | 固定 batch=1、FP32 输入输出、浮点 timestep、16 次 DDIM |
+
+### 5.2 构建引擎
+
+```bash
+uv run --no-sync python export_tensorrt.py --onnx-dir "$ONNX_DIR"
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--onnx-dir` | 是 | 无 | ONNX 包目录 |
+| `--output-dir` | 否 | 同一 run 的 `tensorrt/<ONNX 目录名>/` | 引擎输出目录；示例为 `tensorrt/latest/` |
+| `--precision` | 否 | `both` | `fp16`、`fp32` 或 `both` |
+| `--workspace-gib` | 否 | `4.0` | 构建 workspace，范围 `(0,64]` GiB |
+| `--overwrite` | 否 | 不覆盖 | 显式覆盖已有引擎 |
+
+| 配置 | 编码器 | 去噪器 |
+|---|---|---|
+| `fp32` | FP32 | FP32 |
+| `fp16` | 混合 FP16；归一化与 Softmax 保留 FP32 | **FP32 回退** |
+
+该模型的去噪器在 TensorRT 10.3 FP16 构建中于 DDIM 时间步 12～45 出现非有限值，因此 `fp16` 配置使用 FP32 去噪器。所有输入输出、DDIM 更新、动作反归一化保持 FP32；TF32 关闭。
+
+**输出：**默认四个引擎及构建记录，见 [5.5](#55-输出文件)。精度验证和测速需要两套配置，首次构建使用默认 `both`。失败不会发布新的完整 manifest。
+
+### 5.3 精度验证
+
+```bash
+uv run --no-sync python verify_tensorrt.py \
+  --checkpoint "$CKPT" --onnx-dir "$ONNX_DIR"
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--checkpoint` | 是 | 无 | 来源匹配的 checkpoint，加载 EMA 权重 |
+| `--onnx-dir` | 是 | 无 | ONNX 包与验证样本目录 |
+| `--engine-dir` | 否 | 同一 run 的 `tensorrt/<ONNX 目录名>/` | 同时包含 `fp32`、`fp16` 配置的引擎目录 |
+| `--num-samples` | 否 | `8` | 验证数量，范围为 `1`～缓存样本数 |
+
+**输出：**`reports/precision_report.json`、`reports/precision_arrays.npz`。
+
+| 对比项 | 报告内容 |
+|---|---|
+| 编码器 | 与 checkpoint PyTorch CUDA FP32 输出比较 |
+| 单步去噪 | 每步使用相同 PyTorch 输入，区分单步误差与累积误差 |
+| 完整动作 | 各后端独立完成 16 步采样；保留已保存 PyTorch / ONNX 结果对照 |
+| 数值误差 | 最大绝对误差、平均绝对误差、RMSE；动作按位置、rotation-6D、夹爪分组 |
+| 物理误差 | 位置欧氏距离差（毫米）、旋转角度差（度）、夹爪归一化开度差 |
+| 状态 | 有限结果标记“未设置验收阈值”；来源、形状、旋转无效或非有限值返回非零状态 |
+
+### 5.4 推理性能测试
+
+```bash
+uv run --no-sync python benchmark_tensorrt.py \
+  --checkpoint "$CKPT" --onnx-dir "$ONNX_DIR" \
+  --warmup 20 --iterations 100
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--checkpoint` | 是 | 无 | 来源匹配的 checkpoint |
+| `--onnx-dir` | 是 | 无 | ONNX 包与验证样本目录 |
+| `--engine-dir` | 否 | 同一 run 的 `tensorrt/<ONNX 目录名>/` | 同时包含两套配置的引擎目录 |
+| `--warmup` | 否 | `20` | 每个测量项目预热次数，须非负 |
+| `--iterations` | 否 | `100` | 每个测量项目测试次数，须大于 0 |
+
+**输出：**`reports/benchmark_report.json`。依次测试 PyTorch CUDA FP32、TensorRT FP32、TensorRT FP16 编码器 + FP32 去噪器，使用相同 GPU、样本及初始噪声；PyTorch 关闭 AMP、TF32，不使用 `torch.compile`。
+
+| 测量项目 | 范围 / 计时方式 |
+|---|---|
+| 编码器、单步 UNet | 输入已驻留 GPU，CUDA events |
+| 完整策略（GPU 驻留） | 编码器、16 步 DDIM、反归一化；同步后的墙钟计时 |
+| 完整策略（端到端） | 加上输入上传与动作下载；同步后的墙钟计时 |
+| 统计 | mean、median、P90、P95（毫秒），每秒调用 / 完整预测次数，相对两条 FP32 基线的加速比 |
+| 排除项 | 模型/引擎加载、构建、文件读取、预热 |
+| 设备记录 | GPU、软件版本、可读取的功耗/时钟状态；不修改系统功耗设置 |
+
+### 5.5 输出文件
+
+默认输出位于示例 run 的 `tensorrt/latest/`：
+
+```text
+tensorrt/latest/
+├── obs_encoder.fp32.plan
+├── denoiser.fp32.plan
+├── obs_encoder.fp16.plan
+├── denoiser.fp16_fallback_fp32.plan
+├── manifest.json
+├── build_log.json
+└── reports/
+    ├── precision_report.json
+    ├── precision_arrays.npz
+    └── benchmark_report.json
+```
+
+`manifest.json` 记录来源/引擎哈希、实际精度、GPU、CUDA、TensorRT 版本和接口设置；`build_log.json` 记录逐图构建时间与精度约束。引擎和报告留在 `dataset/`。
+
+## 6. 仿真与 ROS 2 推理
+
+### 6.1 入口选择
+
+| 入口 | 支持模型 / 用途 | 输出 |
+|---|---|---|
+| `infer_sim.py` | canonical UMI 五键/10D 仿真 | `/sensor_processing_dp` 动作消息 |
+| `infer_fastumi_sim.py` | legacy 单图像/7D 仿真；不接受五键/10D | `/sensor_processing_dp` 动作消息 |
+| `infer_real.py` / `run_infer_real.sh` | RM75 + Unitree Link7 实机纯推理 | `/fastumi/policy/action_sequence` |
+| `infer_vr_umi_ros2.py` / `run_vr_umi_ros2.sh` | 可配置 Link7 ROS 节点、后处理、episode 重置 | 完整 16 步绝对 Link7 位姿与夹爪目标 |
+
+关节 checkpoint 需要独立控制适配；现有位姿入口不接受。上述 ROS 推理入口使用 checkpoint；TensorRT 脚本用于离线转换、验证与测速。
+
+### 6.2 仿真推理
+
+```bash
+source /opt/ros/humble/setup.bash
+
+# canonical 模型
+uv run --no-sync python infer_sim.py --ckpt_path /path/to/canonical.ckpt
+
+# legacy 模型
+uv run --no-sync python infer_fastumi_sim.py --ckpt_path /path/to/legacy.ckpt
+```
+
+**基础参数：**
+
+| 参数 | 入口 | 必填 | 默认值 | 用途 |
+|---|---|---|---|---|
+| `--ckpt_path` | 两者 | 是 | 无 | 对应契约的 checkpoint |
+| `--n_action_steps` | 两者 | 否 | `4` | 下次推理前使用的预测动作数 |
+| `--img_size` | 两者 | 否 | `224` | 图像边长 |
+| `--n_obs_steps` | canonical | 否 | `2` | 观测历史帧数 |
+| `--device` | legacy | 否 | `cuda:0` | 推理设备 |
+| `--diffusion_policy_root` | legacy | 否 | 当前 `model/dp` | 旧 checkpoint 导入兼容路径 |
+
+**canonical 调试参数：**
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--publish_hz` | 否 | `20.0` | 动作发布频率上限；≤0 不限频 |
+| `--action_pose_mode` | 否 | `relative` | `relative` 或 `absolute_rotvec`；按模型动作契约选择 |
+| `--lock_stack_cube_grasp_orientation` | 否 | 不启用 | 固定抓取方向 |
+| `--lock_stack_cube_grasp_roll_pitch` | 否 | 不启用 | 固定 roll/pitch、保留预测 yaw；与上一项互斥 |
+| `--debug_cup_pose` / `--debug_plate_pose` | 否 | 无 | 调试物体位姿：`x,y,z,w,qx,qy,qz` |
+| `--min_tcp_z` | 否 | 无 | 发布动作的最低世界坐标 z |
+| `--rollout_log_csv` | 否 | 无 | 保存 rollout CSV 的路径 |
+| `--lock_debug_cup_xy_until_close` | 否 | 不启用 | 调试时下降阶段固定 cup XY，首次闭合后解除 |
+| `--debug_cup_xy_lock_z_below` | 否 | `0.22` | 上述 XY 固定的 z 阈值 |
+| `--debug_cup_xy_lock_close_width` | 否 | `0.035` | 解除 XY 固定的夹爪宽度阈值 |
+
+**输出：**ROS 动作话题；指定 `--rollout_log_csv` 时额外输出 CSV。完整帮助使用 `uv run --no-sync python <入口脚本> --help`。
+
+### 6.3 RM75 + Unitree 实机纯推理
+
+**前提：**已构建 ROS 工作区并启动相机、关节和夹爪反馈节点。脚本自动加载 Humble、工作区及项目虚拟环境。
+
+```bash
+bash run_infer_real.sh
+
+# 自定义 checkpoint
+bash run_infer_real.sh --checkpoint /path/to/run/checkpoints/best.ckpt
+```
+
+| 参数 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `--checkpoint`（别名 `--ckpt_path`） | 否 | `~/data/model/DP/checkpoints/best.ckpt` | Link7 checkpoint |
+| `--urdf-path` | 否 | `assets/rm_75_kinematic.urdf` | 须匹配训练契约的 URDF |
+| `--device` | 否 | `cuda:0` | 推理设备 |
+| `--camera-topic` | 否 | `/camera/image_raw/compressed` | 压缩 RGB 图像 |
+| `--joint-topic` | 否 | `/joint_states` | 七轴 JointState，弧度 |
+| `--gripper-state-topic` | 否 | `/motion_control/gripper_state` | Float32 夹爪反馈，归一化 `[0,1]` |
+| `--max-inference-hz` | 否 | `10.0` | 推理频率上限 |
+
+**输出：**`/fastumi/policy/action_sequence`，包含观测时间、16 步 `base_link → Link7` 绝对位姿和归一化夹爪目标。入口只发布预测；控制由独立 `rm75_placo_controller` 执行，首次联调设置 `dry_run:=true`。
+
+构建、节点参数、回放验证、重置和后处理见 [ROS 2 推理说明](vr_umi_ros/README.md)；实机控制环境及启动顺序见 [RM75 控制说明](../../ros2_ws/src/fastumi_rm75/README.md)。
+
+## 7. 日志与训练产物
+
+### 7.1 训练目录
+
+将 `RUN_DIR` 设置为训练命令的输出目录或启动脚本打印的 `run directory`。
+
+| 路径 | 内容 |
+|---|---|
+| `checkpoints/latest.ckpt` | 最新权重与运行状态；RM75 配置含 EMA、优化器和数据契约 |
+| `checkpoints/best.ckpt` | 最佳模型；RM75 按验证 loss，canonical 按训练动作 MSE |
+| `checkpoints/epoch=*.ckpt` | top-k：RM75 保留 3 个（验证 loss），canonical 保留 5 个（训练 loss） |
+| `logs.json.txt` | 逐步 JSON 训练指标 |
+| `.hydra/` | Hydra 配置与覆盖项 |
+| `dataset_split.json` | RM75 数据划分 |
+| `normalizer.pkl` | 训练使用的归一化统计 |
+| `wandb/offline-run-*` | W&B 离线记录（上述训练命令） |
+
+RM75 每轮保存最新模型，并在结束时同步保存最终 checkpoint。
+
+### 7.2 查看与同步 W&B
+
+```bash
+RUN_DIR=/path/to/run
+uv run --no-sync wandb login
+find "$RUN_DIR/wandb" -maxdepth 1 -type d -name 'offline-run-*'
+# 用上一条命令找到的实际目录替换下面路径
+uv run --no-sync wandb sync "$RUN_DIR/wandb/offline-run-<时间戳>-<run-id>"
+```
+
+**参数：**`wandb sync` 的位置参数为实际 `offline-run-*` 目录；多个 run 分别同步。
+
+**输出：**同步成功后打印网页地址。无需上传时直接读取 `$RUN_DIR/logs.json.txt`。
+
+| 工作流 | W&B project | 主要曲线 |
+|---|---|---|
+| canonical | `umi` | `train_loss`、动作 MSE |
+| RM75 关节 | `fastumi-vr-target` | `train_loss`、`val_loss`、关节/夹爪误差 |
+| RM75 Link7 | `fastumi-vr-umi` | `train_loss`、`val_loss`、`lr`、固定验证动作 MSE |
+
+Link7 的 `fixed_val_action_mse_error` 及 `_pos`、`_rot`、`_width` 每轮记录；`val_action_mse_error`、`val_position_rmse_m`、`val_rotation_error_deg`、`val_gripper_mse` 默认每 5 轮记录。
+
+## 8. 测试
+
+### 8.1 自动化测试
+
+```bash
+env -u PYTHONPATH uv run --no-sync pytest
+
+# 仅检查 TensorRT 共用逻辑
+env -u PYTHONPATH uv run --no-sync pytest tests/test_tensorrt_link7.py
+```
+
+**参数：**`pytest <测试文件>` 限定测试范围；`-q` 简化输出。ROS 节点测试的构建与环境要求见 [ROS 2 推理说明](vr_umi_ros/README.md#验证)。
+
+**输出：**测试通过、失败或跳过的统计；失败返回非零状态。
+
+### 8.2 真实数据集契约检查
+
+```bash
+FASTUMI_DATASET=/absolute/path/to/fastumi_dp_train.zarr.zip \
+env -u PYTHONPATH uv run --no-sync pytest tests/test_fastumi_contract.py
+```
+
+| 环境变量 | 必填 | 默认值 | 用途 |
+|---|---|---|---|
+| `FASTUMI_DATASET` | 真实数据检查时必填 | 未设置时跳过相关测试 | canonical Zarr 路径，仅只读采样 |
+
+**输出：**真实数据契约测试结果；不改写数据集。

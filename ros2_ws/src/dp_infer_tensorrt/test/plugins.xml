@@ -1,0 +1,5 @@
+<library path="test_postprocessors">
+  <class name="dp_infer_tensorrt/TestShift" type="dp_infer_tensorrt::TestShift" base_class_type="dp_infer_tensorrt::Postprocessor"/>
+  <class name="dp_infer_tensorrt/TestInvalid" type="dp_infer_tensorrt::TestInvalid" base_class_type="dp_infer_tensorrt::Postprocessor"/>
+  <class name="dp_infer_tensorrt/TestThrow" type="dp_infer_tensorrt::TestThrow" base_class_type="dp_infer_tensorrt::Postprocessor"/>
+</library>

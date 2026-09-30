@@ -1,0 +1,56 @@
+# ROS 2 参数文件：dp_infer_tensorrt 节点使用 ros__parameters 下的配置进行 RM75 Link7 策略推理。
+dp_infer_tensorrt:
+  ros__parameters:
+    # 必须指定现有 TensorRT bundle 目录；不把机器路径写进配置。
+    engine_dir: ""
+    # 模型元数据；空值自动使用同一次导出的 onnx/latest/manifest.json。
+    model_manifest: ""
+    # fp16 为 FP16 编码器 + FP32 去噪器；fp32 为全 FP32。
+    precision: fp16
+    # 训练时使用的 URDF 文件路径；必须显式指定，用于校验模型并计算 Link7 位姿。
+    urdf_path: ""
+    # 模型推理设备；例如 cuda:0 表示第一块 CUDA GPU。
+    device: cuda:0
+    # 每次预测的扩散去噪步数；组合启动可用同名 launch 参数覆盖。
+    num_inference_steps: 8
+    # 运行时修改去噪步数的服务名，类型为 fastumi_interfaces/SetNumInferenceSteps。
+    set_inference_steps_service: /fastumi/policy/set_inference_steps
+    # 腕部相机图像订阅话题；消息类型由 image_type 决定。
+    image_topic: /wrist_camera/image_raw/compressed
+    # 图像消息类型：compressed 对应 CompressedImage，raw 对应 Image。
+    image_type: compressed
+    # 七轴关节状态订阅话题，消息类型为 sensor_msgs/JointState。
+    joint_topic: /joint_states
+    # 夹爪实测开度订阅话题，消息类型为 std_msgs/Float32，范围为 0（闭合）到 1（张开）。
+    gripper_topic: /motion_control/gripper_state
+    # 策略动作序列发布话题，消息类型为 fastumi_interfaces/PolicyActionSequence。
+    output_topic: /fastumi/policy/action_sequence
+    # 夹爪闭合许可发布话题，消息类型为 std_msgs/Bool，由新鲜的腕部图像判定。
+    close_guard_topic: /fastumi/policy/gripper_close_allowed
+    # 开始新 episode 的服务名，类型为 std_srvs/Trigger；调用后清除旧观测和预测。
+    reset_service: /fastumi/policy/reset_episode
+    # 组合 launch 会开启任务门控，加载后先等待 start_task 服务。
+    task_control_enabled: false
+    start_service: /fastumi/policy/start_task
+    stop_service: /fastumi/policy/stop_task
+    return_service: /fastumi/policy/return_to_start
+    controller_start_service: /fastumi/rm75/placo/start_task
+    controller_return_service: /fastumi/rm75/placo/return_to_start
+    # 控制器重置服务名，类型为 fastumi_interfaces/ResetPolicyController。
+    controller_reset_service: /fastumi/rm75/placo/reset_episode
+    # 等待控制器重置响应的最长时间，单位秒；超时视为未确认。
+    controller_reset_timeout_s: 1.0
+    # 是否必须收到控制器重置成功确认后才允许新 episode 发布预测。
+    require_controller_reset: true
+    # 图像与关节、夹爪观测匹配时允许的最大时间差，单位秒。
+    sync_slop_s: 0.05
+    # 可接受的输入观测最大年龄，单位秒；也用于闭合许可的图像新鲜度判断。
+    input_timeout_s: 0.2
+    # 两帧 30 Hz 历史观测取样时允许的最大时间误差，单位秒，须小于 1/30 秒。
+    history_tolerance_s: 0.015
+    # 启动模型推理的最高频率，单位 Hz。
+    max_inference_hz: 10.0
+    # 推理结果相对最新图像采集时刻允许的最大年龄，单位秒；过期结果不发布。
+    result_timeout_s: 0.5
+    # 可选后处理器列表，逗号分隔的 pluginlib C++ 类名；执行后校验完整动作序列，留空表示不用。
+    postprocessors: ""

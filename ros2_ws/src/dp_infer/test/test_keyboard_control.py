@@ -65,6 +65,7 @@ def control():
     clients = {operation: FakeClient() for operation in keyboard_control.SERVICE_NAMES}
     node.task_clients = clients
     node.steps_parameter_client = FakeParameterClient()
+    node.parameter_node = "/dp_infer"
     node.steps_service_client = FakeStepsClient()
     node.step_directions = deque()
     node.steps_call = None
@@ -326,10 +327,47 @@ def test_startup_reports_parameter_value(control, capsys):
     assert "当前 num_inference_steps=8" in capsys.readouterr().out
 
 
-def test_keyboard_queries_real_ros_parameter_service(capsys):
+@pytest.mark.parametrize("owners", [[], ["dp_infer", "dp_infer_tensorrt"]])
+def test_auto_target_requires_unique_service_owner(control, monkeypatch, owners):
+    """未发现服务或两个后端同时提供服务时，不混用参数和设置服务。"""
+    node, _ = control
+    node.parameter_node = ""
+    node.steps_service_client.srv_name = "/fastumi/policy/set_inference_steps"
+    monkeypatch.setattr(node, "get_node_names_and_namespaces",
+                        lambda: [(name, "/") for name in owners])
+    monkeypatch.setattr(node, "get_service_names_and_types_by_node", lambda *args: [
+        (node.steps_service_client.srv_name, ["fastumi_interfaces/srv/SetNumInferenceSteps"])
+    ])
+    node.handle_key("\x1b[C")
+    assert not node.steps_parameter_client.requests
+    assert not node.steps_service_client.requests
+
+
+def test_auto_target_tolerates_disappearing_node(control, monkeypatch):
+    """图查询期间节点消失不应中断任务键的监听。"""
+    node, _ = control
+    node.parameter_node = ""
+    monkeypatch.setattr(node, "get_node_names_and_namespaces", lambda: [("gone", "/")])
+
+    def disappeared(*args):
+        raise RuntimeError("Node no longer exists")
+
+    monkeypatch.setattr(node, "get_service_names_and_types_by_node", disappeared)
+    node.handle_key("\x1b[C")
+    assert not node.steps_parameter_client.requests
+    assert not node.steps_service_client.requests
+
+
+@pytest.mark.parametrize("server_name,namespace,explicit", [
+    ("dp_infer", "/", False), ("dp_infer_tensorrt", "/", False),
+    ("renamed_infer", "/robot", False), ("fixed_infer", "/robot", True),
+])
+def test_keyboard_queries_real_ros_parameter_service(capsys, server_name, namespace, explicit):
     """ROS 往返测试确认键盘显示来自目标节点参数。"""
-    rclpy.init()
-    server = Node("dp_infer")
+    target = f"{namespace.rstrip('/')}/{server_name}"
+    rclpy.init(args=(["--ros-args", "-p", f"inference_parameter_node:={target}"]
+                     if explicit else []))
+    server = Node(server_name, namespace=namespace)
     server.declare_parameter("num_inference_steps", 8)
 
     def set_steps(request, response):
@@ -357,9 +395,17 @@ def test_keyboard_queries_real_ros_parameter_service(capsys):
             keyboard.check_responses()
             assert time.monotonic() < deadline
         assert server.get_parameter("num_inference_steps").value == 16
+        assert keyboard.steps_parameter_node == target
+        keyboard.handle_key("\x1b[D")
+        while keyboard.steps_call is not None or keyboard.step_directions:
+            executor.spin_once(timeout_sec=0.01)
+            keyboard.check_responses()
+            assert time.monotonic() < deadline
+        assert server.get_parameter("num_inference_steps").value == 8
         output = capsys.readouterr().out
         assert "当前 num_inference_steps=8" in output
         assert "success=True，目标=16，当前 num_inference_steps=16" in output
+        assert "success=True，目标=8，当前 num_inference_steps=8" in output
     finally:
         executor.remove_node(keyboard)
         executor.remove_node(server)
