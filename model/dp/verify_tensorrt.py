@@ -3,15 +3,173 @@
 import argparse
 import json
 from pathlib import Path
+import re
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 import torch
 
-from tensorrt_link7 import (ENGINE_PRECISIONS, OBS_KEYS, EngineRunner,
+from tensorrt_link7 import (ENGINE_PRECISIONS, EngineRunner,
                            load_engine_bundle, load_onnx_bundle, load_policy,
                            load_samples, make_scheduler, metrics,
-                           physical_errors, require_trt10, sample_trajectory,
+                           physical_errors, require_trt10, rotation_matrices, sample_trajectory,
                            save_json, torch_observation)
+
+
+PLOT_STYLES = {
+    "pytorch_cuda": {"label": "PyTorch CUDA FP32", "color": "#333333", "linestyle": "-"},
+    "tensorrt_fp32": {"label": "TensorRT FP32", "color": "#0072B2", "linestyle": "--"},
+    "tensorrt_fp16": {"label": "TensorRT FP16*", "color": "#D55E00", "linestyle": ":"},
+}
+PRECISION_NOTE = "* FP16 编码器 + FP32 回退去噪器"
+
+
+def action_error_curves(actual, reference):
+    """Return per-step pose10 errors in mm, degrees, and gripper encoding units.
+
+    Inputs are [prediction_steps, 10], relative to the current observed end
+    frame. Rotation distances use the same row-major 6D convention as the report.
+    """
+    metrics(actual, reference)
+    if actual.ndim != 2 or actual.shape[-1] != 10:
+        raise ValueError("Expected [prediction_steps, 10] pose10 action")
+    actual_rot = Rotation.from_matrix(rotation_matrices(actual[:, 3:9]))
+    reference_rot = Rotation.from_matrix(rotation_matrices(reference[:, 3:9]))
+    return {
+        "position_mm": 1000 * np.linalg.norm(actual[:, :3] - reference[:, :3], axis=-1),
+        "rotation_deg": np.rad2deg((actual_rot * reference_rot.inv()).magnitude()),
+        "gripper": np.abs(actual[:, 9] - reference[:, 9]),
+    }
+
+
+def save_precision_plots(report, arrays, report_dir):
+    """Save a summary and one action PNG per [sample, 1, horizon, 10] array.
+
+    Only cached CPU arrays are used; no model loading or GPU inference runs.
+    Existing sample_NNN.png files outside this report's indices are removed.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    report_dir = Path(report_dir)
+    sample_dir = report_dir / "action_samples"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    reference = arrays["pytorch_cuda_action"]
+    if (reference.ndim != 4 or reference.shape[0] != report["num_samples"]
+            or reference.shape[1] != 1 or reference.shape[-1] != 10):
+        raise ValueError("Expected action arrays with shape [num_samples, 1, horizon, 10]")
+    for precision in ENGINE_PRECISIONS:
+        metrics(arrays[f"tensorrt_{precision}_action"], reference)
+
+    summary_path = report_dir / "precision_summary.png"
+    with plt.rc_context({"font.family": "sans-serif",
+                         "font.sans-serif": ["Noto Sans CJK SC", "Noto Sans CJK JP",
+                                             "WenQuanYi Micro Hei", "Microsoft YaHei",
+                                             "SimHei", "DejaVu Sans"],
+                         "axes.unicode_minus": False,
+                         "font.size": 11, "axes.titlesize": 13,
+                         "axes.spines.top": False, "axes.spines.right": False}):
+        figure, axes = plt.subplots(2, 3, figsize=(15, 9), constrained_layout=True)
+        try:
+            figure.suptitle("TensorRT 精度验证（基准：PyTorch CUDA FP32）", fontsize=18)
+            panels = (
+                ("max_position_mm", "位置误差", "最大距离差 (mm)"),
+                ("max_rotation_deg", "旋转误差", "最大角度差 (deg)"),
+                ("max_gripper", "夹爪误差", "最大归一化编码差"),
+                ("encoder_max_abs", "观测编码器误差", "最大绝对误差"),
+                ("isolated_denoiser_max_abs", "单步去噪器误差", "最大绝对误差"),
+            )
+            for axis, (key, title, unit) in zip(axes.flat, panels):
+                values = np.array([report["maxima_across_samples"][p][key]
+                                   for p in ENGINE_PRECISIONS])
+                positive = values[values > 0]
+                if len(positive):
+                    axis.set_yscale("symlog", linthresh=float(positive.min()) / 10)
+                axis.bar(range(2), values, width=0.5,
+                         color=[PLOT_STYLES[f"tensorrt_{p}"]["color"]
+                                for p in ENGINE_PRECISIONS])
+                for index, value in enumerate(values):
+                    axis.annotate(f"{value:.3e}", (index, value),
+                                  xytext=(0, 7), textcoords="offset points", ha="center")
+                axis.set_xticks(range(2), ["FP32", "FP16*"])
+                axis.set(title=title, ylabel=unit)
+                axis.set_ylim(bottom=0)
+                axis.margins(y=0.25)
+                axis.grid(axis="y", alpha=0.2)
+                axis.set_axisbelow(True)
+            axes[1, 2].axis("off")
+            axes[1, 2].text(
+                0, 0.95,
+                "验证说明\n\n"
+                f"样本数：{report['num_samples']}\n"
+                f"DDIM 推理步数：{report['num_inference_steps']}\n"
+                f"预测长度：{reference.shape[2]} 步\n"
+                f"数值状态：{'全部有限' if report['status'] == 'finite' else report['status']}\n\n"
+                "未设置验收阈值。\n"
+                "数值有限不代表达到任务精度。\n\n"
+                "柱状图展示所有样本中的最大误差。\n"
+                "非零面板使用对称对数轴（symlog）。\n\n"
+                f"{PRECISION_NOTE}\n\n"
+                f"模型检查点 SHA256：\n{report['checkpoint_sha256'][:16]}...",
+                transform=axes[1, 2].transAxes, va="top", linespacing=1.6,
+            )
+            figure.savefig(summary_path, dpi=200)
+        finally:
+            plt.close(figure)
+
+        sample_paths = []
+        steps = np.arange(1, reference.shape[2] + 1)
+        for row, sample in enumerate(report["sample_results"]):
+            index = sample["index"]
+            figure, axes = plt.subplots(3, 2, figsize=(14, 11), constrained_layout=True)
+            try:
+                figure.suptitle(
+                    f"样本 {index}：相对当前观测 Link7 末端的动作\n"
+                    f"{PRECISION_NOTE}", fontsize=16,
+                )
+                actions = {name: arrays[f"{name}_action"][row, 0]
+                           for name in PLOT_STYLES}
+                for axis, component, label in zip(axes.flat, (0, 1, 2, 9),
+                                                 ("X 位置", "Y 位置", "Z 位置", "夹爪")):
+                    for name, action in actions.items():
+                        values = action[:, component] * (1000 if component < 3 else 1)
+                        axis.plot(steps, values, **PLOT_STYLES[name], linewidth=1.8)
+                    axis.set(title=f"{label}预测", ylabel=(
+                        "相对位置 (mm)" if component < 3 else "归一化编码"))
+                for precision in ENGINE_PRECISIONS:
+                    name = f"tensorrt_{precision}"
+                    errors = action_error_curves(actions[name], actions["pytorch_cuda"])
+                    for axis, key, title, unit in (
+                        (axes[2, 0], "position_mm", "相对 PyTorch 的位置误差", "距离差 (mm)"),
+                        (axes[2, 1], "rotation_deg", "相对 PyTorch 的旋转误差", "角度差 (deg)"),
+                    ):
+                        values = errors[key]
+                        style = dict(PLOT_STYLES[name])
+                        style["label"] += f"（最大值 {values.max():.3e}）"
+                        axis.plot(steps, values, **style, linewidth=1.8)
+                        axis.set(title=title, ylabel=unit)
+                for axis in axes.flat:
+                    axis.set_xlabel("预测步")
+                    axis.set_xticks(steps[::max(1, len(steps) // 8)])
+                    axis.grid(alpha=0.2)
+                    axis.legend(fontsize=9)
+                for axis in axes[2]:
+                    axis.set_ylim(bottom=0)
+                    axis.ticklabel_format(axis="y", style="sci", scilimits=(-3, 3))
+                path = sample_dir / f"sample_{index:03d}.png"
+                figure.savefig(path, dpi=200)
+                sample_paths.append(path)
+            finally:
+                plt.close(figure)
+
+    expected_names = {path.name for path in sample_paths}
+    for path in sample_dir.iterdir():
+        if (path.is_file() and re.fullmatch(r"sample_\d{3,}\.png", path.name)
+                and path.name not in expected_names):
+            path.unlink()
+    return summary_path, sample_paths
 
 
 def compare_action(actual, expected):
@@ -170,10 +328,13 @@ def main():
     }
     report_dir = engine_dir / "reports"
     save_json(report_dir / "precision_report.json", report)
-    np.savez_compressed(report_dir / "precision_arrays.npz",
-                        **{name: np.stack(value) for name, value in saved.items()})
+    saved_arrays = {name: np.stack(value) for name, value in saved.items()}
+    np.savez_compressed(report_dir / "precision_arrays.npz", **saved_arrays)
+    summary_path, sample_paths = save_precision_plots(report, saved_arrays, report_dir)
     print(json.dumps({"status": report["status"], "samples": args.num_samples,
-                      "report": str(report_dir / "precision_report.json")}, indent=2))
+                      "report": str(report_dir / "precision_report.json"),
+                      "summary_plot": str(summary_path),
+                      "sample_plots_dir": str(sample_paths[0].parent)}, indent=2))
 
 
 if __name__ == "__main__":

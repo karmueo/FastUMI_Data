@@ -417,7 +417,11 @@ uv run --no-sync python verify_tensorrt.py \
 | `--engine-dir` | 否 | 同一 run 的 `tensorrt/<ONNX 目录名>/` | 同时包含 `fp32`、`fp16` 配置的引擎目录 |
 | `--num-samples` | 否 | `8` | 验证数量，范围为 `1`～缓存样本数 |
 
-**输出：**`reports/precision_report.json`、`reports/precision_arrays.npz`。
+**输出：**优先查看 `reports/precision_summary.png` 和 `reports/action_samples/sample_000.png` 等逐样本动作图；同时保留 `reports/precision_report.json`、`reports/precision_arrays.npz` 供数值复查。终端输出包含总览图路径与样本图目录。绘图使用 `validation` 依赖组中的 Matplotlib，无需图形界面。图中文字使用中文，专业名称和单位保留；运行环境需有中文字体，如 Noto Sans CJK 或文泉驿微米黑。
+
+- 总览图比较 FP32/FP16 跨样本的最大位置、旋转、夹爪、编码器和单步去噪器误差；非零面板使用可显示零值的 symlog 轴，并标注实际数值。
+- 每个样本叠加 PyTorch CUDA FP32、TensorRT FP32、TensorRT FP16 的 X/Y/Z 位置和夹爪动作，并展示相对本次 PyTorch 输出的逐步位置、旋转误差。横轴为预测步，动作参考系为当前观测到的 Link7 末端；位置显示毫米、旋转误差显示度、夹爪使用归一化编码。
+- 图中 `FP16*` 表示 FP16 编码器 + FP32 回退去噪器；有限结果不代表达到任务精度，未设置验收阈值。重跑覆盖图片，并清理超出本次验证样本范围的旧 `sample_NNN.png`，其他文件保留。
 
 | 对比项 | 报告内容 |
 |---|---|
@@ -444,7 +448,11 @@ uv run --no-sync python benchmark_tensorrt.py \
 | `--warmup` | 否 | `20` | 每个测量项目预热次数，须非负 |
 | `--iterations` | 否 | `100` | 每个测量项目测试次数，须大于 0 |
 
-**输出：**`reports/benchmark_report.json`。依次测试 PyTorch CUDA FP32、TensorRT FP32、TensorRT FP16 编码器 + FP32 去噪器，使用相同 GPU、样本及初始噪声；PyTorch 关闭 AMP、TF32，不使用 `torch.compile`。
+**输出：**优先查看 `reports/benchmark_summary.png` 和 `reports/benchmark_latency_stats.png`，同时保留 `reports/benchmark_report.json` 供数值复查；终端输出包含两张图的路径。依次测试 PyTorch CUDA FP32、TensorRT FP32、TensorRT FP16 编码器 + FP32 去噪器，使用相同 GPU、样本及初始噪声；PyTorch 关闭 AMP、TF32，不使用 `torch.compile`。
+
+- 性能总览比较四类测速项目的平均延迟、端到端完整预测吞吐量，以及两种 TensorRT 配置相对 PyTorch CUDA FP32 / TensorRT FP32 的端到端加速比；`1×` 为基准，小于 `1×` 表示变慢。
+- 延迟统计图按四类测速项目分别比较三个后端的平均值、中位数、P90、P95，单位为 `ms`。吞吐量表示每秒完整预测次数，不是每秒动作点数。
+- 图片使用中文标注、固定后端配色和 200 DPI，图注保留计时范围、设备、版本及测速参数。绘图依赖与中文字体要求同精度验证；无需图形界面，重跑覆盖同名图片。
 
 | 测量项目 | 范围 / 计时方式 |
 |---|---|
@@ -468,8 +476,14 @@ tensorrt/latest/
 ├── manifest.json
 ├── build_log.json
 └── reports/
+    ├── precision_summary.png
+    ├── action_samples/
+    │   ├── sample_000.png
+    │   └── ...
     ├── precision_report.json
     ├── precision_arrays.npz
+    ├── benchmark_summary.png
+    ├── benchmark_latency_stats.png
     └── benchmark_report.json
 ```
 

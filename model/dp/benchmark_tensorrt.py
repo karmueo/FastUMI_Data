@@ -14,6 +14,127 @@ from tensorrt_link7 import (ENGINE_PRECISIONS, EngineRunner,
                            sample_trajectory, save_json, torch_observation)
 
 
+BENCHMARK_BACKENDS = (
+    ("pytorch_cuda_fp32", "PyTorch CUDA FP32", "#333333"),
+    ("tensorrt_fp32", "TensorRT FP32", "#0072B2"),
+    ("tensorrt_fp16", "TensorRT FP16*", "#D55E00"),
+)
+BENCHMARK_COMPONENTS = (
+    ("encoder_gpu", "观测编码器"),
+    ("denoiser_gpu", "单步去噪器"),
+    ("full_gpu_resident", "完整策略（GPU 驻留）"),
+    ("full_end_to_end", "完整策略（端到端）"),
+)
+
+
+def save_benchmark_plots(report, report_dir):
+    """Render cached latency (ms), full predictions/s, and mean-latency speedups.
+
+    Save two 200 DPI PNGs without loading models or running GPU inference.
+    Statistics and speedups are taken directly from the existing JSON schema.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    report_dir = Path(report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = report_dir / "benchmark_summary.png"
+    latency_path = report_dir / "benchmark_latency_stats.png"
+    latencies = report["latencies"]
+    footer = (
+        f"设备：{report['gpu']}  |  PyTorch {report['torch']}  |  "
+        f"CUDA {report['cuda']}  |  TensorRT {report['tensorrt']}\n"
+        f"每项预热：{report['warmup']} 次  |  每项测速：{report['iterations']} 次  |  "
+        f"轮换样本：{report['validation_samples_rotated']} 个  |  "
+        f"DDIM：{report['num_inference_steps']} 步  |  "
+        f"TF32：{'开启' if report['tf32_enabled'] else '关闭'}\n"
+        "* FP16 编码器 + FP32 回退去噪器\n"
+        "计时：组件使用 CUDA events；完整策略使用同步墙钟；端到端包含输入上传和动作下载。\n"
+        "不计入模型及引擎加载、文件读取和预热；吞吐量表示每秒完整预测次数。"
+    )
+
+    def label_bars(axis, bars, suffix=""):
+        """Annotate measured values and leave room above zero-based bars."""
+        axis.bar_label(bars, labels=[f"{bar.get_height():.2f}{suffix}" for bar in bars],
+                       padding=4, fontsize=9)
+        axis.autoscale(enable=True, axis="y")
+        axis.margins(y=0.25)
+        axis.set_ylim(bottom=0)
+        axis.grid(axis="y", alpha=0.2)
+        axis.set_axisbelow(True)
+
+    with plt.rc_context({"font.family": "sans-serif",
+                         "font.sans-serif": ["Noto Sans CJK SC", "Noto Sans CJK JP",
+                                             "WenQuanYi Micro Hei", "Microsoft YaHei",
+                                             "SimHei", "DejaVu Sans"],
+                         "axes.unicode_minus": False,
+                         "font.size": 11, "axes.titlesize": 13,
+                         "axes.spines.top": False, "axes.spines.right": False}):
+        figure, axes = plt.subplots(2, 3, figsize=(16, 10))
+        try:
+            figure.suptitle("TensorRT 推理性能总览", fontsize=18, y=0.97)
+            figure.text(0.5, 0.925, "延迟越低越好；吞吐量和加速比越高越好",
+                        ha="center", fontsize=11)
+            figure.subplots_adjust(top=0.86, bottom=0.24, hspace=0.6, wspace=0.32)
+            for axis, (component, title) in zip(axes.flat, BENCHMARK_COMPONENTS):
+                values = [latencies[name][component]["mean_ms"]
+                          for name, _, _ in BENCHMARK_BACKENDS]
+                bars = axis.bar(range(3), values, width=0.55,
+                                color=[color for _, _, color in BENCHMARK_BACKENDS])
+                label_bars(axis, bars)
+                axis.set(title=f"{title}平均延迟", ylabel="延迟 (ms)")
+            values = [latencies[name]["full_end_to_end"]["predictions_per_second"]
+                      for name, _, _ in BENCHMARK_BACKENDS]
+            bars = axes[1, 1].bar(range(3), values, width=0.55,
+                                   color=[color for _, _, color in BENCHMARK_BACKENDS])
+            label_bars(axes[1, 1], bars)
+            axes[1, 1].set(title="端到端完整预测吞吐量", ylabel="完整预测次数（次/s）")
+            for axis in list(axes.flat)[:5]:
+                axis.set_xticks(range(3), ["PyTorch\nCUDA FP32", "TensorRT\nFP32",
+                                           "TensorRT\nFP16*"])
+            speedup_axis = axes[1, 2]
+            for offset, (backend, label, color) in zip((-0.18, 0.18), BENCHMARK_BACKENDS[1:]):
+                values = [report["speedups"][backend]["full_end_to_end"][baseline]
+                          for baseline in ("vs_pytorch_cuda_fp32", "vs_tensorrt_fp32")]
+                bars = speedup_axis.bar([index + offset for index in range(2)], values,
+                                        width=0.32, color=color, label=label)
+                label_bars(speedup_axis, bars, "×")
+            speedup_axis.axhline(1, color="#777777", linestyle="--", linewidth=1)
+            speedup_axis.set_xticks(range(2), ["相对 PyTorch\nCUDA FP32", "相对 TensorRT\nFP32"])
+            speedup_axis.set(title="端到端加速比", ylabel="加速倍数（1× 为基准）")
+            speedup_axis.legend(fontsize=9, loc="upper right")
+            figure.text(0.5, 0.035, footer, ha="center", va="bottom", fontsize=10,
+                        linespacing=1.6)
+            figure.savefig(summary_path, dpi=200)
+        finally:
+            plt.close(figure)
+
+        figure, axes = plt.subplots(2, 2, figsize=(16, 11))
+        try:
+            figure.suptitle("TensorRT 延迟统计对比", fontsize=18, y=0.97)
+            figure.subplots_adjust(top=0.87, bottom=0.23, hspace=0.4, wspace=0.25)
+            statistic_keys = ("mean_ms", "median_ms", "p90_ms", "p95_ms")
+            for axis, (component, title) in zip(axes.flat, BENCHMARK_COMPONENTS):
+                for offset, (backend, label, color) in zip((-0.24, 0, 0.24), BENCHMARK_BACKENDS):
+                    values = [latencies[backend][component][key] for key in statistic_keys]
+                    bars = axis.bar([index + offset for index in range(4)], values,
+                                    width=0.21, color=color, label=label)
+                    label_bars(axis, bars)
+                axis.set_xticks(range(4), ["平均值", "中位数", "P90", "P95"])
+                axis.set(title=title, ylabel="延迟 (ms)")
+            handles, labels = axes[0, 0].get_legend_handles_labels()
+            figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.94),
+                          ncol=3, frameon=False)
+            figure.text(0.5, 0.035, footer, ha="center", va="bottom", fontsize=10,
+                        linespacing=1.6)
+            figure.savefig(latency_path, dpi=200)
+        finally:
+            plt.close(figure)
+    return summary_path, latency_path
+
+
 def optional_device_status():
     """Capture available read-only Jetson power and clock telemetry."""
     readings = {}
@@ -191,7 +312,10 @@ def main():
     }
     output = engine_dir / "reports" / "benchmark_report.json"
     save_json(output, report)
-    print(json.dumps({"report": str(output), "end_to_end_speedups": {
+    summary_path, latency_path = save_benchmark_plots(report, output.parent)
+    print(json.dumps({"report": str(output),
+                     "summary_plot": str(summary_path), "latency_plot": str(latency_path),
+                     "end_to_end_speedups": {
         key: value["full_end_to_end"] for key, value in speedups.items()}}, indent=2))
 
 
