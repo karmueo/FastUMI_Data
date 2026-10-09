@@ -1,13 +1,22 @@
 # Jetson 本地硬件与录制
 
-入口仅管理 RM75、Unitree 夹爪、末端相机和录制服务。UMI 相机、Tracker、
-遥操主机和 RViz2 均由各自的独立入口管理，缺少 UMI 或 Tracker 不影响本入口。
+本入口启动 RM75、Unitree 夹爪和末端相机，机械臂回位成功后提供 MCAP 录制服务。
+UMI 相机、Tracker、遥操主机和 RViz2 使用独立入口；缺少 UMI 或 Tracker 不影响本入口。
+
+## 前提
+
+- 使用 Jetson、ROS 2 Humble 和工作区的 `.venv-numpy1`。首次使用先按
+  [工作区说明](../../README.md#两套共享-uv-环境humble--jetson)准备环境，按
+  [夹爪说明](../unitree_gripper/README.md#首次准备与构建)运行 `setup_gripper_env.sh` 并准备运行库和串口权限。
+- 机械臂使用 `agx` 子模块固定版本，地址 `192.168.1.18`，UDP 接收地址 `192.168.1.100`。
+- 以下 Jetson 命令使用 Bash，起始目录为仓库根目录；执行 `cd ros2_ws` 后保持在工作区。
+  新开终端时，重新按 Humble → 虚拟环境 → `install/setup.bash` 的顺序加载环境。
 
 ## 构建
 
-首次构建前，按[工作区说明](../../README.md#两套共享-uv-环境humble--jetson)
-准备 `.venv-numpy1`，并按[夹爪说明](../unitree_gripper/README.md#首次准备与构建)
-运行 `setup_gripper_env.sh`。在仓库根目录执行：
+### 1. 首次构建
+
+在仓库根目录执行：
 
 ```bash
 cd ros2_ws
@@ -24,21 +33,55 @@ python -m colcon build --symlink-install --packages-select \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
-构建完成后，启动终端按下节顺序加载 Humble、虚拟环境和 `install/setup.bash`。
+构建完成后再进行本机配置与启动。
 
 ## 启动
 
-从仓库根目录执行：
+### 2. 配置本机设备（首次使用）
+
+在新终端从仓库根目录执行：
 
 ```bash
 cd ros2_ws
 source /opt/ros/humble/setup.bash
 source .venv-numpy1/bin/activate
 source install/setup.bash
-
-# 首次配置：复制模板并填写，后续直接 source 本机文件。
 cp -n src/fastumi_bringup/config/hardware.env.example hardware.local.env
+ls -l /dev/v4l/by-path/*-video-index0
+```
 
+打开 `hardware.local.env`，按[模板](config/hardware.env.example)填写：
+
+| 配置键 | 填写方式 |
+|---|---|
+| `WRIST_VIDEO_DEVICE` | USB 4.2 对应的完整 `/dev/v4l/by-path/*-video-index0` 路径，必须存在 |
+| `GRIPPER_NETWORK_INTERFACE` | 实际网卡；留空使用夹爪配置中的值 |
+| `GRIPPER_CONFIG_FILE` | 默认使用已安装的 `config/gripper.yaml`，需要时替换 |
+| `DATASET_ROOT` | 留空使用仓库 `dataset/h5dy_data`；覆盖时填绝对路径 |
+
+其余键可保留默认值：JPEG、硬件 H.264 编码、两端 Reliable、录制队列深度 30。
+需要修改时见[相机模式](#相机模式与画面查看)和[参数表](#参数与维护)。
+本机文件被 Git 忽略，后续启动直接加载，不必再复制模板。设备缺失时启动会明确报错。
+
+### 3. 启动硬件与录制服务
+
+**启动会使机械臂回位、夹爪张开。启动前暂停遥操及其他机械臂、夹爪命令发送端；驱动没有指令仲裁。**
+机械臂等待有效反馈后回到 `[0, 20, 0, 70, 0, 90, 90]` 度；夹爪按
+`startup_openness=1.0` 平滑张开。回位等待就绪最多 30 秒，等待运动结果最多 120 秒。
+失败或超时会退出整个启动，不重试、不开放录制服务。
+
+沿用上一步终端；日常启动时先从仓库根目录加载环境：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+```
+
+已在 `ros2_ws` 的终端跳过上面的 `cd`。随后执行：
+
+```bash
 source hardware.local.env
 launch_args=(
   "wrist_video_device:=$WRIST_VIDEO_DEVICE"
@@ -60,7 +103,43 @@ fi
 ros2 launch fastumi_bringup hardware.launch.py "${launch_args[@]}"
 ```
 
+回位成功后录制服务应处于 `idle`，不会自动录制。若关闭 `start_arm` 或
+`move_to_initial_pose`，录制器直接启动；`start_recorder:=false` 时不提供录制服务。
+启动顺序和参数约束见 [hardware.launch.py](launch/hardware.launch.py)。
+
+### 4. 检查状态并录制
+
+在另一个终端从仓库根目录加载环境，查看话题和录制状态：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+ros2 topic list -t
+ros2 service call /fastumi/recording/get_status fastumi_interfaces/srv/GetRecordingStatus '{}'
+```
+
+默认应出现下方所列组件接口，录制状态为 `idle`。
+开始、停止录制的命令见[录制服务说明](../fastumi_recorder/README.md#服务与状态)：
+启动请求必须使用客户端生成的标准 UUID `request_id`；超时后通过
+`/fastumi/recording/cancel_request` 撤销，再用 `get_request` 核对终态。
+请求台账与数据共用 `dataset_root`，节点重启后仍可识别旧请求。
+
+每轮保存到 `<dataset_root>/<dir_name>/<name>/episode_N/`：
+
+- `bag/metadata.yaml`、`bag/*.mcap`：使用原生 `zstd_fast` 块压缩的 ROS 2 MCAP bag。
+- `recording.json`：列表服务使用的录制信息。
+
+停止请求被接受后仍需等待异步保存完成，以列表服务或 `last_completed.recording_id`
+确认，再将实际 bag 路径传给 `ros2 bag info` 查看文件。
+结果结构与完成判据见[录制服务说明](../fastumi_recorder/README.md)。
+不生成 HDF5 或 MP4；旧条目保留在磁盘，但不进入新列表。
+Ctrl+C 自动停止当前录制并等待写入，默认上限 120 秒；超时或写入失败的目录不会进入正式列表，日志会提示保留位置。
+
 ## 空格键回位
+
+**回位前须暂停遥操及其他机械臂、夹爪命令发送端，驱动没有指令仲裁。**
 
 硬件 bringup 启动后，在 **第二个交互终端** 加载相同的 ROS 2 环境，启动键盘监听：
 
@@ -79,13 +158,10 @@ ros2 run fastumi_bringup keyboard_home
 按键时若机械臂反馈、驱动或夹爪命令订阅者未就绪，节点不会下发任一命令；
 运动过程中重复按空格键不会排队。夹爪控制节点按自身限速逐步打开，回位节点不等待夹爪到位确认。
 MoveJ 失败或等待结果超过 120 秒后，节点停止接受回位命令，需检查机械臂后重启。
-驱动没有运动指令仲裁，**回位前须暂停遥操及其他机械臂、夹爪命令发送端**。
 
-`hardware.local.env` 被 Git 忽略。
-末端相机填写 USB 4.2 对应的完整`/dev/v4l/by-path/*-video-index0`，可以通过命令`ls -l /dev/v4l/by-path/*-video-index0` 查询；默认 1280×960@30 FPS。默认 `jpeg` 发布相机原生 JPEG。
-选择 `h264` 时约 4 Mbps，Jetson 默认使用 NVIDIA GStreamer 硬件编码；排障或非 Jetson 环境才设置 `h264_encoder:=software`。本地解码仅在 `h264` 模式下可开启，例如 `wrist_camera_mode:=h264 enable_decoder:=true`。
-相机发布与录制订阅默认使用 `reliable`；两者也可同时改为 `best_effort`。录制端 `KEEP_LAST` 深度默认 30，按 30 FPS 约容纳 1 秒图像消息。Reliable 可重传传输丢包，但可能增加积压和延迟；不覆盖相机采集及编码器内部丢帧。
-模板不含本机绝对路径；本机设备缺失时启动明确报错。
+## 相机模式与画面查看
+
+默认采集 1280×960@30 FPS；一次模式选择同时设置相机输出和 Recorder 输入。
 
 | `wrist_camera_mode` | 相机话题 | 消息类型 | Recorder 处理 |
 |---|---|---|---|
@@ -93,19 +169,32 @@ MoveJ 失败或等待结果超过 120 秒后，节点停止接受回位命令，
 | `jpeg`（默认） | `/wrist_camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | 相机 JPEG 消息写入 MCAP |
 | `h264` | `/wrist_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | H.264 包消息写入 MCAP |
 
-一次模式选择会同时设置相机和 Recorder。末端相机开启时，显式设置的 `image_topic`、`image_transport` 必须与该模式一致；关闭末端相机后可用它们订阅外部源。`enable_decoder:=true` 只允许 `h264`。
-raw 1280×960@30 的未压缩数据约 **6.6 GB/分钟**；MCAP 的 Zstd 压缩率取决于画面内容。此前本机短测 raw 接收约 25.4 FPS，JPEG 约 30 FPS；采集性能需按实际设备再次评估。三种模式均保留原始相机消息及其 header 时间戳；MCAP 记录时间采用 Jetson 接收时间。
+本地相机开启时，显式设置的 `image_topic`、`image_transport` 必须匹配所选模式；
+关闭相机后可用它们订阅外部源。三种模式均保留原始相机消息及 header 时间戳，
+MCAP 记录时间使用 Jetson 接收时间。
 
-**启动会产生硬件动作**，机械臂等待有效反馈后。
-夹爪控制节点按 `startup_openness=1.0` 平滑张开。
-机械臂使用 `agx` 子模块固定版本，地址 `192.168.1.18`，UDP 接收地址 `192.168.1.100`。
+- `jpeg`：默认发布相机原生 JPEG。
+- `h264`：约 4 Mbps，Jetson 默认使用 NVIDIA GStreamer 硬件编码；排障或非 Jetson 环境使用 `h264_encoder:=software`。
+  本地解码需同时设置 `wrist_camera_mode:=h264 enable_decoder:=true`，解码话题为 `/wrist_camera/image_decoded`。
+- `raw`：1280×960@30 的未压缩数据约 6.6 GB/分钟，Zstd 压缩率取决于画面。
+  此前本机短测为 raw 约 25.4 FPS、JPEG 约 30 FPS，实际设备需重新评估。
 
-回位等待就绪最多 30 秒、运动结果最多 120 秒。失败或超时退出整个启动，
-不重试、不开放录制服务。回位成功才启动录制服务，服务启动后为 idle，
-不会自动开始录制。统一启动没有遥操指令仲裁，回位期间遥操主机应保持暂停。
-远端启动录制必须提供客户端生成的 `request_id`；超时后可通过
-`/fastumi/recording/cancel_request` 撤销，并用 `get_request` 核对终态。
-请求台账与录制数据共用 `dataset_root`，节点重启后仍能识别旧请求。
+相机发布与录制订阅默认均为 `reliable`；录制端 `KEEP_LAST(30)` 在 30 FPS 下约容纳
+1 秒图像消息。Reliable 可重传传输丢包，也可能增加积压和延迟，不能覆盖采集或编码器内部丢帧。
+
+**远端查看 H.264**：遥操端先加载其 ROS 2 和已构建工作区环境，并与 Jetson 使用相同的
+`ROS_DOMAIN_ID`。在一个终端执行：
+
+```bash
+ros2 launch fastumi_usb_camera receive.launch.py \
+  input_topic:=/wrist_camera/image_raw \
+  output_topic:=/wrist_camera/image_decoded
+```
+
+另开已加载相同环境的终端执行 `ros2 run rqt_image_view rqt_image_view`，
+选择 `/wrist_camera/image_decoded`。接收端仅适用于 H.264，`input_topic` 使用不带
+`/ffmpeg` 后缀的基础话题，见[相机说明](../fastumi_usb_camera/README.md)。
+需要指定显示会话时可设置 `DISPLAY=:10.0`。
 
 ## 启动后的话题与服务
 
@@ -123,7 +212,6 @@ raw 1280×960@30 的未压缩数据约 **6.6 GB/分钟**；MCAP 的 Zstd 压缩�
 | 本地解码节点 | `/wrist_camera/image_decoded` | `sensor_msgs/msg/Image` | 解码画面，仅在 `enable_decoder:=true` 时发布 |
 | 录制器 | `/fastumi/recording/status` | `fastumi_interfaces/msg/RecordingStatus` | 录制状态，定期及状态变化时发布 |
 
-默认在机械臂回位成功后启动录制器；若关闭 `start_arm` 或 `move_to_initial_pose`，录制器直接启动。`start_recorder:=false` 时不提供以下服务。
 以下服务的类型均以 `fastumi_interfaces/srv/` 为前缀。
 
 | 服务 | 类型 | 用途 |
@@ -158,19 +246,7 @@ raw 1280×960@30 的未压缩数据约 **6.6 GB/分钟**；MCAP 的 Zstd 压缩�
 | `image_topic` / `image_transport` | 由 `wrist_camera_mode` 决定 | 使用本地相机时，显式覆盖必须匹配所选模式；关闭本地相机时可指定外部源 |
 | `shutdown_save_timeout` | 120 秒 | Ctrl+C 等待保存的上限 |
 
-机械臂可用 `ros2 launch rm_driver rm_75_driver.launch.py` 单独启动；
-相机与夹爪的独立入口保持不变。录制接口、单独启动与远端接入见
-[fastumi_recorder](../fastumi_recorder/README.md)。
-
-每轮录制保存至 `<dataset_root>/<dir_name>/<name>/episode_N/`，其中 `bag/` 是使用原生 `zstd_fast` 块压缩的 ROS 2 MCAP bag；`recording.json` 用于列表服务。不会生成 HDF5 或 MP4。旧条目保留在磁盘，但不进入新列表。
-Ctrl+C 自动停止当前录制并等待 MCAP 写入完成；超时或写入失败时，未完成目录不进入正式列表，日志提示保留位置。
-查看画面时可以设置 `DISPLAY=:10.0`。
-
-遥操端与 Jetson 使用相同 `ROS_DOMAIN_ID` 后执行：
-
-```bash
-ros2 launch fastumi_usb_camera receive.launch.py \
-  input_topic:=/wrist_camera/image_raw \
-  output_topic:=/wrist_camera/image_decoded
-ros2 run rqt_image_view rqt_image_view
-```
+维护时可关闭对应 `start_*` 开关，或用 `move_to_initial_pose:=false` 跳过启动回位。
+机械臂独立入口为 `ros2 launch rm_driver rm_75_driver.launch.py`；相机与夹爪独立入口见
+[相机说明](../fastumi_usb_camera/README.md)和[夹爪说明](../unitree_gripper/README.md)。
+录制器单独启动与远端接入见[录制服务说明](../fastumi_recorder/README.md)。

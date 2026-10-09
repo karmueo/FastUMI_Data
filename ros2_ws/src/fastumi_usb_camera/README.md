@@ -247,3 +247,34 @@ colcon test-result --verbose
 FFmpeg 验证还应检查发送端的 `FFMPEGPacket` 类型、Best Effort QoS、实际码率，
 接收端的图像尺寸、`bgr8` 编码、原始时间戳与 `frame_id`；重新启动接收端后应在
 下一关键帧恢复画面。硬件烟雾测试应确认拔出相机后发送端退出并释放设备。
+
+## V4L2 采集中断排查
+
+`V4L2 camera poll returned an error event` 来自采集端的驱动队列。旧版本把
+`POLLERR`、`POLLHUP`、`POLLNVAL` 合并为同一条错误，单靠这条日志无法判断
+是 USB 断开还是队列异常。H.264 相机退出会触发统一 launch 关闭其他节点；
+后续夹爪进程的退出码 `-2` 是收到 SIGINT 的结果。
+
+新版日志包含设备路径、`poll revents` 掩码及 ioctl 的 errno。单独 `POLLERR`
+或出入队的 `EIO` 会关闭旧流、解除 mmap、重新打开原设备路径并重建队列；
+每次退避 100 ms，连续未收到有效帧时最多重启 3 次。收到有效帧后重置重试次数。
+`POLLIN | POLLERR` 会先尝试出队可读帧，驱动标记的坏帧仍丢弃并重新入队。
+恢复期间保留编码器和主机采集时间戳，不补帧；录制数据中会存在对应时间间隔。
+每秒诊断中的 `capture_restarts` 统计成功重建队列的次数，恢复出帧时另有告警。
+恢复失败、设备挂断、无效描述符或持续无有效帧超过 `frame_timeout_seconds`
+（默认 5 秒）仍会退出并关闭统一启动。
+
+在采集机器上保留故障时间附近的内核日志，确认是否有 USB reset、disconnect
+或 uvcvideo 传输错误：
+
+```bash
+sudo journalctl -k -b --since "15 minutes ago" \
+  | rg -i 'usb|uvc|xhci|reset|disconnect|error'
+
+# 复现时，在另一个终端实时观察内核事件。
+sudo journalctl -kf
+```
+
+若内核同时报告断连或传输错误，检查相机 USB 线、插头、端口和供电后复测。
+若只是队列错误，观察 `capture_restarts` 和恢复日志是否恢复稳定出帧。
+硬件验证需检查 H.264 话题、时间戳、录制帧数与文件结构，并进行长时间运行及拔出测试。

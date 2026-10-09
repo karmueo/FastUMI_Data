@@ -36,10 +36,13 @@ target_include_directories(${PROJECT_NAME}_hardware_h264 PUBLIC
   "$<INSTALL_INTERFACE:include>")
 target_link_libraries(${PROJECT_NAME}_hardware_h264 PUBLIC PkgConfig::GSTREAMER)
 
+add_library(${PROJECT_NAME}_v4l2 src/v4l2_camera.cpp)
+target_link_libraries(${PROJECT_NAME}_v4l2 PUBLIC ${PROJECT_NAME}_core)
+
 add_executable(usb_camera_ffmpeg src/usb_camera_ffmpeg.cpp)
 target_include_directories(usb_camera_ffmpeg PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(usb_camera_ffmpeg
-  ${PROJECT_NAME}_core ${PROJECT_NAME}_hardware_h264 ${OpenCV_LIBRARIES})
+  ${PROJECT_NAME}_v4l2 ${PROJECT_NAME}_hardware_h264 ${OpenCV_LIBRARIES})
 ament_target_dependencies(usb_camera_ffmpeg
   ffmpeg_image_transport_msgs image_transport pluginlib rclcpp sensor_msgs)
 
@@ -47,7 +50,8 @@ add_executable(usb_camera_receiver src/usb_camera_receiver.cpp)
 ament_target_dependencies(usb_camera_receiver
   image_transport pluginlib rclcpp sensor_msgs)
 
-install(TARGETS ${PROJECT_NAME}_hardware_h264 usb_camera_ffmpeg usb_camera_receiver
+install(TARGETS ${PROJECT_NAME}_hardware_h264 ${PROJECT_NAME}_v4l2
+  usb_camera_ffmpeg usb_camera_receiver
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
@@ -62,6 +66,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_configuration test/test_configuration.cpp)
   target_link_libraries(test_configuration ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_v4l2_camera test/test_v4l2_camera.cpp)
+  target_link_libraries(test_v4l2_camera ${PROJECT_NAME}_v4l2)
 
   ament_add_gtest(test_physical_device test/test_physical_device.cpp)
   target_link_libraries(test_physical_device ${PROJECT_NAME}_core)
