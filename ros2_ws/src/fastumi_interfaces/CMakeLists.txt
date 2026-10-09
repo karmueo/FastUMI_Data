@@ -8,6 +8,8 @@ find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
@@ -16,6 +18,8 @@ rosidl_generate_interfaces(
   "msg/FrameSequence.msg"
   "msg/GripperState.msg"
   "msg/PolicyActionSequence.msg"
+  "msg/PolicyJointActionSequence.msg"
+  "msg/TargetMask.msg"
   "msg/TrackerStatus.msg"
   "srv/DeleteEpisodeAnnotation.srv"
   "srv/ListEpisodeAnnotations.srv"
@@ -33,7 +37,7 @@ rosidl_generate_interfaces(
   "srv/ResetPolicyController.srv"
   "srv/SetNumInferenceSteps.srv"
   "srv/ListRecordings.srv"
-  DEPENDENCIES builtin_interfaces std_msgs geometry_msgs
+  DEPENDENCIES builtin_interfaces std_msgs geometry_msgs sensor_msgs trajectory_msgs
 )
 
 if(BUILD_TESTING)

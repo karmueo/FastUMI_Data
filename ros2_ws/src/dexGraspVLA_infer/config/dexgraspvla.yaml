@@ -1,0 +1,20 @@
+dexgraspvla_infer:
+  ros__parameters:
+    num_inference_steps: 16
+    image_topic: /wrist_camera/image_decoded
+    image_type: raw
+    sync_slop_s: 0.05
+    input_timeout_s: 1.0
+    result_timeout_s: 1.0
+    # 容忍实机相机短时断帧；轨迹耗尽仍由执行器独立停车。
+    camera_timeout_s: 0.5
+    feedback_timeout_s: 0.25
+dexgraspvla_perception:
+  ros__parameters:
+    image_topic: /wrist_camera/image_decoded
+    image_type: raw
+    confidence: 0.25
+    min_mask_area: 0.0005
+    max_mask_area: 0.10
+    max_mask_area_ratio: 4.0
+    cutie_max_size: 480

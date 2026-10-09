@@ -1,0 +1,14 @@
+rm75_joint_controller:
+  ros__parameters:
+    dry_run: true
+    control_rate_hz: 50.0
+    velocity_scale: 0.25
+    joint_state_timeout_s: 0.25
+    gripper_state_timeout_s: 0.25
+    start_joint_positions: [0.0, 0.3490658503988659, 0.0, 1.2217304763960306, 0.0, 1.5707963267948966, 1.5707963267948966]
+    start_joint_tolerance_rad: 0.035
+    start_joint_settle_s: 0.5
+    start_gripper_min: 0.95
+    workspace_min: [-0.6, -0.5, 0.16]
+    workspace_max: [0.6, 0.5, 0.50]
+    first_sequence_timeout_s: 2.0

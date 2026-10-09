@@ -32,6 +32,7 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
+            "rm75_joint_controller = fastumi_rm75.rm75_joint_controller:main",
             "rm75_policy_bridge = "
             "fastumi_rm75.rm75_policy_bridge:main",
             "rm75_placo_controller = "

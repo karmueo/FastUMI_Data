@@ -33,3 +33,6 @@ loglen
 wandb
 # Jetson 本机 USB、网络和数据目录配置。
 /ros2_ws/hardware.local.env
+
+# DexGraspVLA 本地运行环境、第三方源码、权重及缓存。
+.local

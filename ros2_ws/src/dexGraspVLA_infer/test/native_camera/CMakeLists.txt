@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(dexgraspvla_mock_camera)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+add_executable(mock_camera mock_camera.cpp)
+ament_target_dependencies(mock_camera rclcpp sensor_msgs)
