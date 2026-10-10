@@ -11,6 +11,10 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
+  "msg/CollectionRecord.msg"
+  "msg/CollectionResult.msg"
+  "msg/CollectionStatus.msg"
+  "msg/CollectionStreamHealth.msg"
   "msg/EpisodeAnnotation.msg"
   "msg/EpisodeEvent.msg"
   "msg/FrameSequence.msg"
@@ -21,6 +25,15 @@ rosidl_generate_interfaces(
   "msg/TrackerStatus.msg"
   "srv/CancelRecording.srv"
   "srv/CancelRecordingRequest.srv"
+  "srv/CollectionCancel.srv"
+  "srv/CollectionDelete.srv"
+  "srv/CollectionGetStatus.srv"
+  "srv/CollectionList.srv"
+  "srv/CollectionSave.srv"
+  "srv/CollectionStart.srv"
+  "srv/CollectionStop.srv"
+  "srv/CollectionStopAndCancel.srv"
+  "srv/CollectionStopAndSave.srv"
   "srv/DeleteRecording.srv"
   "srv/DeleteEpisodeAnnotation.srv"
   "srv/GetRecordingRequest.srv"

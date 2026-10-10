@@ -1,0 +1,33 @@
+# 该文件保存 collection_node 的默认参数，launch 命令行参数会覆盖其中同名项。
+collection_node:
+  ros__parameters:
+    # 数据集根目录；相对路径相对于启动目录。内含暂存区 .staging 和回收区 .trash。
+    dataset_root: dataset
+    # 三路输入及 episode 事件话题，可按设备实际命名重映射。
+    image_topic: /umi_camera/image_raw
+    tracker_pose_topic: /vive_tracker/pose
+    tracker_status_topic: /vive_tracker/status
+    gripper_state_topic: /gripper/state
+    episode_event_topic: /fastumi/episode/events
+    tf_static_topic: /tf_static
+    # 空字符串表示使用本包默认 processing.yaml；采集会把实际话题映射写入快照。
+    processing_config: ""
+    # 可选 Tracker 到 TCP 外参；为空时记录标记为 uncalibrated。
+    extrinsic_path: ""
+    # 额外复制到 calibration_snapshot/ 的文件，例如相机内参和夹爪标定。
+    snapshot_files: [""]
+    # 新鲜度超时，单位秒，使用单调接收时钟。
+    image_timeout_s: 1.0
+    tracker_timeout_s: 0.25
+    gripper_timeout_s: 0.25
+    # 图像与 Tracker 按最近源时间戳配对的窗口，单位秒。
+    match_window_s: 0.030
+    # 写入队列上限；溢出会使本次采集失败，不会静默丢帧。
+    queue_max_messages: 600
+    queue_max_mib: 768.0
+    # 停止时等待排空并关闭 MCAP 的最长秒数。
+    finish_timeout_s: 60.0
+    # 开始采集所需的最小磁盘可用空间，单位 GiB。
+    min_free_disk_gib: 2.0
+    # 周期状态发布频率，单位 Hz。
+    status_rate_hz: 2.0

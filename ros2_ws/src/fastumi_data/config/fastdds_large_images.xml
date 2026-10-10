@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast DDS 参与者配置：为 1920x1080 原始图像（约 6 MB/帧）提供足够大的共享内存段。
+  默认 SHM 段只有 512 KB，大图像回退到 UDP 分片，实机 30 fps 下会丢约 7% 的帧；
+  使用本配置后同一台机器上的图像、Tracker 和夹爪流均无丢帧。
+  发布者和订阅者两端的进程都需要使用本配置（设置 FASTRTPS_DEFAULT_PROFILES_FILE）。
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>fastumi_shm</transport_id>
+      <type>SHM</type>
+      <segment_size>268435456</segment_size>
+      <port_queue_capacity>1024</port_queue_capacity>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>fastumi_udp</transport_id>
+      <type>UDPv4</type>
+      <sendBufferSize>4194304</sendBufferSize>
+      <receiveBufferSize>4194304</receiveBufferSize>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="fastumi_large_images" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports>
+        <transport_id>fastumi_shm</transport_id>
+        <transport_id>fastumi_udp</transport_id>
+      </userTransports>
+    </rtps>
+  </participant>
+</profiles>

@@ -1,0 +1,10 @@
+# 列出已保存采集，按创建时间倒序；空 task_name 不筛选，limit=0 使用默认值。
+string task_name
+uint32 offset
+uint32 limit
+---
+bool success
+string code
+string message
+fastumi_interfaces/CollectionRecord[] records
+uint64 total

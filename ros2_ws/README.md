@@ -168,6 +168,7 @@ PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–�
 
 | 命令 | 作用 |
 | --- | --- |
+| `collection_node` | UMI 服务化采集后端：开始、停止、保存、取消、删除、列表和权威状态；每次采集独立保存 MCAP。 |
 | `episode_manager` | 提供 episode 开始、停止和放弃服务，并发布边界事件。 |
 | `episode_command` | 从命令行调用 episode 控制服务。 |
 | `record_session` | 连续录制一场 MCAP 会话并保存配置和标定快照。 |
@@ -178,14 +179,17 @@ PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–�
 | `annotate_replay` | 回放已有 MCAP，通过 RViz2 面板补充 episode 标注并安全写出新包。 |
 
 `fastumi_data/` 包含同步、位姿数学、标定求解、MCAP 转换、HDF5 写入和回放编排；
-`config/` 保存处理门限和标定示例；`launch/fastumi_collection.launch.py` 可统一启动
-XV 相机、VIVE Tracker、夹爪估计并选择是否录制 MCAP；`test/` 覆盖纯算法和数据
-管线。操作流程见 [`src/fastumi_data/README.md`](src/fastumi_data/README.md)。
+`config/` 保存处理门限、采集节点参数、RViz2 采集布局和标定示例；
+`launch/fastumi_collection.launch.py` 启动采集后端与带“数据采集”面板的 RViz2，并可按需
+启动 USB 相机、VIVE Tracker 和夹爪估计；`test/` 覆盖纯算法、数据管线和合成数据端到端采集。
+操作流程见 [`src/fastumi_data/README.md`](src/fastumi_data/README.md)。
 
 ### `fastumi_rviz_plugins`
 
-该包注册 `fastumi_rviz_plugins/ReplayAnnotationPanel` RViz2 Panel，供
-`fastumi_data annotate_replay` 使用。面板显示夹爪开度和有效性、Tracker 位姿与
+该包注册两个 RViz2 Panel：`fastumi_rviz_plugins/CollectionPanel`（UMI 服务化采集控制，
+详见 [`src/fastumi_rviz_plugins/README.md`](src/fastumi_rviz_plugins/README.md)）和
+`fastumi_rviz_plugins/ReplayAnnotationPanel`，后者供 `fastumi_data annotate_replay` 使用。
+回放标注面板显示夹爪开度和有效性、Tracker 位姿与
 新鲜度、当前 episode、完成数量、回放进度和倍率，并提供以下操作：
 
 - 开始或结束 episode，也可使用 Space 快捷键。

@@ -255,64 +255,45 @@ RMSE 为 1.021 px，Tracker 时间偏移为 +2.968 ms，对应 Tracker serial
 
 ## 4. 连续 MCAP 会话采集
 
-推荐在设备终端使用 `fastumi_collection.launch.py` 一次启动 ToF 双目相机驱动、
-VIVE Tracker 和夹爪开合度估计。统一 launch 还支持随设备直接启动 MCAP
-录制，默认保持关闭。以下命令从仓库根目录执行：
+推荐使用服务化采集：`fastumi_collection.launch.py` 启动 `collection_node` 和加载“数据采集”
+面板的 RViz2，每次采集独立保存一份 MCAP，并通过 `/fastumi/collection` 服务完成开始、
+停止、保存、取消和删除。以下命令从仓库根目录执行：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ros2_ws/install/setup.bash
-ros2 launch fastumi_data fastumi_collection.launch.py
+# 设备已由其他终端启动：只启动采集后端和面板
+ros2 launch fastumi_data fastumi_collection.launch.py dataset_root:=dataset
 ```
 
-统一 launch 默认使用 `/tof_stereo_camera/rgb/image_raw` 作为夹爪估计图像、
-Tracker 配置文件中的序列号，启动 Tracker RViz2，并关闭 ToF 子 launch 的 RViz2，
-从而避免重复 RViz2。ToF RGB 标定分辨率严格为 `2048x1536`，夹爪节点不会缩放内参。
-Tracker 位姿时间戳由主机对 OpenVR 查询调用区间中点估计，属于主机查询时间；SteamVR 内部固定延迟继续通过已标定的 `time_offset_ms` 表示。
-常用覆盖参数如下：
+默认连接已在运行的设备，相机话题为 `/umi_camera/image_raw`，RViz2 固定坐标系为
+`steamvr_tracking`，并配置原生 Image 与 Tracker Pose 显示。相机、Tracker 和夹爪估计可分别用
+`start_camera`、`start_tracker`、`start_gripper` 按需启动（均默认 `false`）；启用相机时必须显式
+提供 `video_device:=/dev/v4l/by-path/*-video-index0`。常用参数如下：
 
 | launch 参数 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `device_path` | 否 | 空 | 指定 ToF 设备路径；留空时由驱动自动发现设备。 |
-| `tracker_serial` | 否 | 空 | 留空时读取 `vive_tracker.yaml`，也可临时指定 Tracker。 |
-| `use_rviz` | 否 | `true` | 是否启动 Tracker RViz2。 |
-| `publish_debug_image` | 否 | `false` | 是否发布夹爪 ArUco 调试图像。 |
-| `record_mcap` | 否 | `false` | 是否随设备启动并立即录制全部 ROS 2 话题。 |
-| `dataset_root` | 否 | `dataset` | MCAP 保存根目录；每次录制创建 `fastumi_<UTC时间戳>` 子目录。 |
+| `dataset_root` | 否 | `dataset` | 数据集根目录，含正式记录、`.staging` 暂存区和 `.trash` 回收区。 |
+| `extrinsic_path` | 否 | 空 | 可选 Tracker→TCP 外参；留空时记录标记为未标定。 |
+| `start_camera` / `video_device` | 否 / 启用相机时必填 | `false` / 空 | 启动 USB 相机并指定物理端口设备。 |
+| `start_tracker` / `tracker_serial` | 否 | `false` / 空 | 启动 VIVE Tracker（不含其自带 RViz2）；序列号留空读取配置。 |
+| `start_gripper` | 否 | `false` | 启动夹爪开合度估计，订阅 `image_topic`。 |
+| `use_rviz` / `fixed_frame` | 否 | `true` / `steamvr_tracking` | 是否启动 RViz2 及其固定坐标系。 |
 
-例如，临时指定 ToF 设备路径、Tracker：
+在面板中填写任务名和可选名称后点击“开始采集”；采集中可“停止并保存”或“停止并取消”；
+独立停止（`stop` 服务）产生的待保存记录可保存或取消。保存后的记录位于
+`dataset/<task>/<UTC时间>_<uuid>/`，包含 `raw/bag`、`session.yaml`、`quality.yaml` 和
+`calibration_snapshot/`，每条 MCAP 的 `session_id` 为自身 UUID、`episode_index=0`，可直接传给
+`convert_mcap`。已保存记录可在面板中分页、按任务筛选并确认删除（移入 `.trash`）。
+状态机、服务、健康指标和目录细节见 `ros2_ws/src/fastumi_data/README.md`。
 
-```bash
-ros2 launch fastumi_data fastumi_collection.launch.py \
-  device_path:=/dev/video0 \
-  tracker_serial:=LHR-XXXXXXXX
-```
+1080p 原始图像（约 6 MB/帧）在默认 Fast DDS 配置下会因共享内存段过小而静默丢帧。launch 默认把
+`config/fastdds_large_images.xml` 应用到自己启动的进程；设备在别的终端启动时，需在该终端设置
+`FASTRTPS_DEFAULT_PROFILES_FILE` 指向同一文件，否则采集节点会给出 `IMAGE_GAP` 疑似丢帧报警。
 
-需要随启动立即记录压缩 MCAP 时执行：
-
-```bash
-ros2 launch fastumi_data fastumi_collection.launch.py \
-  record_mcap:=true \
-  dataset_root:=dataset
-```
-
-ROS 2 launch 参数使用 `名称:=值` 语法，因此此处写作 `dataset_root:=...`；
-`--dataset-root` 是第 4.1 节 `record_session` 命令的参数形式。录制器显式使用
-MCAP 存储和 `zstd_fast` 块压缩，示例输出目录类似
-`dataset/fastumi_20260810T051219Z/`。停止统一 launch 时，录制进程会一同收到
-退出信号并写完 MCAP 索引。
-
-这种直接录制方式适合设备联调、原始数据留存，以及“先连续录制、后回放标注”流程；
-它不会创建 `session.yaml`、配置快照或 episode 管理节点。采集现场直接划分 episode
-并保留完整标定溯源时，保持 `record_mcap:=false`，再按第 4.1 节启动
-`record_session`。需要先完成动作采集、之后在 RViz2 中仔细划分 episode 时，使用
-`record_mcap:=true` 生成原始包，再按第 4.2 节运行 `annotate_replay`。后一条路径需要
-单独管理转换使用的外参和处理配置。
-
-同一次采集通常只选择一种录包方式。`record_mcap:=true` 与 `record_session` 同时运行
-会产生两份高带宽 MCAP，除非明确需要冗余原始记录，否则不建议同时启用。录制终端的
-`Ctrl+C` 只结束当前 session，设备 launch 继续运行；需要停止相机、Tracker 和
-夹爪预测时，在设备终端按 `Ctrl+C`。
+旧的 `record_mcap:=true` 自动连续录包参数已移除，传入会报迁移提示。需要连续录制并事后在
+RViz2 中划分 episode 时，使用第 4.1 节的 `record_session`，或用 `ros2 bag record` 生成原始包后按第
+4.2 节运行 `annotate_replay`。同一次采集只选择一种录包方式，同时运行会产生两份高带宽 MCAP。
 
 以下终端 1～3 命令保留用于分立调试或排查单个节点。所有终端都需要先加载
 ROS2 和 FastUMI 工作区环境。
@@ -662,7 +643,7 @@ source ros2_ws/install/setup.bash
 
 | 配置键 | 默认值 | 参数说明 |
 | --- | --- | --- |
-| `topics.image` | `/tof_stereo_camera/rgb/image_raw` | FastUMI ToF RGB 图像话题。 |
+| `topics.image` | `/umi_camera/image_raw` | UMI 相机原始图像话题（旧 ToF 数据需在快照中改为 `/tof_stereo_camera/rgb/image_raw`）。 |
 | `topics.tracker_pose` | `/vive_tracker/pose` | Vive Tracker 位姿话题。 |
 | `topics.tracker_status` | `/vive_tracker/status` | Vive Tracker 连接、位姿有效性和跟踪状态话题。 |
 | `topics.gripper_state` | `/gripper/state` | 夹爪开度与检测有效性话题。 |

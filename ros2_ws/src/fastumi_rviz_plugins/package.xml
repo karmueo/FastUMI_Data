@@ -3,7 +3,7 @@
 <package format="3">
   <name>fastumi_rviz_plugins</name>
   <version>0.1.0</version>
-  <description>FastUMI MCAP 回放 episode 标注 RViz2 Panel。</description>
+  <description>FastUMI MCAP 回放 episode 标注与 UMI 采集控制 RViz2 Panel。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>

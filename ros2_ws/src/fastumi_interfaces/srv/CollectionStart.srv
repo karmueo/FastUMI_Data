@@ -1,0 +1,6 @@
+# 开始新采集；任务名作为目录名，名称可选，UUID 由后端生成。
+string request_id
+string task_name
+string name
+---
+fastumi_interfaces/CollectionResult result

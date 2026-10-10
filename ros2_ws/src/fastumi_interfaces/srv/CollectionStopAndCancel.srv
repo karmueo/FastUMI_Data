@@ -1,0 +1,5 @@
+# 修改指定采集；重复 request_id 返回首次结果，UUID 与当前状态不符会被拒绝。
+string request_id
+string collection_uuid
+---
+fastumi_interfaces/CollectionResult result

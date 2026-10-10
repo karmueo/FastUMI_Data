@@ -1,0 +1,3 @@
+# 查询采集后端当前权威状态。
+---
+fastumi_interfaces/CollectionStatus status

@@ -2,13 +2,166 @@
 
 # fastumi_data
 
-该包负责 ROS2 FastUMI 的 episode 事件、连续 MCAP 会话、Tracker 到 TCP
-标定、20 Hz 离线同步、FastUMI HDF5 写入和质量报告。
+该包负责 ROS2 FastUMI 的服务化 UMI 采集、episode 事件、连续 MCAP 会话、
+Tracker 到 TCP 标定、20 Hz 离线同步、FastUMI HDF5 写入和质量报告。
 
 本包使用工作区共享的 `.venv-numpy1`，因为 MCAP 图像转换依赖系统
 `cv_bridge`。每个运行终端先加载 Jazzy、`.venv-numpy1` 和工作区
 `install/setup.bash`；环境创建与分阶段构建见
 [`ros2_ws/README.md`](../../README.md#两套共享-python-环境)。
+
+## 服务化采集（推荐）
+
+`fastumi_collection.launch.py` 启动 `collection_node` 和加载“数据采集”面板的 RViz2。
+每次采集独立保存一份 MCAP；开始、停止、保存、取消和删除都通过
+`/fastumi/collection` 服务完成，RViz2 面板是它的图形前端。默认连接已在运行的设备，
+相机话题为 `/umi_camera/image_raw`。
+
+```bash
+# 设备已由其他终端启动：只启动采集后端和面板
+ros2 launch fastumi_data fastumi_collection.launch.py dataset_root:=dataset
+
+# 一并启动设备；相机必须显式给出 by-path 物理端口路径， 可以通过 ls -l /dev/v4l/by-path/ 获取
+# 这个参数可以不填。留空时用 vive_tracker/config/vive_tracker.yaml 里的 serial
+ros2 launch fastumi_data fastumi_collection.launch.py \
+  start_camera:=true video_device:=/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.2:1.0-video-index0 \
+  start_tracker:=true \
+  start_gripper:=true
+```
+
+| launch 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `dataset_root` | `dataset` | 数据集根目录，含正式记录、`.staging` 暂存区和 `.trash` 回收区。 |
+| `image_topic` | `/umi_camera/image_raw` | 相机原始图像话题；启动相机时命名空间由它推导。 |
+| `extrinsic_path` | 空 | 可选 Tracker→TCP 外参，按 2 mm、1° 验收；留空则记录标记为未标定。 |
+| `start_camera` / `start_tracker` / `start_gripper` | `false` | 分别按需启动 USB 相机、VIVE Tracker（不含其自带 RViz2）、夹爪估计。 |
+| `video_device` | 空 | `start_camera:=true` 时必填，必须是 `/dev/v4l/by-path/*-video-index0`。 |
+| `camera_calibration_path` / `gripper_calibration_path` | 空 | 可选覆盖夹爪估计的内参和夹爪标定；留空沿用其默认解析，并把实际文件写入快照。 |
+| `use_rviz` / `rviz_config` / `fixed_frame` | `true` / 内置布局 / `steamvr_tracking` | RViz2 开关、配置和固定坐标系。 |
+| `fastdds_profile` | `config/fastdds_large_images.xml` | Fast DDS 配置，见下文“1080p 图像传输”；留空禁用，已设置 `FASTRTPS_DEFAULT_PROFILES_FILE` 时不覆盖。 |
+
+旧的 `record_mcap:=true` 已移除：launch 不再随设备自动连续录包，传入时会报迁移提示。
+连续录包仍可使用下文的 `record_session`。
+
+### 1080p 图像传输（Fast DDS 配置）
+
+默认 Fast DDS 的共享内存段只有 512 KB，装不下一帧 1920×1080 的 `bgr8` 图像（约 6 MB），
+同机进程间会回退到 UDP 分片传输。实机 30 fps 下订阅端会静默丢掉约 7%～14% 的图像帧（实测
+一条 24 s 记录只有 671 帧、33 处间隔异常，而同一时刻夹爪估计节点收到了更多帧）。
+`config/fastdds_large_images.xml` 把共享内存段放大到 256 MB 并加大 UDP 缓冲；使用后同样
+的实机记录为 30.10 Hz 图像、100.04 Hz Tracker，零间隔异常。
+
+只设置环境变量 `FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA`（或 `SHM`）加
+`RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS` 实测没有改善（仍丢约 5%～6% 的图像帧，与不设置相同），
+因为共享内存段大小只能通过 XML 的 SHM 传输描述符设置。
+
+launch 默认通过 `SetEnvironmentVariable` 把它应用到自己启动的全部进程（相机、Tracker、夹爪、
+采集节点、RViz2）。**发布者和订阅者两端都要使用该配置**：如果相机或 Tracker 在别的终端启动
+（默认的“连接已有设备”模式），需要在那个终端先设置：
+
+```bash
+export FASTRTPS_DEFAULT_PROFILES_FILE=$(ros2 pkg prefix fastumi_data)/share/fastumi_data/config/fastdds_large_images.xml
+```
+
+即使配置正确，仍可能出现丢帧：采集节点会在相邻源时间戳间隔超过近期中位间隔 1.6 倍（单帧丢失约 2 倍）时给出
+`IMAGE_GAP`/`TRACKER_GAP`/`GRIPPER_GAP` 报警并写入 `quality.yaml`，请在保存前查看。
+
+### 生命周期与服务
+
+状态流转为 `idle → starting → recording → stopping → pending → saving → idle`；
+取消经 `cancelling` 清理后回到 `idle`，任何写入故障进入 `error`，此时只能取消，
+失败数据不会被保存为成功记录。同一时刻只允许一条活动或待保存记录，待保存期间
+不能再次开始。
+
+| 服务（`/fastumi/collection/…`） | 作用 |
+| --- | --- |
+| `start` | 提供任务名和可选名称，后端生成采集 UUID。 |
+| `stop` / `save` / `cancel` | 独立停止（进入 `pending`）、保存待保存记录、取消待保存或故障记录。 |
+| `stop_and_save` / `stop_and_cancel` | 组合操作，由后端串行执行，不暴露可被插入的中间状态。 |
+| `delete` | 仅接受已保存记录 UUID，整目录移入回收区；不提供恢复或清空回收区。 |
+| `list` / `get_status` | 按任务筛选并分页列出记录；查询权威状态。 |
+
+修改类请求带 `request_id`：重复请求返回首次结果，同一 ID 用于不同请求被拒绝，错误
+UUID 和与当前状态冲突的操作被拒绝。响应里 `accepted` 表示请求被受理，`completed`
+表示操作已完成。`/fastumi/collection/status` 以 best-effort 周期发布权威状态
+（含单调递增的 `state_version`、`last_request_id` 和按钮可用性 `can_*`），面板重连后
+先调用 `get_status`。
+
+```bash
+ros2 service call /fastumi/collection/start fastumi_interfaces/srv/CollectionStart \
+  "{request_id: cli-1, task_name: pick_place, name: 第一次}"
+ros2 service call /fastumi/collection/stop_and_save fastumi_interfaces/srv/CollectionStopAndSave \
+  "{request_id: cli-2, collection_uuid: '<start 返回的 UUID>'}"
+```
+
+常见失败码：`PREFLIGHT_FAILED`（开始前检查未通过）、`PENDING_RECORD`、`STATE_CONFLICT`、
+`UUID_MISMATCH`、`ERROR_STATE`、`REQUEST_ID_CONFLICT`、`QUEUE_OVERFLOW`、`WRITE_FAILED`、
+`NOT_SAVED`、`NOT_FOUND`。
+
+取消或退出时，若写入线程在等待期限内未退出，会返回 `CANCEL_TIMEOUT` 并保留暂存数据；
+根目录锁继续由当前进程持有，禁止开始下一条采集。待写入线程退出后，用新的 `request_id`
+重试取消即可清理；已返回失败的请求 ID 仍返回原结果。
+
+### 数据与目录
+
+默认录制图像、`/vive_tracker/pose`、`/vive_tracker/status`、`/gripper/state`、
+`/tf_static` 和 episode 事件，话题可在 `config/collection.yaml` 中映射；不再依赖 ToF 帧序号。
+每条 MCAP 以自身 UUID 作为 session ID、`episode_index=0`，START 先于传感器数据写入，
+停止时先停止接纳并排空已接纳消息，再写 STOP 并关闭，因此现有 `convert_mcap` 可直接
+消费。写入使用 `rosbag2_py.SequentialWriter`、MCAP 和 `zstd_fast`，由单一写入线程消费有界
+队列；队列溢出、写入或关闭失败都会明确报错。
+
+```text
+dataset/
+├── .fastumi_collection.lock          根目录独占锁，同一目录只允许一个采集服务
+├── .staging/<uuid>/                  未保存采集（带归属标记，退出和下次启动时清理）
+├── .trash/<task>__<dir_name>/        已删除记录
+└── <task>/<UTC时间>_<uuid>/          已保存记录，保存通过同文件系统重命名发布
+    ├── raw/bag/                      rosbag2 MCAP
+    ├── session.yaml                  清单：uuid、话题、标定状态、消息计数、大小
+    ├── quality.yaml                  报警统计、时间指标和平均频率
+    └── calibration_snapshot/         实际处理配置、外参（若提供）及内参/夹爪标定快照
+```
+
+未提供外参时清单记为 `uncalibrated`；转换为 HDF5 时仍需向 `convert_mcap --extrinsic`
+提供通过验收的外参。清理只处理带有效归属标记的暂存目录，已保存记录不会被误删。
+
+### 健康监控
+
+开始前检查三路输入的发布者、新鲜度和有效性，Tracker 还要求跟踪状态为 `RUNNING_OK`；
+默认超时图像 1 s、Tracker/夹爪 0.25 s（`config/collection.yaml`）。新鲜度使用单调接收
+时钟，静止但持续发布的 Tracker 不会被判为失效。图像与夹爪按完全相同的源时间戳配对，
+Tracker 按最近源时间戳在 30 ms 窗口内配对，无匹配时显示不可用。面板分别显示源时间差、
+消息年龄、配对到达时间差和频率；到达时间差包含传输与排队，不是纯算法耗时。采集中出现
+断流、无效、乱序、疑似丢帧、无匹配或夹爪滞后时继续记录，同时报警并写入 `quality.yaml`。
+
+### 验证与未覆盖项
+
+**自动化测试**覆盖状态机、存储、写入队列、健康逻辑、launch，以及用合成三路消息启动真实
+`collection_node` 进程、生成真实 MCAP 并由现有转换器产出 HDF5 的端到端流程（含
+SIGINT/SIGKILL 重启清理）。
+
+**实机验证**（2026-10-10，UMI 设备固定不动，USB 相机 1920×1080 MJPEG 30 fps、VIVE Tracker
+`LHR-B77A06A7`、夹爪估计均在线，RViz2 显示在 `:10.0`）：
+
+- 用 `start_camera/start_tracker/start_gripper` 一并启动，并从 RViz2“数据采集”面板点击开始、停止并保存；
+  面板显示三路均为正常，图像 30.1 Hz、Tracker 100 Hz、夹爪 30.1 Hz，夹爪开合 ≈93%。
+- 一条 17 s 的面板采集：522 帧图像，图像/夹爪 30.12 Hz、Tracker 100.06 Hz，相邻间隔最大 36.8 ms
+  （零丢帧），夹爪与图像时间戳 522/522 完全匹配，START 在前、STOP 在后，日志时间单调，无报警；
+  数据 2.3 GiB（约 135 MB/s，录制中面板显示的写入队列深度为 1/600）。
+- 同一条记录经 `convert_mcap` 转成 HDF5：347 个 20 Hz 样本、图像 1080×1920、夹爪观测率 99.7%、
+  Tracker 跟踪正常率 100%。因本机没有 v2 外参，转换用的是测试用外参，**未验证真实外参下的 TCP 位姿**。
+- 静止的 Tracker 始终判为健康（位置标准差约 40 µm）；暂停夹爪节点 3 s 后，`get_status`
+  给出 `can_start=false`、`夹爪数据已超过 0.25 s 未更新` 和 `GRIPPER_STALE`，恢复后 `can_start` 回到 true。
+- 实机暴露并已修复三个模拟环境测不到的问题：launch 同名参数遮蔽子 launch 默认值，导致夹爪估计
+  回退到 ToF 标定；Tracker 子 launch 的 `use_rviz:=false` 泄漏并关闭了采集 RViz2；默认 DDS
+  共享内存段过小导致静默丢帧（见上文）。
+
+**仍未验证**：≥30 min 的长时间采集（按约 135 MB/s 估算每分钟约 8 GB，需确认磁盘余量和队列）；
+真实外参下的 HDF5 位姿；设备运动时的时间指标；RViz2 默认布局中“UMI 视频”停靠面板初始为折叠状态，
+需要手动拖开一次（图像显示本身正常，面板左侧的 `UMI 视频` 标题栏即是）。
+
+## 连续录制（record_session）
 
 最短流程：
 

@@ -307,9 +307,8 @@ def test_main_writes_v2_manifest_without_calibration_verified(
     assert "calibration_verified" not in manifest
 
 
-def test_default_topics_include_tof_rgb_frame_sequence() -> None:
-    """默认 MCAP 应成对录制 FastUMI ToF RGB 图像及其 SDK 帧序号。"""
-    assert DEFAULT_TOPICS[:2] == [
-        "/tof_stereo_camera/rgb/image_raw",
-        "/tof_stereo_camera/rgb/frame_seqidx",
-    ]
+def test_default_topics_use_umi_camera_without_frame_sequence() -> None:
+    """默认 MCAP 录制 UMI 相机图像，且不再依赖 ToF 帧序号话题。"""
+    assert DEFAULT_TOPICS[0] == "/umi_camera/image_raw"
+    assert not any("frame_seqidx" in topic for topic in DEFAULT_TOPICS)
+    assert "/fastumi/episode/events" in DEFAULT_TOPICS

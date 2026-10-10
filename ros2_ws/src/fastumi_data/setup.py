@@ -19,7 +19,10 @@ setup(
             [f"resource/{PACKAGE_NAME}"],
         ),
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),
-        (f"share/{PACKAGE_NAME}/config", glob("config/*.yaml")),
+        (
+            f"share/{PACKAGE_NAME}/config",
+            glob("config/*.yaml") + glob("config/*.rviz") + glob("config/*.xml"),
+        ),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
     ],
     install_requires=["setuptools"],
@@ -31,6 +34,7 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
+            "collection_node = fastumi_data.collection_node:main",
             "episode_manager = fastumi_data.episode_manager:main",
             "episode_command = fastumi_data.episode_command:main",
             "record_session = fastumi_data.session_recorder:main",

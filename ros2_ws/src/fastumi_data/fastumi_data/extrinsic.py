@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 import numpy as np
 import yaml
@@ -89,3 +89,13 @@ def load_tracker_tcp_extrinsic(path: str) -> TrackerTcpExtrinsic:
         calibration_method=calibration_method,
         aruco_config_sha256=aruco_config_sha256,
     )
+
+
+def calibration_passes_acceptance(metadata: Mapping[str, Any]) -> bool:
+    """检查已严格校验外参元数据是否满足 2 mm、1° 正式门限。"""
+    try:
+        translation_rmse_mm = float(metadata["translation_rmse_mm"])
+        rotation_rmse_deg = float(metadata["rotation_rmse_deg"])
+    except (TypeError, ValueError, KeyError):
+        return False
+    return translation_rmse_mm <= 2.0 and rotation_rmse_deg <= 1.0

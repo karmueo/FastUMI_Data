@@ -1,6 +1,11 @@
 <?xml version="1.0"?>
-<!-- 本文件向 pluginlib 导出 FastUMI 回放标注 RViz2 Panel。 -->
+<!-- 本文件向 pluginlib 导出 FastUMI 回放标注与采集 RViz2 Panel。 -->
 <library path="fastumi_rviz_plugins">
+  <class name="fastumi_rviz_plugins/CollectionPanel"
+         type="fastumi_rviz_plugins::CollectionPanel"
+         base_class_type="rviz_common::Panel">
+    <description>控制 UMI 采集的开始、停止、保存、取消和删除，并显示设备健康与记录列表。</description>
+  </class>
   <class name="fastumi_rviz_plugins/ReplayAnnotationPanel"
          type="fastumi_rviz_plugins::ReplayAnnotationPanel"
          base_class_type="rviz_common::Panel">

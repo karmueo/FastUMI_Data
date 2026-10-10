@@ -12,7 +12,7 @@ import sys
 import termios
 import time
 import tty
-from typing import Any, Callable, List, Mapping, Optional, TextIO
+from typing import Callable, List, Optional, TextIO
 
 from ament_index_python.packages import get_package_share_directory
 import rclpy
@@ -20,13 +20,15 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 import yaml
 
-from fastumi_data.extrinsic import load_tracker_tcp_extrinsic
+from fastumi_data.extrinsic import (
+    calibration_passes_acceptance,
+    load_tracker_tcp_extrinsic,
+)
 
 
 # 默认录制的数据和 episode 边界话题。
 DEFAULT_TOPICS = [
-    "/tof_stereo_camera/rgb/image_raw",
-    "/tof_stereo_camera/rgb/frame_seqidx",
+    "/umi_camera/image_raw",
     "/gripper/state",
     "/vive_tracker/pose",
     "/vive_tracker/status",
@@ -191,16 +193,6 @@ def _copy_snapshot(
     }
 
 
-def _calibration_passes_acceptance(metadata: Mapping[str, Any]) -> bool:
-    """检查已严格校验外参元数据是否满足 2 mm、1° 正式门限。"""
-    try:
-        translation_rmse_mm = float(metadata["translation_rmse_mm"])
-        rotation_rmse_deg = float(metadata["rotation_rmse_deg"])
-    except (TypeError, ValueError, KeyError):
-        return False
-    return translation_rmse_mm <= 2.0 and rotation_rmse_deg <= 1.0
-
-
 def _terminate_process(process: subprocess.Popen) -> None:
     """向子进程发送 SIGINT，并在必要时升级为终止。"""
     if process.poll() is not None:
@@ -277,7 +269,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     """启动 episode 管理节点和 ros2 bag MCAP 录制进程。"""
     arguments = _build_parser().parse_args(argv)
     extrinsic = load_tracker_tcp_extrinsic(arguments.extrinsic)
-    if not _calibration_passes_acceptance(extrinsic.metadata):
+    if not calibration_passes_acceptance(extrinsic.metadata):
         raise ValueError("Tracker 到 TCP 外参未通过 2 mm、1° 验收")
     session_id = arguments.session_id or datetime.now(
         timezone.utc

@@ -2,7 +2,19 @@
 
 # fastumi_interfaces
 
-定义 FastUMI 的 episode、夹爪、Tracker 消息及回放标注服务；本包只生成接口，不启动节点。
+定义 FastUMI 的 episode、夹爪、Tracker 消息、回放标注服务和 UMI 采集服务；本包只生成接口，不启动节点。
+
+## 采集接口
+
+`fastumi_data` 的 `collection_node` 在 `/fastumi/collection` 命名空间提供
+`start`、`stop`、`save`、`cancel`、`stop_and_save`、`stop_and_cancel`、`delete`、`list`
+和 `get_status` 服务，并以 best-effort QoS 周期性（默认 2 Hz）及每次状态变化时发布 `status`；订阅端必须使用 best-effort。晚加入或重连的面板先调用 `get_status` 取得权威快照，丢失单条状态不影响正确性。
+
+- 修改类请求都携带 `request_id`；重复请求返回首次结果，同一 ID 用于不同操作会被拒绝。
+- `CollectionResult.accepted` 表示请求被受理，`completed` 表示操作已完成；面板应以
+  `CollectionStatus.state_version` 与 `last_request_id` 判断结果，丢弃过期状态。
+- 开始请求只提供任务名和可选名称，采集 UUID 由后端生成。
+- `CollectionStatus.can_*` 由后端状态计算，面板据此启用按钮。
 
 ## 构建和运行环境
 

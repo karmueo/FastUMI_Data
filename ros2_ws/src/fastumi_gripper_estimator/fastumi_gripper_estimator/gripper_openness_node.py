@@ -26,8 +26,8 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float32
 
 
-# 默认 ToF 原始 RGB 图像话题。
-DEFAULT_IMAGE_TOPIC = "/tof_stereo_camera/rgb/image_raw"
+# 默认 UMI 相机原始图像话题。
+DEFAULT_IMAGE_TOPIC = "/umi_camera/image_raw"
 # 默认夹爪编号。
 DEFAULT_GRIPPER_ID = 0
 # 默认左右手指 ArUco 标记编号。

@@ -1,6 +1,6 @@
 gripper_openness_estimator:
   ros__parameters:
-    image_topic: /tof_stereo_camera/rgb/image_raw
+    image_topic: /umi_camera/image_raw
     openness_topic: /gripper/openness
     state_topic: /gripper/state
     debug_image_topic: /gripper/openness/debug_image
