@@ -7,3 +7,4 @@ matplotlib
 numba
 pandas
 tqdm
+modelscope-hub>=0.4,<1
