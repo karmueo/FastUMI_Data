@@ -1,4 +1,4 @@
-# 采集默认布局：左侧采集面板，右侧显示相机画面和 Tracker 位姿。
+# 采集默认布局：显示相机视频、Tracker 里程计和采集状态。
 Panels:
   - Class: fastumi_rviz_plugins/CollectionPanel
     Name: 数据采集
@@ -9,7 +9,7 @@ Panels:
       Expanded:
         - /Global Options1
       Splitter Ratio: 0.5
-    Tree Height: 200
+    Tree Height: 151
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -24,10 +24,16 @@ Visualization Manager:
       Color: 160; 160; 164
       Enabled: true
       Line Style:
-        Line Width: 0.03
+        Line Width: 0.029999999329447746
         Value: Lines
       Name: Grid
       Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_default_plugins/Image
@@ -44,30 +50,49 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /umi_camera/image_raw
       Value: true
-    - Alpha: 1
-      Axes Length: 0.3
-      Axes Radius: 0.03
-      Class: rviz_default_plugins/Pose
-      Color: 255; 85; 0
+    - Angle Tolerance: 0.10000000149011612
+      Class: rviz_default_plugins/Odometry
+      Covariance:
+        Orientation:
+          Alpha: 0.5
+          Color: 255; 255; 127
+          Color Style: Unique
+          Frame: Local
+          Offset: 1
+          Scale: 1
+          Value: false
+        Position:
+          Alpha: 0.30000001192092896
+          Color: 204; 51; 204
+          Scale: 1
+          Value: false
+        Value: false
       Enabled: true
-      Head Length: 0.07
-      Head Radius: 0.035
-      Name: Tracker Pose
-      Shaft Length: 0.23
-      Shaft Radius: 0.015
-      Shape: Axes
+      Keep: 1
+      Name: Tracker Odom
+      Position Tolerance: 0.0010000000474974513
+      Shape:
+        Alpha: 1
+        Axes Length: 0.30000001192092896
+        Axes Radius: 0.029999999329447746
+        Color: 255; 85; 0
+        Head Length: 0.07000000029802322
+        Head Radius: 0.03500000014901161
+        Shaft Length: 0.23000000417232513
+        Shaft Radius: 0.014999999664723873
+        Value: Axes
       Topic:
         Depth: 10
         Durability Policy: Volatile
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /vive_tracker/pose
+        Value: /vive_tracker/odom
       Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: steamvr_tracking
+    Fixed Frame: vive_tracker_odom
     Frame Rate: 30
   Name: root
   Tools:
@@ -84,18 +109,38 @@ Visualization Manager:
     Current:
       Class: rviz_default_plugins/Orbit
       Distance: 3
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
       Focal Point:
         X: 0
         Y: 0
         Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
       Name: Current View
-      Pitch: 0.6
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.6000000238418579
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 0.8
+      Yaw: 0.800000011920929
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 1000
-  Width: 1600
+  Height: 1321
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000200000000000001a9000004cffc0200000002fb000000086570636e91c796c6010000003d000003fe0000033800fffffffb0000000a005600690065007700730100000441000000cb000000a400ffffff00000001000001ca000004cffc0200000002fb000000100044006900730070006c006100790073010000003d000000d4000000c900fffffffb0000000c0055004d0049002089c698910100000117000003f50000001600ffffff000003f7000004cf00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  UMI 视频:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1910
+  X: 0
+  Y: 27
+  数据采集:
+    collapsed: false

@@ -21,10 +21,11 @@ Tracker 到 TCP 标定、20 Hz 离线同步、FastUMI HDF5 写入和质量报告
 # 设备已由其他终端启动：只启动采集后端和面板
 ros2 launch fastumi_data fastumi_collection.launch.py dataset_root:=dataset
 
-# 一并启动设备；相机必须显式给出 by-path 物理端口路径， 可以通过 ls -l /dev/v4l/by-path/ 获取
+# 一并启动设备；video_device 可留空自动选择第一个 USB 相机，多相机时建议给出
+# by-path 物理端口路径，可通过 ls -l /dev/v4l/by-path/ 获取
 # 这个参数可以不填。留空时用 vive_tracker/config/vive_tracker.yaml 里的 serial
 ros2 launch fastumi_data fastumi_collection.launch.py \
-  start_camera:=true video_device:=/dev/v4l/by-path/pci-0000:06:00.4-usb-0:2.2:1.0-video-index0 \
+  start_camera:=true \
   start_tracker:=true \
   start_gripper:=true
 ```
@@ -32,10 +33,15 @@ ros2 launch fastumi_data fastumi_collection.launch.py \
 | launch 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `dataset_root` | `dataset` | 数据集根目录，含正式记录、`.staging` 暂存区和 `.trash` 回收区。 |
-| `image_topic` | `/umi_camera/image_raw` | 相机原始图像话题；启动相机时命名空间由它推导。 |
+| `image_mode` | `auto` | `auto` 按发布端实际消息类型订阅（启动本地相机时为 `raw`，连接已有设备时探测 `image_probe_timeout_s`=5 s，探测不到按话题后缀或 `raw`）；也可显式指定 `raw`、`compressed`（JPEG/PNG）、`h264`，见下文“压缩图像与 H.264”。 |
+| `image_topic` | 空 | 录制的图像话题；留空按模式取 `/umi_camera/image_raw`、`…/compressed` 或 `…/ffmpeg`，显式给出的话题优先。启动本地相机时命名空间由它推导。 |
+| `decoded_image_topic` | `/umi_camera/image_decoded` | 编码模式下在线解码后的原始图像话题，夹爪估计和 RViz2 订阅它。 |
+| `image_reliability` / `image_qos_depth` | `best_effort` / `30` | 图像订阅 QoS；默认兼容当前相机发布端。 |
+| `h264_start_timeout_s` | `5.0` | `h264` 模式开始采集时等待首个关键帧的最长秒数。 |
+| `start_decoder` / `decoder_backend` | `true` / `auto` | 编码模式下是否启动在线解码节点，以及 H.264 解码后端（`auto`、`transport`、`cuda`）。 |
 | `extrinsic_path` | 空 | 可选 Tracker→TCP 外参，按 2 mm、1° 验收；留空则记录标记为未标定。 |
 | `start_camera` / `start_tracker` / `start_gripper` | `false` | 分别按需启动 USB 相机、VIVE Tracker（不含其自带 RViz2）、夹爪估计。 |
-| `video_device` | 空 | `start_camera:=true` 时必填，必须是 `/dev/v4l/by-path/*-video-index0`。 |
+| `video_device` | 空 | 可为空：留空时自动选择编号最小的 USB 相机（多相机时端口不稳定）；显式给出须是 `/dev/v4l/by-path/*-video-index0`。 |
 | `camera_calibration_path` / `gripper_calibration_path` | 空 | 可选覆盖夹爪估计的内参和夹爪标定；留空沿用其默认解析，并把实际文件写入快照。 |
 | `use_rviz` / `rviz_config` / `fixed_frame` | `true` / 内置布局 / `steamvr_tracking` | RViz2 开关、配置和固定坐标系。 |
 | `fastdds_profile` | `config/fastdds_large_images.xml` | Fast DDS 配置，见下文“1080p 图像传输”；留空禁用，已设置 `FASTRTPS_DEFAULT_PROFILES_FILE` 时不覆盖。 |
@@ -65,6 +71,54 @@ export FASTRTPS_DEFAULT_PROFILES_FILE=$(ros2 pkg prefix fastumi_data)/share/fast
 
 即使配置正确，仍可能出现丢帧：采集节点会在相邻源时间戳间隔超过近期中位间隔 1.6 倍（单帧丢失约 2 倍）时给出
 `IMAGE_GAP`/`TRACKER_GAP`/`GRIPPER_GAP` 报警并写入 `quality.yaml`，请在保存前查看。
+
+### 压缩图像与 H.264
+
+相机可以发布三种消息，MCAP 始终**原样保存收到的编码消息**，HDF5 仍保存 RGB 像素：
+
+| `image_mode` | 消息类型 | 默认话题 |
+| --- | --- | --- |
+| `raw`（默认） | `sensor_msgs/msg/Image` | `/umi_camera/image_raw` |
+| `compressed` | `sensor_msgs/msg/CompressedImage`（JPEG/PNG） | `/umi_camera/image_raw/compressed` |
+| `h264` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | `/umi_camera/image_raw/ffmpeg` |
+
+H.264 只支持**无 B 帧、每包一个访问单元的 Annex B 码流**，关键帧须在包内携带 SPS/PPS。
+软件解码依赖系统包 `python3-av`（`sudo apt install python3-av`）；`CompressedImage` 解码只需 OpenCV。
+
+```bash
+# 本地相机输出 JPEG / 软件 H.264（复用 fastumi_usb_camera 现有节点）
+ros2 launch fastumi_data fastumi_collection.launch.py image_mode:=compressed \
+  start_camera:=true video_device:=/dev/v4l/by-path/…-video-index0 start_gripper:=true
+ros2 launch fastumi_data fastumi_collection.launch.py image_mode:=h264 \
+  start_camera:=true video_device:=/dev/v4l/by-path/…-video-index0 start_gripper:=true
+
+# 连接 Jetson 等外部发布端：显式给出其编码话题，不启动本地相机
+ros2 launch fastumi_data fastumi_collection.launch.py image_mode:=h264 \
+  image_topic:=/wrist_camera/image_raw/ffmpeg decoded_image_topic:=/wrist_camera/image_decoded \
+  start_gripper:=true
+```
+
+* **开始前检查**：核对发布端消息类型与 `image_mode` 一致，`image_reliability:=reliable` 时还要求发布端是
+  RELIABLE，否则给出 `IMAGE_TYPE_MISMATCH` / `IMAGE_QOS_INCOMPATIBLE` 阻塞原因。健康状态的图像流会报告格式
+  （如 `h264 1280x960`）、有效性（损坏数据、B 帧、非 Annex B 判为无效）和已收到的关键帧数。
+* **H.264 起点**：`start` 在 `starting` 状态等待第一个同时含 SPS/PPS 和 IDR 的关键帧，然后原子写入 START
+  （时间戳取该帧的源时间）、静态 TF 和该帧，再进入 `recording`。`start` 服务调用保持同步，超过
+  `h264_start_timeout_s` 返回 `KEYFRAME_TIMEOUT`，暂存数据被清理。停止语义不变，只排空本地写入队列。
+* **在线预览**：夹爪估计和 RViz2 订阅原始图像。`compressed` 由 `image_decoder` 节点解码；`h264` 由
+  `usb_camera_receiver` 的 `decoder_backend`（默认 `auto`：优先 `h264_cuvid`，初始化失败用同一关键帧改用软件，
+  运行失败后在下一个关键帧切换软件并保持到重启）解码。RViz2 的 UMI 视频显示会自动改订阅解码话题；Tracker 默认显示 `/vive_tracker/odom` 的 Odometry 位姿。
+  录包只录编码话题。软件回退时预览允许降帧，录包不受影响。
+* **为什么不用 `image_transport republish`**：它的订阅固定为 RELIABLE，实测收不到 BEST_EFFORT 相机发布端的任何消息，
+  因此 JPEG/PNG 使用 QoS 可配置的 `ros2 run fastumi_data image_decoder`。
+* **离线转换与标定**：采集快照 `processing.yaml` 记录 `image_mode` 和图像话题，`convert_mcap` 据此解码并校验
+  MCAP 话题类型；不一致、损坏数据、B 帧或 episode 内出现无法解码的前缀都会报告原因并失败。H.264 解码状态跨越
+  episode，参考包持续输入，解码后才筛选 episode；首个关键帧之前的启动前缀被跳过并计入输出摘要
+  （`image_packets_skipped_before_keyframe`）。标定命令加 `--image-mode compressed|h264`（默认 `raw`）：
+
+```bash
+ros2 run fastumi_data calibrate_tracker_camera --bag … --image-mode h264 …
+ros2 run fastumi_data calibrate_aruco_tcp <bag> --image-mode h264 …
+```
 
 ### 生命周期与服务
 
@@ -157,6 +211,12 @@ SIGINT/SIGKILL 重启清理）。
   回退到 ToF 标定；Tracker 子 launch 的 `use_rviz:=false` 泄漏并关闭了采集 RViz2；默认 DDS
   共享内存段过小导致静默丢帧（见上文）。
 
+**压缩视频验证**（2026-10-10，合成数据）：JPEG 与 H.264 经真实 `collection_node`、真实 MCAP 和
+`convert_mcap` 转成 RGB HDF5 的端到端测试通过；CDR 解析与 rclpy 序列化逐字节一致（含大端和截断）；接收器
+`auto` 后端在本机 NVIDIA GPU（`h264_cuvid`）和强制 GPU 初始化失败（软件回退）两条路径上都通过。
+**未验证**：真实 Jetson 1280×960@30 FPS 码流、真实相机的 H.264 软件编码链路、长时间运行；包丢失只有在破坏解码
+时才会被发现（best-effort 传输下静默丢掉的 P 帧无法从码流本身察觉）。
+
 **仍未验证**：≥30 min 的长时间采集（按约 135 MB/s 估算每分钟约 8 GB，需确认磁盘余量和队列）；
 真实外参下的 HDF5 位姿；设备运动时的时间指标；RViz2 默认布局中“UMI 视频”停靠面板初始为折叠状态，
 需要手动拖开一次（图像显示本身正常，面板左侧的 `UMI 视频` 标题栏即是）。
@@ -191,6 +251,19 @@ ros2 run fastumi_data convert_mcap \
   dataset/pick_place/<session>/raw/bag \
   --extrinsic dataset/pick_place/<session>/calibration_snapshot/tracker_to_tcp.yaml \
   --config dataset/pick_place/<session>/calibration_snapshot/processing.yaml
+```
+
+连续录制同样支持压缩图像：`record_session` 增加 `--image-mode`、`--image-topic`、
+`--image-reliability`、`--image-qos-depth`。默认录制列表中的图像话题随所选话题替换，显式 `--topic` 列表必须包含
+该图像话题。`raw` 使用 `ros2 bag record --qos-profile-overrides-path`；编码模式使用共享订阅的
+`record_encoded_session`，直接应用图像 QoS，并在同一个执行器中运行录包与 episode 服务。
+首个 episode 要等录包端成功写入可解码图像（H.264 含 SPS/PPS 的关键帧）才允许开始；
+写入失败会拒绝开始并终止录制，等待期间 `start` 返回原因，首次开始后不再门控。
+独立启动的 `episode_manager` 仅支持 `raw`；编码模式请使用 `record_session`，由录包端提供就绪状态。
+
+```bash
+ros2 run fastumi_data record_session --task pick_place --extrinsic … \
+  --image-mode h264 --image-topic /wrist_camera/image_raw/ffmpeg
 ```
 
 默认输出为 session 下的 `episodes/` 和 `reports/`。同步门限位于
@@ -236,6 +309,10 @@ ros2 run fastumi_data annotate_replay \
   --output /path/to/annotated_bag \
   --task pick_place --rate 1.0
 ```
+
+回放支持编码图像：自动识别 `Image`、`CompressedImage` 和 `FFMPEGPacket` 话题（可用 `--image-mode` 限定），
+启动解码节点把画面发布到 `/fastumi/replay/image`，RViz 配置无需修改；H.264 用 `--decoder-backend`
+（默认 `auto`）选择解码后端。解码节点在回放中途退出会明确失败。拖动时间轴后 H.264 在下一个关键帧恢复画面。
 
 `--output` 必须尚不存在且不同于 `--bag`。播放器自然结束或接受 Ctrl+S 后，工具冻结
 事件、严格校验所有 episode 已闭合，再以临时同级目录合并和复验完整源 MCAP，最后

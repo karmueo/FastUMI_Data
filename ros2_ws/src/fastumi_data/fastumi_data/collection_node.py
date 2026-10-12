@@ -11,7 +11,7 @@ import math
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Tuple
 
 from ament_index_python.packages import get_package_share_directory
 from fastumi_interfaces.msg import (
@@ -50,7 +50,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from rclpy.serialization import deserialize_message, serialize_message
-from sensor_msgs.msg import Image
+from rosidl_runtime_py.utilities import get_message
 from tf2_msgs.msg import TFMessage
 
 from fastumi_data.collection_health import (
@@ -71,6 +71,20 @@ from fastumi_data.collection_state import (
 )
 from fastumi_data.collection_storage import CollectionStorage, SavedRecord, StorageError
 from fastumi_data.collection_writer import RosbagMcapBackend
+from fastumi_data.image_qos import image_qos_profile
+from fastumi_data.image_modes import (
+    DEFAULT_DECODED_IMAGE_TOPIC,
+    DEFAULT_H264_START_TIMEOUT_S,
+    DEFAULT_IMAGE_MODE,
+    DEFAULT_IMAGE_QOS_DEPTH,
+    DEFAULT_IMAGE_RELIABILITY,
+    RELIABILITY_RELIABLE,
+    message_type_for_mode,
+    resolve_image_topic,
+    validate_image_mode,
+    validate_image_qos_depth,
+    validate_image_reliability,
+)
 
 
 # 采集服务与状态话题的命名空间。
@@ -98,8 +112,19 @@ def stream_to_msg(stream: StreamHealth) -> CollectionStreamHealth:
     message.pair_arrival_delta_ms = float(stream.pair_arrival_delta_ms)
     message.received = int(stream.received)
     message.out_of_order = int(stream.out_of_order)
-    message.detail = stream.detail
+    message.detail = stream.detail or _stream_format_text(stream)
     return message
+
+
+def _stream_format_text(stream: StreamHealth) -> str:
+    """没有异常时，图像流的 detail 携带格式和 h264 关键帧等待信息。"""
+    if not stream.format:
+        return ""
+    if stream.awaiting_keyframe:
+        return f"{stream.format}，尚未收到 SPS/PPS+IDR 关键帧"
+    if stream.keyframes:
+        return f"{stream.format}，已收到 {stream.keyframes} 个关键帧"
+    return stream.format
 
 
 def status_to_msg(snapshot: StatusSnapshot, stamp: Any = None) -> CollectionStatus:
@@ -140,6 +165,8 @@ def status_to_msg(snapshot: StatusSnapshot, stamp: Any = None) -> CollectionStat
     message.free_disk_bytes = snapshot.free_disk_bytes
     message.calibration_status = snapshot.calibration_status
     message.alarms = list(snapshot.alarms)
+    message.image_mode = snapshot.image_mode
+    message.image_format = snapshot.image_format
     return message
 
 
@@ -227,8 +254,16 @@ class CollectionNode(Node):
             ),
         )
         self._declare_parameters()
+        image_mode = validate_image_mode(self._text("image_mode"))
+        self._image_reliability = validate_image_reliability(
+            self._text("image_reliability")
+        )
+        self._image_qos_depth = validate_image_qos_depth(
+            int(self.get_parameter("image_qos_depth").value)
+        )
         topics = TopicMap(
-            image=self._text("image_topic"),
+            image_mode=image_mode,
+            image=resolve_image_topic(image_mode, self._text("image_topic")),
             tracker_pose=self._text("tracker_pose_topic"),
             tracker_status=self._text("tracker_status_topic"),
             gripper_state=self._text("gripper_state_topic"),
@@ -248,6 +283,12 @@ class CollectionNode(Node):
                 float(self.get_parameter("queue_max_mib").value) * 1024 * 1024
             ),
             finish_timeout_s=float(self.get_parameter("finish_timeout_s").value),
+            h264_start_timeout_s=float(
+                self.get_parameter("h264_start_timeout_s").value
+            ),
+            decoded_image_topic=self._text("decoded_image_topic"),
+            image_reliability=self._image_reliability,
+            image_qos_depth=self._image_qos_depth,
             min_free_disk_bytes=int(
                 float(self.get_parameter("min_free_disk_gib").value) * 1024 ** 3
             ),
@@ -265,6 +306,7 @@ class CollectionNode(Node):
                 tracker_timeout_s=float(self.get_parameter("tracker_timeout_s").value),
                 gripper_timeout_s=float(self.get_parameter("gripper_timeout_s").value),
                 match_window_s=float(self.get_parameter("match_window_s").value),
+                image_mode=image_mode,
             ),
             mono_clock_ns=time.monotonic_ns,
             wall_clock_ns=lambda: self.get_clock().now().nanoseconds,
@@ -286,6 +328,7 @@ class CollectionNode(Node):
             mono_clock_ns=time.monotonic_ns,
             discovery=self._discover,
             on_change=self._publish_status,
+            image_check=self._check_image_publishers,
         )
         self._known_alarms: frozenset = frozenset()
         self._create_interfaces()
@@ -297,7 +340,8 @@ class CollectionNode(Node):
         )
         self.get_logger().info(
             f"采集服务已就绪，数据集根目录 {self._storage.root}，"
-            f"图像话题 {topics.image}"
+            f"图像话题 {topics.image}（{image_mode}，{self._image_reliability}，"
+            f"深度 {self._image_qos_depth}）"
         )
 
     # ------------------------------------------------------------------
@@ -307,7 +351,13 @@ class CollectionNode(Node):
         """声明全部节点参数及默认值。"""
         defaults = {
             "dataset_root": "dataset",
-            "image_topic": TopicMap().image,
+            "image_mode": DEFAULT_IMAGE_MODE,
+            # 留空时按 image_mode 使用默认话题；显式配置优先。
+            "image_topic": "",
+            "decoded_image_topic": DEFAULT_DECODED_IMAGE_TOPIC,
+            "image_reliability": DEFAULT_IMAGE_RELIABILITY,
+            "image_qos_depth": DEFAULT_IMAGE_QOS_DEPTH,
+            "h264_start_timeout_s": DEFAULT_H264_START_TIMEOUT_S,
             "tracker_pose_topic": TopicMap().tracker_pose,
             "tracker_status_topic": TopicMap().tracker_status,
             "gripper_state_topic": TopicMap().gripper_state,
@@ -391,6 +441,44 @@ class CollectionNode(Node):
             ),
             GRIPPER: self.count_publishers(topics.gripper_state) > 0,
         }
+
+    def _check_image_publishers(self) -> Optional[Tuple[str, str]]:
+        """核对图像发布端的消息类型和可靠性是否与配置兼容。
+
+        Returns:
+            不兼容时返回 ``(错误码, 说明)``；没有发布者或兼容返回 ``None``，
+            前者由发现检查另行报告。
+        """
+        topic = self._topics.image
+        mode = self._topics.image_mode
+        infos = self.get_publishers_info_by_topic(topic)
+        if not infos:
+            return None
+        expected = message_type_for_mode(mode)
+        types = sorted({info.topic_type for info in infos})
+        if expected not in types:
+            return (
+                "IMAGE_TYPE_MISMATCH",
+                f"图像话题 {topic} 的发布类型为 {', '.join(types)}，"
+                f"与 image_mode={mode} 要求的 {expected} 不一致",
+            )
+        if self._image_reliability == RELIABILITY_RELIABLE and not any(
+            info.topic_type == expected
+            and info.qos_profile.reliability == ReliabilityPolicy.RELIABLE
+            for info in infos
+        ):
+            return (
+                "IMAGE_QOS_INCOMPATIBLE",
+                f"图像话题 {topic} 的发布端不是 RELIABLE，"
+                "无法匹配 image_reliability=reliable 的订阅；"
+                "请改用 best_effort 或让发布端使用 reliable",
+            )
+        return None
+
+    @property
+    def image_qos(self) -> QoSProfile:
+        """图像订阅使用的 QoS。"""
+        return image_qos_profile(self._image_reliability, self._image_qos_depth)
 
     # ------------------------------------------------------------------
     # 状态发布。
@@ -510,17 +598,24 @@ class CollectionInputs(Node):
     运行在另一个执行器，长耗时的停止请求不会阻塞传感器回调。
     """
 
-    def __init__(self, controller: CollectionController, topics: TopicMap) -> None:
-        """创建全部订阅。"""
+    def __init__(
+        self,
+        controller: CollectionController,
+        topics: TopicMap,
+        image_qos: Optional[QoSProfile] = None,
+    ) -> None:
+        """创建全部订阅。
+
+        Args:
+            image_qos: 图像订阅 QoS；默认 BEST_EFFORT、深度 30。
+        """
         super().__init__("collection_inputs")
         self._controller = controller
         self._topics = topics
-        sensor_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST,
-            depth=30,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
+        sensor_qos = image_qos or image_qos_profile(
+            DEFAULT_IMAGE_RELIABILITY, DEFAULT_IMAGE_QOS_DEPTH
         )
+        image_type = get_message(message_type_for_mode(topics.image_mode))
 
         def reliable_qos(depth: int) -> QoSProfile:
             """Tracker 与夹爪发布器为 RELIABLE，订阅端使用匹配的深度。"""
@@ -538,7 +633,7 @@ class CollectionInputs(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         for message_type, topic, callback, qos in (
-            (Image, topics.image, self._on_image, sensor_qos),
+            (image_type, topics.image, self._on_image, sensor_qos),
             (PoseStamped, topics.tracker_pose, self._on_pose, reliable_qos(200)),
             (TrackerStatus, topics.tracker_status, self._on_tracker_status, reliable_qos(200)),
             (GripperState, topics.gripper_state, self._on_gripper, reliable_qos(100)),
@@ -547,7 +642,7 @@ class CollectionInputs(Node):
             self.create_subscription(message_type, topic, callback, qos, raw=True)
 
     def _on_image(self, data: bytes) -> None:
-        """图像原始字节：解析头部后更新健康并按需写入。"""
+        """图像（原始、压缩或 H.264 包）原始字节：解析头部后更新健康并按需写入。"""
         self._controller.on_image(bytes(data))
 
     def _on_pose(self, data: bytes) -> None:
@@ -594,7 +689,9 @@ class CollectionRuntime:
     def __init__(self, parameter_overrides: Optional[Sequence[Any]] = None) -> None:
         """创建节点与执行器；订阅线程在 :meth:`start` 中启动。"""
         self.node = CollectionNode(parameter_overrides)
-        self.inputs = CollectionInputs(self.node.controller, self.node.topics)
+        self.inputs = CollectionInputs(
+            self.node.controller, self.node.topics, self.node.image_qos
+        )
         self.service_executor = MultiThreadedExecutor(num_threads=SERVICE_THREADS)
         self.input_executor = SingleThreadedExecutor()
         self.service_executor.add_node(self.node)

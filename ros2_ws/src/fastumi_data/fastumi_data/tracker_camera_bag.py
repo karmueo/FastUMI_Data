@@ -12,8 +12,16 @@ from rclpy.serialization import deserialize_message
 import rosbag2_py
 from rosidl_runtime_py.utilities import get_message
 
+from fastumi_data.bag_images import BagImageDecoder, check_bag_image_topic
+from fastumi_data.cdr_header import read_header_stamp_ns
+from fastumi_data.image_modes import MODE_RAW, validate_image_mode
 from fastumi_data.models import PoseSample, TrackerStatusSample
 from fastumi_data.pose_math import interpolate_pose, pose_to_matrix
+from fastumi_data.video_decoding import (
+    COLOR_BGR,
+    DecodeStats,
+    VideoDecodeError,
+)
 
 
 @dataclass(frozen=True)
@@ -195,29 +203,98 @@ def iter_image_frames(
     image_topic: str,
     frame_stride: int = 1,
     bridge: CvBridge | None = None,
+    image_mode: str = MODE_RAW,
+    stats: DecodeStats | None = None,
 ) -> Iterator[ImageFrame]:
-    """第二遍重新打开 MCAP，并按步长流式解码目标图像。"""
+    """第二遍重新打开 MCAP，并按步长流式解码目标图像。
+
+    ``image_mode`` 必须与话题的实际消息类型一致。压缩视频的解码状态贯穿
+    整个文件，步长在解码之后按输出帧计数；文件结束时排空解码器。
+
+    Args:
+        stats: 可选解码统计，用于读取被跳过的 H.264 启动前缀包数。
+    """
     if frame_stride <= 0:
         raise ValueError("frame_stride 必须为正整数")
+    mode = validate_image_mode(image_mode)
     reader = _open_reader(bag_uri)
     message_types = _topic_message_types(reader, (image_topic,))
-    converter = bridge if bridge is not None else CvBridge()
+    check_bag_image_topic(
+        {m.name: m.type for m in reader.get_all_topics_and_types()},
+        image_topic,
+        mode,
+    )
+    if mode == MODE_RAW:
+        decoder = None
+        converter = bridge if bridge is not None else CvBridge()
+    else:
+        decoder = BagImageDecoder(mode, COLOR_BGR)
     image_index = 0
     previous_timestamp_ns = None
+
+    def select(frame_timestamp_ns, bag_timestamp_ns, pixels):
+        """应用抽帧步长，选中时返回图像帧。"""
+        nonlocal image_index
+        selected = image_index % frame_stride == 0
+        image_index += 1
+        if not selected:
+            return None
+        return ImageFrame(
+            timestamp_ns=frame_timestamp_ns,
+            bag_timestamp_ns=int(bag_timestamp_ns),
+            image=pixels,
+        )
+
     while reader.has_next():
         topic, serialized, bag_timestamp_ns = reader.read_next()
         if topic != image_topic:
             continue
-        message = deserialize_message(serialized, message_types[image_topic])
-        timestamp_ns = _stamp_to_ns(message.header.stamp)
+        if decoder is None:
+            message = deserialize_message(
+                serialized, message_types[image_topic]
+            )
+            timestamp_ns = _stamp_to_ns(message.header.stamp)
+            _check_monotonic(previous_timestamp_ns, timestamp_ns, image_topic)
+            previous_timestamp_ns = timestamp_ns
+            if image_index % frame_stride == 0:
+                yield image_message_to_frame(
+                    message, bag_timestamp_ns, bridge=converter
+                )
+            image_index += 1
+            continue
+        timestamp_ns = read_header_stamp_ns(bytes(serialized))
+        if timestamp_ns is None:
+            raise VideoDecodeError(
+                f"话题 {image_topic} 的消息被截断（bag 时间 {bag_timestamp_ns} ns）"
+            )
         _check_monotonic(previous_timestamp_ns, timestamp_ns, image_topic)
         previous_timestamp_ns = timestamp_ns
-        selected = image_index % frame_stride == 0
-        image_index += 1
-        if selected:
-            yield image_message_to_frame(
-                message, bag_timestamp_ns, bridge=converter
-            )
+        try:
+            frames = decoder.feed(serialized, bag_timestamp_ns)
+        except VideoDecodeError as error:
+            raise VideoDecodeError(
+                f"话题 {image_topic} 解码失败（bag 时间 {bag_timestamp_ns} ns）: {error}"
+            ) from error
+        for frame in frames:
+            item = select(frame.stamp_ns, frame.bag_timestamp_ns, frame.image)
+            if item is not None:
+                yield item
+    if decoder is not None:
+        try:
+            tail = decoder.drain()
+        except VideoDecodeError as error:
+            raise VideoDecodeError(
+                f"话题 {image_topic} 在文件结束排空解码器时失败: {error}"
+            ) from error
+        for frame in tail:
+            item = select(frame.stamp_ns, frame.bag_timestamp_ns, frame.image)
+            if item is not None:
+                yield item
+        if stats is not None:
+            stats.packets = decoder.stats.packets
+            stats.frames = decoder.stats.frames
+            stats.keyframes = decoder.stats.keyframes
+            stats.skipped_before_keyframe = decoder.stats.skipped_before_keyframe
 
 
 def interpolate_world_from_tracker(

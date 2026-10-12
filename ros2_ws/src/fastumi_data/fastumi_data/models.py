@@ -80,6 +80,8 @@ class ProcessingConfig:
     max_gripper_gap_s: float = 0.2
     minimum_samples: int = 10
     require_tracker_status: bool = True
+    image_mode: str = "raw"
+    """图像话题的消息模式：raw、compressed 或 h264。"""
 
 
 @dataclass(frozen=True)

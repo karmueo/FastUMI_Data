@@ -3,8 +3,22 @@ collection_node:
   ros__parameters:
     # 数据集根目录；相对路径相对于启动目录。内含暂存区 .staging 和回收区 .trash。
     dataset_root: dataset
-    # 三路输入及 episode 事件话题，可按设备实际命名重映射。
-    image_topic: /umi_camera/image_raw
+    # 图像消息模式：raw（sensor_msgs/Image）、compressed（JPEG/PNG 的
+    # sensor_msgs/CompressedImage）或 h264（无 B 帧、每包一个访问单元的
+    # ffmpeg_image_transport_msgs/FFMPEGPacket）。MCAP 原样保存收到的消息。
+    image_mode: raw
+    # 三路输入及 episode 事件话题，可按设备实际命名重映射。图像话题留空时
+    # 按 image_mode 使用 /umi_camera/image_raw、.../image_raw/compressed 或
+    # .../image_raw/ffmpeg；显式给出的话题优先，并核对发布端消息类型。
+    image_topic: ""
+    # 在线解码后发布的原始图像话题，供夹爪估计和 RViz 使用；仅记入会话清单。
+    decoded_image_topic: /umi_camera/image_decoded
+    # 图像订阅 QoS。默认 best_effort 兼容当前相机发布端；reliable 须发布端
+    # 也是 RELIABLE，开始前检查会核对。
+    image_reliability: best_effort
+    image_qos_depth: 30
+    # h264 模式下 starting 状态等待首个含 SPS/PPS 和 IDR 的关键帧的最长秒数。
+    h264_start_timeout_s: 5.0
     tracker_pose_topic: /vive_tracker/pose
     tracker_status_topic: /vive_tracker/status
     gripper_state_topic: /gripper/state

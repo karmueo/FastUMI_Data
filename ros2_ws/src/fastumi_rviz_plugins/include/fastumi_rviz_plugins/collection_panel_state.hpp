@@ -219,6 +219,22 @@ inline StreamVerdict stream_verdict(bool discovered, bool fresh, bool valid, boo
   return {StreamLevel::kOk, "正常"};
 }
 
+/** @brief 把相机发布的视频类型翻译为中文；压缩视频按实际编码区分 JPEG 和 PNG。 */
+inline std::string video_type_text(const std::string & mode, const std::string & format)
+{
+  std::string text;
+  if (mode == "raw") {
+    text = "原始视频";
+  } else if (mode == "compressed") {
+    text = format.rfind("png", 0) == 0 ? "PNG 压缩视频" : "JPEG 压缩视频";
+  } else if (mode == "h264") {
+    text = "H.264 编码视频";
+  } else {
+    return "--";
+  }
+  return format.empty() ? text : text + "（" + format + "）";
+}
+
 /** @brief 把后端报警码翻译为中文提示；未知码原样返回。 */
 inline std::string alarm_text(const std::string & code)
 {

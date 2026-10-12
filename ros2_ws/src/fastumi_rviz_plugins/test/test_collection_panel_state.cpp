@@ -182,3 +182,16 @@ TEST(CollectionPanelState, StateNamesMatchInterfaceDefinition)
     EXPECT_NE(fp::state_text(state), std::string(state)) << state;
   }
 }
+
+/** @brief 视频类型按相机发布的模式显示，压缩视频区分 JPEG 与 PNG。 */
+TEST(CollectionPanelState, VideoTypeTextNamesThePublishedMode)
+{
+  EXPECT_EQ(fp::video_type_text("raw", ""), "原始视频");
+  EXPECT_EQ(fp::video_type_text("raw", "raw 1920x1080"), "原始视频（raw 1920x1080）");
+  EXPECT_EQ(fp::video_type_text("compressed", "jpeg"), "JPEG 压缩视频（jpeg）");
+  EXPECT_EQ(fp::video_type_text("compressed", "png"), "PNG 压缩视频（png）");
+  EXPECT_EQ(fp::video_type_text("compressed", ""), "JPEG 压缩视频");
+  EXPECT_EQ(fp::video_type_text("h264", "h264 1280x960"), "H.264 编码视频（h264 1280x960）");
+  EXPECT_EQ(fp::video_type_text("", ""), "--");
+  EXPECT_EQ(fp::video_type_text("mjpeg", "x"), "--");
+}

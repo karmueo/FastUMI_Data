@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 import math
 from typing import Callable, Deque, Dict, List, Mapping, Optional, Tuple
 
+from fastumi_data.image_modes import MODE_H264, MODE_RAW
+
 
 # 三路输入的固定名称。
 IMAGE = "image"
@@ -51,6 +53,8 @@ class HealthConfig:
     rate_window_s: float = 2.0
     gripper_lag_warn_s: float = 0.25
     """夹爪最新源时间戳落后最新图像超过该值时报警。"""
+    image_mode: str = MODE_RAW
+    """图像消息模式；h264 时跟踪关键帧。"""
 
     def timeout_s(self, stream: str) -> float:
         """返回指定输入的新鲜度超时。"""
@@ -86,6 +90,12 @@ class StreamHealth:
     received: int
     out_of_order: int
     detail: str
+    format: str = ""
+    """图像流最近一帧的格式简述，例如 ``h264 1280x960``；其他流为空。"""
+    awaiting_keyframe: bool = False
+    """仅 h264 图像流：尚未收到含 SPS/PPS 的 IDR 关键帧，无法开始解码。"""
+    keyframes: int = 0
+    """仅 h264 图像流：已收到的关键帧数量。"""
 
 
 @dataclass(frozen=True)
@@ -206,18 +216,36 @@ class CollectionHealthMonitor:
         self._tracker_status_detail = "尚未收到 Tracker 状态"
         self._tracker_state = TRACKING_UNKNOWN
         self._gripper_percent = math.nan
+        self._image_format = ""
+        self._keyframes = 0
 
     @property
     def config(self) -> HealthConfig:
         """当前健康门限。"""
         return self._config
 
-    def observe_image(self, source_ns: int, valid: bool, detail: str = "") -> None:
-        """记录一帧图像；无效帧也计入接收但标记内容异常。"""
+    def observe_image(
+        self,
+        source_ns: int,
+        valid: bool,
+        detail: str = "",
+        label: str = "",
+        keyframe: bool = False,
+    ) -> None:
+        """记录一帧图像；无效帧也计入接收但标记内容异常。
+
+        Args:
+            label: 格式简述，供健康报告显示。
+            keyframe: h264 包含 SPS/PPS 和 IDR，可作为解码起点。
+        """
         state = self._streams[IMAGE]
         state.observe(source_ns, self._mono_ns())
         state.valid = valid
         state.detail = "" if valid else (detail or "图像尺寸或数据长度异常")
+        if label:
+            self._image_format = label
+        if keyframe:
+            self._keyframes += 1
 
     def observe_tracker_pose(
         self, source_ns: int, finite: bool, detail: str = ""
@@ -411,6 +439,7 @@ class CollectionHealthMonitor:
             matched = True
             source_delta = abs(other.source_ns - image_sample.source_ns) / 1e6
             arrival_delta = (other.recv_ns - image_sample.recv_ns) / 1e6
+        image_h264 = name == IMAGE and self._config.image_mode == MODE_H264
         return StreamHealth(
             name=name,
             discovered=discovered,
@@ -425,6 +454,9 @@ class CollectionHealthMonitor:
             received=state.received,
             out_of_order=state.out_of_order,
             detail=detail,
+            format=self._image_format if name == IMAGE else "",
+            awaiting_keyframe=image_h264 and self._keyframes == 0,
+            keyframes=self._keyframes if image_h264 else 0,
         )
 
     def _alarms(

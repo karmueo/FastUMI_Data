@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from ament_index_python.packages import get_package_share_directory
-from cv_bridge import CvBridge
 from fastumi_interfaces.msg import EpisodeEvent, TrackerStatus
 from geometry_msgs.msg import PoseStamped
 import numpy as np
@@ -18,6 +17,7 @@ import rosbag2_py
 from rosidl_runtime_py.utilities import get_message
 import yaml
 
+from fastumi_data.bag_images import BagImageDecoder, check_bag_image_topic
 from fastumi_data.extrinsic import load_tracker_tcp_extrinsic
 from fastumi_data.hdf5_writer import (
     build_quality_report,
@@ -33,7 +33,9 @@ from fastumi_data.models import (
     ProcessingConfig,
     TrackerStatusSample,
 )
+from fastumi_data.image_modes import MODE_RAW, validate_image_mode
 from fastumi_data.synchronizer import synchronize_episode
+from fastumi_data.video_decoding import COLOR_RGB, VideoDecodeError
 
 
 def _stamp_to_ns(stamp) -> int:
@@ -42,7 +44,7 @@ def _stamp_to_ns(stamp) -> int:
 
 
 def _load_processing_document(path: str) -> tuple[ProcessingConfig, Dict]:
-    """加载同步参数和话题映射。"""
+    """加载同步参数、话题映射和图像模式（缺省为 raw）。"""
     try:
         document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as error:
@@ -65,6 +67,7 @@ def _load_processing_document(path: str) -> tuple[ProcessingConfig, Dict]:
         require_tracker_status=bool(
             document.get("require_tracker_status", True)
         ),
+        image_mode=validate_image_mode(document.get("image_mode", MODE_RAW)),
     )
     if config.sample_rate_hz <= 0.0 or config.minimum_samples <= 0:
         raise ValueError("采样率和最小样本数必须为正数")
@@ -94,7 +97,6 @@ class McapEpisodeConverter:
         self._topics = topics
         self._extrinsic = load_tracker_tcp_extrinsic(extrinsic_path)
         self._force = force
-        self._bridge = CvBridge()
         self._active: Optional[EpisodeBuffer] = None
         self._converted_count = 0
         self._rejected_count = 0
@@ -257,10 +259,20 @@ class McapEpisodeConverter:
             topic: get_message(type_name)
             for topic, type_name in topic_types.items()
         }
+        image_topic = self._topics["image"]
+        if image_topic in topic_types:
+            check_bag_image_topic(
+                topic_types, image_topic, self._config.image_mode
+            )
+        image_decoder = BagImageDecoder(self._config.image_mode, COLOR_RGB)
         message_count = 0
         while reader.has_next():
-            topic, serialized, _ = reader.read_next()
+            topic, serialized, bag_timestamp_ns = reader.read_next()
             if topic not in message_types:
+                continue
+            if topic == image_topic:
+                message_count += 1
+                self._handle_image(image_decoder, serialized, bag_timestamp_ns)
                 continue
             message = deserialize_message(serialized, message_types[topic])
             message_count += 1
@@ -291,15 +303,7 @@ class McapEpisodeConverter:
                 continue
             if self._active is None:
                 continue
-            if topic == self._topics["image"]:
-                timestamp_ns = _stamp_to_ns(message.header.stamp)
-                image_rgb = self._bridge.imgmsg_to_cv2(
-                    message, desired_encoding="rgb8"
-                )
-                self._active.images.append(
-                    ImageSample(timestamp_ns, np.asarray(image_rgb).copy())
-                )
-            elif topic == self._topics["tracker_pose"]:
+            if topic == self._topics["tracker_pose"]:
                 pose_message: PoseStamped = message
                 pose = pose_message.pose
                 self._active.poses.append(
@@ -334,16 +338,73 @@ class McapEpisodeConverter:
                         bool(message.valid),
                     )
                 )
+        try:
+            self._append_frames(image_decoder.drain())
+        except VideoDecodeError as error:
+            raise VideoDecodeError(
+                f"图像话题 {image_topic} 在文件结束排空解码器时失败: {error}"
+            ) from error
         if self._active is not None:
             self._write_rejection(
                 self._active.start_event, ["MCAP 结束时 episode 尚未 STOP"]
             )
             self._active = None
-        return {
+        summary = {
             "messages": message_count,
             "converted": self._converted_count,
             "rejected": self._rejected_count,
         }
+        if self._config.image_mode != MODE_RAW:
+            stats = image_decoder.stats
+            summary.update(
+                {
+                    "image_mode": self._config.image_mode,
+                    "image_frames_decoded": stats.frames,
+                    "image_packets_skipped_before_keyframe": (
+                        stats.skipped_before_keyframe
+                    ),
+                }
+            )
+        return summary
+
+    def _append_frames(self, frames) -> None:
+        """把解码帧按源时间加入活动 episode；episode 之外的帧只用于维持参考。"""
+        if self._active is None:
+            return
+        for frame in frames:
+            self._active.images.append(
+                ImageSample(frame.stamp_ns, frame.image)
+            )
+
+    def _handle_image(
+        self, decoder: BagImageDecoder, serialized: bytes, bag_timestamp_ns: int
+    ) -> None:
+        """解码一条图像消息并归属到活动 episode。
+
+        压缩视频的解码状态跨越 episode：参考包持续输入，帧在解码后才按
+        episode 筛选。episode 内出现无法解码的包（例如关键帧之前的前缀）
+        会明确失败，而不是悄悄缺帧。
+        """
+        if decoder.mode == MODE_RAW and self._active is None:
+            return
+        skipped_before = decoder.stats.skipped_before_keyframe
+        try:
+            frames = decoder.feed(serialized, bag_timestamp_ns)
+        except VideoDecodeError as error:
+            raise VideoDecodeError(
+                f"图像话题 {self._topics['image']} 解码失败"
+                f"（bag 时间 {bag_timestamp_ns} ns）: {error}"
+            ) from error
+        if (
+            self._active is not None
+            and decoder.stats.skipped_before_keyframe != skipped_before
+        ):
+            raise VideoDecodeError(
+                f"episode {self._active.start_event.episode_index} 内的图像包"
+                f"（bag 时间 {bag_timestamp_ns} ns）发生在首个 H.264 关键帧之前，"
+                "无法解码"
+            )
+        self._append_frames(frames)
 
 
 def main(argv: Optional[list[str]] = None) -> None:

@@ -438,7 +438,7 @@ def test_collection_checks_configured_offset_status_window(
     frame = ImageFrame(1_000_000_000, 1_000_000_000, np.zeros((4, 4, 3)))
     monkeypatch.setattr(
         "fastumi_data.tracker_camera_cli.iter_image_frames",
-        lambda *args: iter([frame]),
+        lambda *args, **kwargs: iter([frame]),
     )
     checked_intervals = []
 
@@ -498,7 +498,7 @@ def test_collection_writes_final_progress_counts(
     ]
     monkeypatch.setattr(
         "fastumi_data.tracker_camera_cli.iter_image_frames",
-        lambda *args: iter(frames),
+        lambda *args, **kwargs: iter(frames),
     )
     monkeypatch.setattr(
         "fastumi_data.tracker_camera_cli.tracker_status_valid_for_interval",
@@ -693,3 +693,64 @@ def test_checkerboard_detection_summary_and_overlay(
         _make_target_detector(spec, "tag36h11").settings["pattern_size"]
         == [11, 8]
     )
+
+
+def test_image_mode_defaults_to_raw_and_accepts_encoded_modes() -> None:
+    """图像模式默认 raw；compressed 和 h264 可用，未知取值被解析器拒绝。"""
+    parser = build_argument_parser()
+    assert parser.parse_args(minimum_arguments()).image_mode == "raw"
+    for mode in ("compressed", "h264"):
+        assert parser.parse_args(minimum_arguments(["--image-mode", mode])).image_mode == mode
+    with pytest.raises(SystemExit):
+        parser.parse_args(minimum_arguments(["--image-mode", "mjpeg"]))
+
+
+def test_settings_file_sets_and_validates_image_mode(tmp_path: Path) -> None:
+    """设置文件的 topics.image_mode 生效，CLI 显式值优先，非法值报错。"""
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text("topics:\n  image_mode: h264\n", encoding="utf-8")
+    parser = build_argument_parser()
+    merged = apply_settings_file(
+        parser.parse_args(minimum_arguments(["--settings-config", str(settings_path)])), parser
+    )
+    assert merged.image_mode == "h264"
+    explicit = apply_settings_file(
+        parser.parse_args(minimum_arguments([
+            "--settings-config", str(settings_path), "--image-mode", "compressed",
+        ])), parser,
+    )
+    assert explicit.image_mode == "compressed"
+
+    settings_path.write_text("topics:\n  image_mode: mjpeg\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="image_mode"):
+        apply_settings_file(
+            parser.parse_args(minimum_arguments(["--settings-config", str(settings_path)])), parser
+        )
+
+
+def test_iter_sample_frames_passes_image_mode(monkeypatch) -> None:
+    """样本迭代把图像模式传给 MCAP 读取。"""
+    seen = {}
+
+    def fake(*args, **kwargs):
+        """记录读取参数并返回空迭代。"""
+        seen.update(kwargs)
+        return iter([])
+
+    monkeypatch.setattr("fastumi_data.tracker_camera_cli.iter_image_frames", fake)
+    list(_iter_sample_frames(SimpleNamespace(
+        bag="b", image_topic="/t", frame_stride=1, image_mode="h264",
+        sample_start_offset_s=None, sample_end_offset_s=None,
+    )))
+
+    assert seen == {"image_mode": "h264"}
+
+
+def test_calibration_settings_reject_unknown_image_mode() -> None:
+    """标定设置对象拒绝未知图像模式。"""
+    from fastumi_data.tracker_camera_config import CalibrationSettings
+
+    assert CalibrationSettings().image_mode == "raw"
+    assert CalibrationSettings(image_mode="compressed").image_mode == "compressed"
+    with pytest.raises(ValueError, match="image_mode"):
+        CalibrationSettings(image_mode="mjpeg")

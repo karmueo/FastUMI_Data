@@ -217,13 +217,18 @@ ros2 topic info --verbose /usb_camera/image_decoded
 ros2 run rqt_image_view rqt_image_view
 ```
 
-`decoder_backend` 默认是 `transport`，沿用 `ffmpeg_image_transport` 订阅插件；
-本机面板管理的 `wrist_decoder` 指定为 `cuda`，使用 `h264_cuvid` 解码 H.264。
-CUDA 模式在接收端给解码器分配递增 PTS，原始 ROS 时间戳和 `frame_id` 仍传给
-解码后的图像。该模式要求 FFmpeg 提供可用的 NVIDIA CUDA 解码器；初始化失败时
-节点报错退出。需要软件解码时可显式使用 `decoder_backend:=transport`，当前
-`ffmpeg.yaml` 已为末端 H.264 流指定软件解码器。
-CUDA 模式每五秒在接收节点日志中记录实际收到的压缩包率、已提交发布的图像率、
+`decoder_backend` 默认是 `transport`，沿用 `ffmpeg_image_transport` 订阅插件。`cuda` 使用
+`hardware_decoder`（默认 `h264_cuvid`）解码 H.264，`auto` 优先硬件解码并在失败时回退软件解码：
+
+* 两种模式都只从同时含 SPS、PPS 和 IDR 的关键帧开始解码，此前的包被跳过。
+* `auto` 在硬件解码器初始化失败时，用**同一个关键帧**改用软件解码器 `h264`；运行中硬件解码失败时，丢弃参考帧，
+  在下一个合格关键帧切换到软件解码，并保持到节点重启。`cuda` 不回退，初始化失败时节点报错退出。
+* 解码使用接收端递增的本地 PTS，原始 ROS 时间戳和 `frame_id` 原样传给解码后的图像。
+* `input_reliability`（默认 `best_effort`）和 `input_queue_depth`（默认 20）设置压缩包订阅的 QoS；接收端
+  `reliable` 时发布端也必须是 RELIABLE，否则不会匹配。
+* 硬件解码器自带若干帧的流水线延迟，软件解码零延迟；接收统计日志显示当前使用的解码器。
+
+`cuda` 和 `auto` 模式每五秒在接收节点日志中记录实际收到的压缩包率、已提交发布的图像率、
 源时间戳断档、解码失败及最长解码和发布耗时。`ros2 topic hz` 统计的是测速端
 收到的图像率，原始 `bgr8` 图像较大时可低于节点日志中的发布率。
 `output_queue_depth` 默认是 1；本机面板管理的末端相机设为 5。接收端使用

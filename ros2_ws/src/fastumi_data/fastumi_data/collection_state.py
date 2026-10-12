@@ -23,6 +23,7 @@ import math
 from pathlib import Path
 import shutil
 import threading
+import time
 from typing import (
     Any,
     Callable,
@@ -37,7 +38,7 @@ import uuid as uuid_module
 
 import yaml
 
-from fastumi_data.cdr_header import read_image_summary
+from fastumi_data.cdr_header import observe_image_cdr
 from fastumi_data.collection_health import (
     STREAMS,
     CollectionHealthMonitor,
@@ -65,6 +66,16 @@ from fastumi_data.extrinsic import (
     calibration_passes_acceptance,
     load_tracker_tcp_extrinsic,
 )
+from fastumi_data.image_modes import (
+    DEFAULT_DECODED_IMAGE_TOPIC,
+    DEFAULT_H264_START_TIMEOUT_S,
+    DEFAULT_IMAGE_QOS_DEPTH,
+    DEFAULT_IMAGE_RELIABILITY,
+    MODE_H264,
+    MODE_RAW,
+    message_type_for_mode,
+    validate_image_mode,
+)
 
 
 # 与 fastumi_interfaces/EpisodeEvent 一致的事件类型。
@@ -74,6 +85,8 @@ EVENT_STOP = 2
 SESSION_SCHEMA_VERSION = 3
 # 写入队列使用率超过该比例时报警。
 QUEUE_HIGH_RATIO = 0.8
+# 等待 H.264 关键帧超时的错误码。
+ERROR_KEYFRAME_TIMEOUT = "KEYFRAME_TIMEOUT"
 
 
 class CollectionState(str, enum.Enum):
@@ -99,11 +112,17 @@ class TopicMap:
     gripper_state: str = "/gripper/state"
     episode_event: str = "/fastumi/episode/events"
     tf_static: str = "/tf_static"
+    image_mode: str = MODE_RAW
+    """图像话题的消息模式：raw、compressed 或 h264，决定 MCAP 中的类型声明。"""
+
+    def __post_init__(self) -> None:
+        """拒绝未知图像模式。"""
+        validate_image_mode(self.image_mode)
 
     def specs(self) -> List[TopicSpec]:
         """返回写入 MCAP 的全部话题及消息类型。"""
         return [
-            TopicSpec(self.image, "sensor_msgs/msg/Image"),
+            TopicSpec(self.image, message_type_for_mode(self.image_mode)),
             TopicSpec(self.tracker_pose, "geometry_msgs/msg/PoseStamped"),
             TopicSpec(self.tracker_status, "fastumi_interfaces/msg/TrackerStatus"),
             TopicSpec(self.gripper_state, "fastumi_interfaces/msg/GripperState"),
@@ -137,6 +156,12 @@ class CollectionConfig:
     """可选 Tracker 到 TCP 外参；为空时记录为未标定。"""
     snapshot_files: Tuple[str, ...] = ()
     """额外复制到标定快照目录的文件，例如相机内参和夹爪标定。"""
+    h264_start_timeout_s: float = DEFAULT_H264_START_TIMEOUT_S
+    """h264 模式下 ``starting`` 等待关键帧的最长秒数。"""
+    decoded_image_topic: str = DEFAULT_DECODED_IMAGE_TOPIC
+    """在线解码后发布的原始图像话题，仅写入清单供追溯。"""
+    image_reliability: str = DEFAULT_IMAGE_RELIABILITY
+    image_qos_depth: int = DEFAULT_IMAGE_QOS_DEPTH
     idempotency_cache_size: int = 256
     default_list_limit: int = 50
     max_list_limit: int = 200
@@ -197,6 +222,8 @@ class StatusSnapshot:
     free_disk_bytes: int
     calibration_status: str
     alarms: Tuple[str, ...]
+    image_mode: str = MODE_RAW
+    image_format: str = ""
 
 
 @dataclass
@@ -307,6 +334,30 @@ class _Active:
     quality: QualityAccumulator = field(default_factory=QualityAccumulator)
     calibration_status: str = "uncalibrated"
     manifest: Dict[str, Any] = field(default_factory=dict)
+    start_wait_s: float = 0.0
+    """h264 模式下 ``starting`` 等待关键帧的耗时。"""
+
+
+class _StartFailure(Exception):
+    """开始采集过程中的可预期失败，携带错误码。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        """保存错误码和说明。"""
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass
+class _StartGate:
+    """h264 开始采集的关键帧门：输入线程打开，开始请求线程等待。"""
+
+    active: "_Active"
+    event: threading.Event = field(default_factory=threading.Event)
+    done: bool = False
+    """START 与首个关键帧包已原子写入并开始接纳。"""
+    cancelled: bool = False
+    error: Optional[Tuple[str, str]] = None
 
 
 def _hash_file(path: Path) -> str:
@@ -329,6 +380,7 @@ class CollectionController:
         discovery: Callable[[], Mapping[str, bool]],
         uuid_factory: Callable[[], uuid_module.UUID] = uuid_module.uuid4,
         on_change: Optional[Callable[[], None]] = None,
+        image_check: Optional[Callable[[], Optional[Tuple[str, str]]]] = None,
     ) -> None:
         """注入全部外部依赖，不执行任何 IO。
 
@@ -343,6 +395,8 @@ class CollectionController:
             discovery: 返回三路输入当前是否存在发布者。
             uuid_factory: UUID 生成器，测试中可固定。
             on_change: 状态版本变化后的回调，在锁外执行。
+            image_check: 可选图像话题检查，返回 ``(错误码, 说明)`` 表示发布端类型
+                或 QoS 与配置不兼容，开始前检查据此阻塞；``None`` 表示通过。
         """
         self._storage = storage
         self._config = config
@@ -354,6 +408,8 @@ class CollectionController:
         self._discovery = discovery
         self._uuid_factory = uuid_factory
         self._on_change = on_change
+        self._image_check = image_check
+        self._start_gate: Optional[_StartGate] = None
         # 状态锁：保护状态、版本、结果缓存和活动采集引用。
         self._lock = threading.RLock()
         # 数据锁：保护“允许写入”标志与入队的原子性。
@@ -379,12 +435,26 @@ class CollectionController:
     # 数据入口：订阅回调调用。
     # ------------------------------------------------------------------
     def on_image(self, data: bytes) -> None:
-        """处理一帧原始图像字节：更新健康并在采集中入队。"""
-        summary = read_image_summary(data)
-        if summary is None:
+        """处理一帧图像消息的原始字节：更新健康并在采集中入队。
+
+        h264 模式下，``starting`` 期间第一个同时含 SPS/PPS 和 IDR 的关键帧
+        会原子地写入 START 与该包并开始接纳。
+        """
+        observation = observe_image_cdr(data, self._config.topics.image_mode)
+        if observation is None:
             return
         with self._health_lock:
-            self._health.observe_image(summary.stamp_ns, summary.valid)
+            self._health.observe_image(
+                observation.stamp_ns,
+                observation.valid,
+                observation.detail,
+                observation.label,
+                observation.keyframe,
+            )
+        if observation.keyframe and self._open_start_gate(
+            data, observation.stamp_ns
+        ):
+            return
         self._submit(self._config.topics.image, data)
 
     def on_tracker_pose(self, data: bytes, stamp_ns: int, finite: bool) -> None:
@@ -428,13 +498,93 @@ class CollectionController:
         with self._data_lock:
             if not self._admitting:
                 return
-            active = self._active
-            if active is None or active.writer is None:
-                return
-            log_ns = max(self._wall_ns(), active.last_log_ns)
-            if active.writer.offer(topic, data, log_ns):
-                active.last_log_ns = log_ns
-                active.counts[topic] = active.counts.get(topic, 0) + 1
+            self._offer_locked(topic, data)
+
+    def _offer_locked(self, topic: str, data: bytes) -> bool:
+        """在持有数据锁时入队一条消息，成功则更新日志时间和计数。"""
+        active = self._active
+        if active is None or active.writer is None:
+            return False
+        log_ns = max(self._wall_ns(), active.last_log_ns)
+        if active.writer.offer(topic, data, log_ns):
+            active.last_log_ns = log_ns
+            active.counts[topic] = active.counts.get(topic, 0) + 1
+            return True
+        return False
+
+    def _open_start_gate(self, data: bytes, stamp_ns: int) -> bool:
+        """若正等待关键帧，则用该包原子地写入 START、静态 TF 和首包。
+
+        START 使用关键帧的源时间戳，使 episode 起点与首个可解码帧对齐。
+
+        Returns:
+            该包已被门消费（成功或失败）返回 ``True``；没有等待中的门返回
+            ``False``，调用方照常入队。
+        """
+        gate = self._start_gate
+        if gate is None:
+            return False
+        # 锁序为 _lock -> _data_lock，故先在数据锁之外取得静态 TF 缓存。
+        with self._lock:
+            tf_cache = list(self._tf_static)
+        with self._data_lock:
+            if self._start_gate is not gate or gate.done or gate.cancelled:
+                return False
+            active = gate.active
+            writer = active.writer
+            topics = self._config.topics
+            start_wall = max(self._wall_ns(), active.last_log_ns)
+            start_event = self._encode_event(
+                EVENT_START, active.collection_uuid, active.task_name, stamp_ns
+            )
+            self._start_gate = None
+            if writer is None or not writer.offer(
+                topics.episode_event, start_event, start_wall
+            ):
+                gate.error = ("START_FAILED", "START 事件未能写入队列")
+                gate.event.set()
+                return True
+            active.last_log_ns = start_wall
+            active.started_wall_ns = start_wall
+            active.started_mono_ns = self._mono_ns()
+            active.counts[topics.episode_event] = 1
+            for tf_data in tf_cache:
+                self._offer_locked(topics.tf_static, tf_data)
+            self._offer_locked(topics.image, data)
+            self._admitting = True
+            gate.done = True
+            gate.event.set()
+        return True
+
+    def _await_keyframe_start(self, active: _Active) -> None:
+        """h264 模式：保持 ``starting``，等待输入线程打开关键帧门。
+
+        Raises:
+            _StartFailure: 等待超时、门被取消或 START 入队失败。
+        """
+        timeout_s = self._config.h264_start_timeout_s
+        gate = _StartGate(active=active)
+        waited_from = self._mono_ns()
+        with self._data_lock:
+            self._start_gate = gate
+        gate.event.wait(timeout_s)
+        with self._data_lock:
+            if self._start_gate is gate:
+                self._start_gate = None
+            done, cancelled, error = gate.done, gate.cancelled, gate.error
+            if not done:
+                gate.cancelled = True  # 迟到的关键帧不得再打开已放弃的门。
+        if done:
+            active.start_wait_s = (self._mono_ns() - waited_from) / 1e9
+            return
+        if error is not None:
+            raise _StartFailure(*error)
+        if cancelled:
+            raise _StartFailure("START_CANCELLED", "控制器正在退出，采集未开始")
+        raise _StartFailure(
+            ERROR_KEYFRAME_TIMEOUT,
+            f"等待含 SPS/PPS 的 H.264 IDR 关键帧超过 {timeout_s:g} s，采集未开始",
+        )
 
     def _on_writer_error(self, code: str, message: str) -> None:
         """写入线程或入队线程报告故障；只记录，状态切换延后到锁内同步。"""
@@ -630,23 +780,12 @@ class CollectionController:
             )
             with self._lock:
                 self._active = active
-            # START 先于任何传感器数据入队，随后回放缓存的静态 TF。
-            start_event = self._encode_event(
-                EVENT_START, collection_uuid, task, started_wall
-            )
-            if not writer.offer(
-                self._config.topics.episode_event, start_event, started_wall
-            ):
-                raise RuntimeError("START 事件未能写入队列")
-            with self._lock:
-                tf_cache = list(self._tf_static)
-            active.counts[self._config.topics.episode_event] = 1
-            for data in tf_cache:
-                if writer.offer(self._config.topics.tf_static, data, started_wall):
-                    tf_topic = self._config.topics.tf_static
-                    active.counts[tf_topic] = active.counts.get(tf_topic, 0) + 1
-            with self._data_lock:
-                self._admitting = True
+            if self._config.topics.image_mode == MODE_H264:
+                # 起点必须是可独立解码的关键帧：保持 starting，等待输入线程
+                # 原子写入 START 与首包。
+                self._await_keyframe_start(active)
+            else:
+                self._begin_recording(active, started_wall)
             self._set_state(CollectionState.RECORDING)
         except Exception as error:
             with self._data_lock:
@@ -662,20 +801,47 @@ class CollectionController:
             if staged is not None:
                 try:
                     self._storage.discard(staged)
-                except StorageError:
+                except (StorageError, OSError):
+                    # 退出与失败清理可能同时删除暂存目录，目录已不存在也算清理完成。
                     pass
             with self._data_lock:
                 self._admitting = False
             with self._lock:
                 self._active = None
             self._set_state(CollectionState.IDLE)
-            code = error.code if isinstance(error, StorageError) else "START_FAILED"
+            code = (
+                error.code
+                if isinstance(error, (StorageError, _StartFailure))
+                else "START_FAILED"
+            )
             return self._result(
                 request_id, True, False, code, f"无法开始采集: {error}"
             )
         return self._result(
             request_id, True, True, "OK", "采集已开始", collection_uuid
         )
+
+    def _begin_recording(self, active: _Active, started_wall: int) -> None:
+        """立即开始接纳：START 先于任何传感器数据入队，随后回放缓存的静态 TF。"""
+        writer = active.writer
+        topics = self._config.topics
+        start_event = self._encode_event(
+            EVENT_START, active.collection_uuid, active.task_name, started_wall
+        )
+        if writer is None or not writer.offer(
+            topics.episode_event, start_event, started_wall
+        ):
+            raise RuntimeError("START 事件未能写入队列")
+        with self._lock:
+            tf_cache = list(self._tf_static)
+        active.counts[topics.episode_event] = 1
+        for data in tf_cache:
+            if writer.offer(topics.tf_static, data, started_wall):
+                active.counts[topics.tf_static] = (
+                    active.counts.get(topics.tf_static, 0) + 1
+                )
+        with self._data_lock:
+            self._admitting = True
 
     def _start_state_rejection(self, request_id: str) -> Optional[OperationResult]:
         """开始请求与当前状态冲突时返回拒绝结果。"""
@@ -713,10 +879,15 @@ class CollectionController:
         self, health: HealthSnapshot, free: int
     ) -> List[Tuple[str, str]]:
         """用已计算的健康快照和磁盘空间生成阻塞原因，避免重复采样。"""
-        blockers = [
+        blockers: List[Tuple[str, str]] = []
+        if self._image_check is not None:
+            image_issue = self._image_check()
+            if image_issue is not None:
+                blockers.append(image_issue)
+        blockers.extend(
             (issue.code, issue.message)
             for issue in preflight_issues(health, self._health.config)
-        ]
+        )
         if free < self._config.min_free_disk_bytes:
             blockers.append(
                 (
@@ -746,6 +917,7 @@ class CollectionController:
             **(processing.get("topics") or {}),
             **topics.processing_topics(),
         }
+        processing["image_mode"] = topics.image_mode
         processing_path = staged.snapshot_dir / "processing.yaml"
         atomic_write_yaml(processing_path, processing)
         manifest: Dict[str, Any] = {
@@ -762,6 +934,14 @@ class CollectionController:
             "bag_uri": "raw/bag",
             "topics": [spec.name for spec in topics.specs()],
             "topic_map": topics.processing_topics(),
+            "image": {
+                "mode": topics.image_mode,
+                "topic": topics.image,
+                "message_type": message_type_for_mode(topics.image_mode),
+                "decoded_topic": self._config.decoded_image_topic,
+                "reliability": self._config.image_reliability,
+                "qos_depth": self._config.image_qos_depth,
+            },
             "processing_config": {
                 "path": "calibration_snapshot/processing.yaml",
                 "sha256": _hash_file(processing_path),
@@ -1029,7 +1209,20 @@ class CollectionController:
         with self._quality_lock:
             quality = active.quality.to_dict()
             has_alarms = active.quality.has_alarms
-        quality.update({"message_counts": message_counts, "mean_rate_hz": rates})
+        with self._health_lock:
+            image_health = self._health.snapshot(self._discovery()).image
+        quality.update(
+            {
+                "message_counts": message_counts,
+                "mean_rate_hz": rates,
+                "image_stream": {
+                    "mode": topics.image_mode,
+                    "format": image_health.format,
+                    "keyframes_received": image_health.keyframes,
+                    "start_wait_s": round(active.start_wait_s, 3),
+                },
+            }
+        )
         atomic_write_yaml(staged.root / "quality.yaml", quality)
         active.manifest.update(
             {
@@ -1299,7 +1492,18 @@ class CollectionController:
                 else ("calibrated" if self._config.extrinsic_path else "uncalibrated")
             ),
             alarms=tuple(sorted(set(health.alarms) | set(extra))),
+            image_mode=topics.image_mode,
+            image_format=health.image.format,
         )
+
+    def _wait_start_settled(self, timeout_s: float = 10.0) -> None:
+        """等待被取消的开始请求完成自身清理，避免与退出同时删除暂存目录。"""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._state is not CollectionState.STARTING:
+                    return
+            time.sleep(0.01)
 
     def shutdown(self) -> List[str]:
         """有序退出：放弃未保存采集并释放根目录锁。
@@ -1312,6 +1516,12 @@ class CollectionController:
         """
         with self._data_lock:
             self._admitting = False
+            gate = self._start_gate
+            if gate is not None:
+                gate.cancelled = True
+                gate.event.set()
+        if gate is not None:
+            self._wait_start_settled()
         with self._lock:
             active = self._active
         if active is not None and active.writer is not None:

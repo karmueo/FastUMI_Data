@@ -55,5 +55,9 @@ uint64 free_disk_bytes
 
 # unavailable 或 calibrated。
 string calibration_status
+# 相机发布的视频类型：raw、compressed 或 h264；面板据此显示。
+string image_mode
+# 最近一帧的格式简述，例如 "h264 1280x960"、"jpeg"；尚无数据为空。
+string image_format
 # 当前活动的质量报警码，已排序且去重。
 string[] alarms

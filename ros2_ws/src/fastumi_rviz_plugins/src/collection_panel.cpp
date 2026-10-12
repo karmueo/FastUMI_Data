@@ -85,6 +85,7 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   connection_label_(new QLabel("未连接", this)),
   state_label_(new QLabel("--", this)),
   calibration_label_(new QLabel("--", this)),
+  video_type_label_(new QLabel("--", this)),
   duration_label_(new QLabel("00:00:00", this)),
   message_label_(new QLabel("", this)),
   task_edit_(new QLineEdit("task", this)),
@@ -162,6 +163,7 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   gripper_bar_->setRange(0, 1000);
   gripper_bar_->setValue(0);
   gripper_bar_->setFormat("--");
+  health_layout->addRow("视频类型", video_type_label_);
   health_layout->addRow("图像", image_label_);
   health_layout->addRow("Tracker", tracker_label_);
   health_layout->addRow("夹爪", gripper_label_);
@@ -324,6 +326,8 @@ void CollectionPanel::apply_status(const fastumi_interfaces::msg::CollectionStat
     status.calibration_status == "calibrated" ?
     "已携带外参快照" : "未标定（转换为 HDF5 前需提供通过验收的外参）");
 
+  video_type_label_->setText(
+    QString::fromStdString(video_type_text(status.image_mode, status.image_format)));
   apply_stream(image_label_, status.image, false);
   apply_stream(tracker_label_, status.tracker, true);
   apply_stream(gripper_label_, status.gripper, true);

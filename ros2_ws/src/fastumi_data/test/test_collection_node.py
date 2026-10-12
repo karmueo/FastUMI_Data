@@ -70,10 +70,14 @@ def _write_extrinsic(path: Path) -> None:
 class _Publishers:
     """在独立进程中运行合成设备，通过标准输入切换夹爪有效性和图像开关。"""
 
-    def __init__(self) -> None:
+    def __init__(self, image_mode: str = "raw") -> None:
         """启动发布进程并等待其就绪。"""
         self._process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).with_name("synthetic_publisher.py"))],
+            [
+                sys.executable,
+                str(Path(__file__).with_name("synthetic_publisher.py")),
+                image_mode,
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -109,16 +113,29 @@ class _Rig:
     与 DDS 内部锁交织而阻塞，不能代表真实部署。
     """
 
-    def __init__(self, root: Path, extrinsic: Optional[Path]) -> None:
-        """启动节点与合成设备，并等待服务可用。"""
+    def __init__(
+        self,
+        root: Path,
+        extrinsic: Optional[Path],
+        image_mode: str = "raw",
+        node_arguments: tuple = (),
+    ) -> None:
+        """启动节点与合成设备，并等待服务可用。
+
+        Args:
+            image_mode: 合成设备发布的图像模式，也是采集节点的默认模式。
+            node_arguments: 追加给采集节点的 ``--ros-args`` 参数，可覆盖模式。
+        """
         self.root = root
         self.extrinsic = extrinsic
+        self.image_mode = image_mode
+        self.node_arguments = node_arguments
         self.helper = rclpy.create_node("collection_test_helper")
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.helper)
         self._spinner = threading.Thread(target=self.executor.spin, daemon=True)
         self._spinner.start()
-        self.publishers = _Publishers()
+        self.publishers = _Publishers(image_mode)
         self.clients = {}
         self.node_process = self.launch_node()
 
@@ -138,6 +155,9 @@ class _Rig:
         ]
         if self.extrinsic is not None:
             arguments += ["-p", f"extrinsic_path:={self.extrinsic}"]
+        if self.image_mode != "raw":
+            arguments += ["-p", f"image_mode:={self.image_mode}"]
+        arguments += list(self.node_arguments)
         process = subprocess.Popen(arguments)
         for client in self.clients.values():
             self.helper.destroy_client(client)
@@ -471,3 +491,100 @@ def test_second_node_on_same_root_exits_with_lock_error(rig) -> None:
     assert result.returncode != 0
     assert "ROOT_LOCKED" in result.stderr
     assert rig.status().state in ("idle", "recording")
+
+
+@pytest.mark.parametrize("image_mode", ["compressed", "h264"])
+def test_encoded_image_flow_records_messages_and_converts_to_rgb(
+    tmp_path, image_mode
+) -> None:
+    """JPEG 与 H.264 经真实节点采集：原样记录，H.264 从关键帧开始，现有转换器可转换。"""
+    from fastumi_data.cdr_header import read_ffmpeg_packet_summary
+    from fastumi_data.image_modes import IMAGE_MESSAGE_TYPES
+    from synthetic_publisher import IMAGE_TOPICS, VIDEO_HEIGHT, VIDEO_WIDTH
+
+    rclpy.init()
+    extrinsic = tmp_path / "tracker_to_tcp.yaml"
+    _write_extrinsic(extrinsic)
+    bench = _Rig(tmp_path / "dataset", extrinsic, image_mode)
+    topic = IMAGE_TOPICS[image_mode]
+    try:
+        bench.wait_for(lambda: bench.status().can_start, timeout_s=30.0)
+        started = bench.start("v-start", task="video")
+        assert started.completed and started.state == "recording", started
+        time.sleep(3.0)
+        recording = bench.status()
+        assert recording.image_messages > 30
+        assert recording.image.valid and recording.image.detail.startswith(
+            "h264 64x48" if image_mode == "h264" else "jpeg"
+        )
+        saved = bench.modify("stop_and_save", "v-save", started.collection_uuid)
+        assert saved.completed, saved
+        records = bench.checked("list", CollectionList.Request())
+        record_dir = tmp_path / "dataset" / records.records[0].relative_path
+    finally:
+        bench.close()
+        rclpy.shutdown()
+
+    types, messages = _read_bag(record_dir / "raw" / "bag")
+    assert types[topic] == IMAGE_MESSAGE_TYPES[image_mode]
+    assert messages[0][0] == "/fastumi/episode/events"
+    images = [(data, stamp) for name, data, stamp in messages if name == topic]
+    if image_mode == "h264":
+        first = read_ffmpeg_packet_summary(bytes(images[0][0]))
+        start_event = deserialize_message(bytes(messages[0][1]), EpisodeEvent)
+        start_ns = (
+            start_event.header.stamp.sec * 1_000_000_000
+            + start_event.header.stamp.nanosec
+        )
+        assert first.keyframe and first.stamp_ns == start_ns
+    processing, topics = _load_processing_document(
+        str(record_dir / "calibration_snapshot" / "processing.yaml")
+    )
+    assert processing.image_mode == image_mode and topics["image"] == topic
+    summary = McapEpisodeConverter(
+        str(record_dir / "raw" / "bag"), str(record_dir), processing, topics,
+        str(record_dir / "calibration_snapshot" / "tracker_to_tcp.yaml"),
+        force=False,
+    ).convert()
+    assert summary["converted"] == 1 and summary["rejected"] == 0, summary
+    if image_mode == "h264":
+        assert summary["image_packets_skipped_before_keyframe"] == 0
+    with h5py.File(record_dir / "episodes" / "episode_0000.hdf5", "r") as episode:
+        assert episode["observations/images/front"].shape[0] > 20
+        assert episode["observations/images/front"].shape[1:] == (
+            VIDEO_HEIGHT, VIDEO_WIDTH, 3
+        )
+
+
+@pytest.mark.parametrize(
+    "node_arguments, expected",
+    [
+        (
+            ("-p", "image_mode:=compressed", "-p", "image_topic:=/umi_camera/image_raw"),
+            ("sensor_msgs/msg/Image", "image_mode=compressed"),
+        ),
+        (("-p", "image_reliability:=reliable"), ("RELIABLE", "best_effort")),
+    ],
+)
+def test_image_publisher_incompatibility_blocks_start(
+    tmp_path, node_arguments, expected
+) -> None:
+    """发布端消息类型或可靠性与配置不兼容时，开始前检查给出明确原因。"""
+    rclpy.init()
+    extrinsic = tmp_path / "tracker_to_tcp.yaml"
+    _write_extrinsic(extrinsic)
+    bench = _Rig(tmp_path / "dataset", extrinsic, "raw", node_arguments)
+    try:
+        bench.wait_for(
+            lambda: any(
+                all(fragment in blocker for fragment in expected)
+                for blocker in bench.status_or_none().start_blockers
+            ),
+            timeout_s=30.0,
+        )
+        refused = bench.start("m-start")
+        assert not refused.accepted and refused.code == "PREFLIGHT_FAILED"
+        assert not bench.status().can_start
+    finally:
+        bench.close()
+        rclpy.shutdown()

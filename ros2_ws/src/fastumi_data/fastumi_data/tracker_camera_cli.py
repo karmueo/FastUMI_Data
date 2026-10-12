@@ -16,6 +16,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import yaml
 
+from fastumi_data.image_modes import IMAGE_MODES, validate_image_mode
 from fastumi_data.tracker_camera_bag import (
     ImageFrame,
     interpolate_world_from_tracker,
@@ -210,6 +211,7 @@ def _logged_failure(
 SETTING_GROUPS = {
     "topics": {
         "image": "image_topic",
+        "image_mode": "image_mode",
         "tracker_pose": "tracker_topic",
         "tracker_status": "status_topic",
     },
@@ -274,6 +276,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--settings-config")
     parser.add_argument("--image-topic", default=defaults.image_topic)
+    parser.add_argument(
+        "--image-mode",
+        choices=IMAGE_MODES,
+        default=defaults.image_mode,
+        help="图像话题的消息类型：raw、compressed（JPEG/PNG）或 h264；须与 MCAP 一致",
+    )
     parser.add_argument("--tracker-topic", default=defaults.tracker_topic)
     parser.add_argument("--status-topic", default=defaults.status_topic)
     parser.add_argument(
@@ -391,6 +399,11 @@ def apply_settings_file(
                         raise ValueError(
                             f"设置 filtering.{key} {error}"
                         ) from error
+                if attribute == "image_mode":
+                    try:
+                        value = validate_image_mode(value)
+                    except ValueError as error:
+                        raise ValueError(f"设置 topics.{key}: {error}") from error
                 setattr(arguments, attribute, value)
     return arguments
 
@@ -747,7 +760,8 @@ def _iter_sample_frames(arguments: argparse.Namespace):
     start_offset_s = getattr(arguments, "sample_start_offset_s", None)
     end_offset_s = getattr(arguments, "sample_end_offset_s", None)
     for frame in iter_image_frames(
-        arguments.bag, arguments.image_topic, arguments.frame_stride
+        arguments.bag, arguments.image_topic, arguments.frame_stride,
+        image_mode=getattr(arguments, "image_mode", "raw"),
     ):
         if first_timestamp_ns is None:
             first_timestamp_ns = frame.timestamp_ns
@@ -1052,6 +1066,7 @@ def run_calibration(arguments: argparse.Namespace) -> PipelineOutcome:
             arguments.tag_family if target_type == "aprilgrid" else None,
             {
                 "frame_stride": arguments.frame_stride,
+                "image_mode": getattr(arguments, "image_mode", "raw"),
                 "min_tags": arguments.min_tags,
                 "max_pose_gap_ms": arguments.max_pose_gap_ms,
                 "sample_start_offset_s": arguments.sample_start_offset_s,

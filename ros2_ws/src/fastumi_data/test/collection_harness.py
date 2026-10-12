@@ -122,11 +122,15 @@ def make_harness(
     config: Optional[CollectionConfig] = None,
     backend_factory=None,
     uuids: Optional[list] = None,
+    image_check=None,
 ) -> Harness:
     """创建已取得根目录锁、预检即可通过的控制器。"""
     clock = Clock()
+    resolved_config = config or CollectionConfig(min_free_disk_bytes=0)
     health = CollectionHealthMonitor(
-        HealthConfig(), lambda: clock.mono, lambda: clock.wall
+        HealthConfig(image_mode=resolved_config.topics.image_mode),
+        lambda: clock.mono,
+        lambda: clock.wall,
     )
     storage = CollectionStorage(tmp_path / "dataset")
     storage.acquire()
@@ -150,7 +154,7 @@ def make_harness(
     uuid_iter = iter(uuids) if uuids is not None else None
     controller = CollectionController(
         storage=storage,
-        config=config or CollectionConfig(min_free_disk_bytes=0),
+        config=resolved_config,
         health=health,
         backend_factory=backend_factory or default_factory,
         event_encoder=encode_event,
@@ -165,6 +169,7 @@ def make_harness(
         on_change=lambda: harness.states.append(
             harness.controller.status_snapshot().state
         ),
+        image_check=image_check,
     )
     harness.controller = controller
     harness.feed()

@@ -29,7 +29,7 @@ def _load_launch_module():
     return launch_module
 
 
-def _expand(**overrides):
+def _expand(probe=None, **overrides):
     """用默认参数加覆盖值展开 launch，返回 (参数声明, 捕获的节点, 子 launch)。"""
     module = _load_launch_module()
     description = module.generate_launch_description()
@@ -53,6 +53,8 @@ def _expand(**overrides):
         return original_node(**kwargs)
 
     module.Node = capture
+    # 单元测试不探测真实 ROS 图；需要时由 probe 覆盖。
+    module._probe_image_source = probe or (lambda topic, timeout: None)
     opaque = next(e for e in description.entities if isinstance(e, OpaqueFunction))
     try:
         actions = opaque.execute(context)
@@ -84,10 +86,10 @@ def test_default_launch_only_starts_collection_node_and_rviz() -> None:
         assert declarations[name].choices == ["true", "false"]
     assert perform_substitutions(context, declarations["use_rviz"].default_value) == "true"
     assert perform_substitutions(context, declarations["dataset_root"].default_value) == "dataset"
-    assert (
-        perform_substitutions(context, declarations["image_topic"].default_value)
-        == "/umi_camera/image_raw"
-    )
+    # 图像话题留空，由 image_mode 决定默认值；默认 raw 即 /umi_camera/image_raw。
+    assert perform_substitutions(context, declarations["image_topic"].default_value) == ""
+    assert perform_substitutions(context, declarations["image_mode"].default_value) == "auto"
+    assert declarations["image_mode"].choices == ["auto", "raw", "compressed", "h264"]
     assert "device_path" not in declarations
 
 
@@ -123,15 +125,16 @@ def test_use_rviz_false_omits_rviz_node() -> None:
 
 
 def test_collection_rviz_config_registers_panel_and_displays() -> None:
-    """验证 RViz 配置包含采集面板、原生 Image 和 Tracker Pose 显示。"""
+    """验证 RViz 配置包含采集面板、原生 Image 和 Tracker Odometry 显示。"""
     document = yaml.safe_load((PACKAGE_ROOT / "config" / "collection.rviz").read_text("utf-8"))
 
     assert document["Panels"][0]["Class"] == "fastumi_rviz_plugins/CollectionPanel"
     manager = document["Visualization Manager"]
     classes = {display["Class"]: display for display in manager["Displays"]}
     assert classes["rviz_default_plugins/Image"]["Topic"]["Value"] == "/umi_camera/image_raw"
-    assert classes["rviz_default_plugins/Pose"]["Topic"]["Value"] == "/vive_tracker/pose"
-    assert manager["Global Options"]["Fixed Frame"] == "steamvr_tracking"
+    assert classes["rviz_default_plugins/Odometry"]["Topic"]["Value"] == "/vive_tracker/odom"
+    assert "rviz_default_plugins/Pose" not in classes
+    assert manager["Global Options"]["Fixed Frame"] == "vive_tracker_odom"
 
 
 def test_collection_node_receives_defaults_file_and_overrides() -> None:
@@ -144,7 +147,12 @@ def test_collection_node_receives_defaults_file_and_overrides() -> None:
     assert parameters[0].endswith("/share/fastumi_data/config/collection.yaml")
     assert parameters[1] == {
         "dataset_root": "/data/umi",
+        "image_mode": "raw",
         "image_topic": "/umi_camera/image_raw",
+        "decoded_image_topic": "/umi_camera/image_decoded",
+        "image_reliability": "best_effort",
+        "image_qos_depth": 30,
+        "h264_start_timeout_s": 5.0,
         "extrinsic_path": "/cal/tracker_to_tcp.yaml",
     }
     assert "processing_config" not in parameters[1]
@@ -153,9 +161,7 @@ def test_collection_node_receives_defaults_file_and_overrides() -> None:
 
 
 def test_start_camera_requires_explicit_valid_video_device() -> None:
-    """验证启用相机必须提供合法 by-path 设备，且不会猜测默认设备。"""
-    with pytest.raises(ValueError, match="video_device"):
-        _expand(start_camera="true")
+    """验证显式给出的 video_device 必须是合法 by-path 路径。"""
     with pytest.raises(ValueError, match="by-path"):
         _expand(start_camera="true", video_device="/dev/video0")
 
@@ -276,6 +282,7 @@ def test_fastdds_profile_is_set_for_children_unless_user_already_chose(monkeypat
 
     monkeypatch.delenv("FASTRTPS_DEFAULT_PROFILES_FILE", raising=False)
     module = _load_launch_module()
+    module._probe_image_source = lambda topic, timeout: None  # 不探测真实 ROS 图。
     description = module.generate_launch_description()
     opaque = next(e for e in description.entities if isinstance(e, OpaqueFunction))
 
@@ -313,3 +320,11 @@ def test_fastdds_profile_enlarges_shm_segment_beyond_a_1080p_frame() -> None:
 
     assert int(shm.findtext("p:segment_size", namespaces=namespace)) > 10 * 1920 * 1080 * 3
     assert root.find(".//p:participant", namespace).get("is_default_profile") == "true"
+
+
+def test_start_camera_with_empty_video_device_auto_selects() -> None:
+    """video_device 留空时不传该参数，由相机节点自动选择第一个 USB 相机。"""
+    _, _, includes, _ = _expand(start_camera="true")
+    camera = next(i for i in includes if _include_name(i).endswith("usb_camera.launch.py"))
+
+    assert "video_device" not in dict(camera.launch_arguments)

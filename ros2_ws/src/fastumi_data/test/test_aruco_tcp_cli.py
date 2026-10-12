@@ -467,3 +467,17 @@ def test_run_calibration_injects_fixed_openness_into_each_image_frame(
 def test_default_image_topic_uses_tof_rgb() -> None:
     """双 ArUco 标定默认读取 FastUMI ToF RGB 图像。"""
     assert DEFAULT_IMAGE_TOPIC == "/tof_stereo_camera/rgb/image_raw"
+
+
+def test_aruco_cli_image_mode_option() -> None:
+    """ArUco 标定命令行的图像模式默认 raw，可选 compressed 和 h264。"""
+    required = [
+        "bag", "--aruco-config", "a.yaml",
+        "--tracker-camera-calibration", "t.yaml",
+        "--tracker-config", "c.yaml", "--output-dir", "out",
+    ]
+    parser = build_argument_parser()
+    assert parser.parse_args(required).image_mode == "raw"
+    assert parser.parse_args([*required, "--image-mode", "h264"]).image_mode == "h264"
+    with pytest.raises(SystemExit):
+        parser.parse_args([*required, "--image-mode", "mjpeg"])

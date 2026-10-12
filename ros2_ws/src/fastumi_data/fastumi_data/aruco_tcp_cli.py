@@ -29,6 +29,7 @@ from fastumi_data.aruco_tcp_estimator import (
     DualArucoTcpEstimator,
     FrameEstimationError,
 )
+from fastumi_data.image_modes import IMAGE_MODES
 from fastumi_data.pose_math import matrix_to_pose
 from fastumi_data.tracker_camera_bag import (
     iter_image_frames,
@@ -427,6 +428,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracker-config", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--image-topic", default=DEFAULT_IMAGE_TOPIC)
+    parser.add_argument(
+        "--image-mode",
+        choices=IMAGE_MODES,
+        default="raw",
+        help="图像话题的消息类型：raw、compressed（JPEG/PNG）或 h264；须与 MCAP 一致",
+    )
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--minimum-frames", type=int, default=30)
     parser.add_argument("--max-reprojection-rmse-px", type=float, default=1.5)
@@ -471,6 +478,7 @@ def run_calibration(arguments: argparse.Namespace) -> ArucoTcpCalibrationResult:
         arguments.bag_uri,
         arguments.image_topic,
         frame_stride=arguments.frame_stride,
+        image_mode=getattr(arguments, "image_mode", "raw"),
     ):
         try:
             frame = estimator.estimate(

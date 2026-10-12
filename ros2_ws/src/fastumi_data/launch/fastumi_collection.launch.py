@@ -4,11 +4,17 @@
 和夹爪估计可分别用 ``start_camera``、``start_tracker``、``start_gripper``
 按需启动。采集由 ``/fastumi/collection`` 服务或 RViz2 面板开始，不再随
 launch 自动录包。
+
+``image_mode`` 选择相机输出：``raw``（默认）、``compressed``（JPEG/PNG）或
+``h264``（无 B 帧）。MCAP 始终保存编码话题；夹爪估计和 RViz2 订阅原始图像，
+编码模式下由在线解码节点发布到 ``decoded_image_topic``。
 """
 
 import os
 from pathlib import Path
-from typing import List
+import tempfile
+import time
+from typing import List, Optional, Tuple
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchContext, LaunchDescription
@@ -22,14 +28,47 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+import yaml
 
 from fastumi_usb_camera.capture import is_physical_video_device_path
 
+from fastumi_data.image_modes import (
+    DEFAULT_DECODED_IMAGE_TOPIC,
+    DEFAULT_H264_START_TIMEOUT_S,
+    DEFAULT_IMAGE_QOS_DEPTH,
+    DEFAULT_IMAGE_RELIABILITY,
+    DEFAULT_IMAGE_TOPICS,
+    IMAGE_MODES,
+    IMAGE_RELIABILITIES,
+    MODE_COMPRESSED,
+    MODE_H264,
+    MODE_RAW,
+    mode_for_message_type,
+    resolve_image_topic,
+    validate_image_mode,
+    validate_image_qos_depth,
+    validate_image_reliability,
+)
+
 
 # UMI 相机默认原始图像话题；相机命名空间由它推导。
-DEFAULT_IMAGE_TOPIC = "/umi_camera/image_raw"
-# 图像话题必须以该后缀结尾，才能推导出 USB 相机节点的命名空间。
-IMAGE_TOPIC_SUFFIX = "/image_raw"
+DEFAULT_IMAGE_TOPIC = DEFAULT_IMAGE_TOPICS[MODE_RAW]
+# 各模式的图像话题必须以该后缀结尾，才能推导出 USB 相机节点的命名空间。
+IMAGE_TOPIC_SUFFIXES = {
+    MODE_RAW: "/image_raw",
+    MODE_COMPRESSED: "/image_raw/compressed",
+    MODE_H264: "/image_raw/ffmpeg",
+}
+# H.264 接收端订阅的话题后缀，输入参数是去掉该后缀的基础话题。
+H264_TOPIC_SUFFIX = "/ffmpeg"
+# image_mode 取该值时按相机实际发布的消息类型决定模式。
+MODE_AUTO = "auto"
+# 自动检测时等待发布端出现的默认秒数。
+DEFAULT_PROBE_TIMEOUT_S = 5.0
+# 在线 H.264 解码后端，由 usb_camera_receiver 实现。
+DECODER_BACKENDS = ("transport", "cuda", "auto")
+# 包内 collection.rviz 中 UMI 视频显示默认订阅的话题。
+RVIZ_DEFAULT_IMAGE_TOPIC = DEFAULT_IMAGE_TOPIC
 # 采集 RViz2 默认固定坐标系，即 vive_tracker 发布位姿所在的 OpenVR 原点。
 DEFAULT_FIXED_FRAME = "steamvr_tracking"
 # Fast DDS 默认参与者配置的环境变量名。
@@ -55,17 +94,157 @@ def _text(context: LaunchContext, name: str) -> str:
     return LaunchConfiguration(name).perform(context).strip()
 
 
-def _camera_namespace(image_topic: str) -> str:
-    """从 ``/<namespace>/image_raw`` 推导 USB 相机命名空间。"""
-    if not image_topic.startswith("/") or not image_topic.endswith(IMAGE_TOPIC_SUFFIX):
+def _probe_image_source(
+    topic: str, timeout_s: float
+) -> Optional[Tuple[str, str]]:
+    """在 ROS 图中等待图像发布端，按其消息类型返回 ``(模式, 话题)``。
+
+    ``topic`` 非空时只看该话题，否则依次看三种模式的默认话题。超时没有发现
+    任何发布端返回 ``None``。使用独立的 rclpy 上下文，不影响 launch 本身。
+    """
+    import rclpy
+    from rclpy.context import Context
+
+    candidates = [topic] if topic else list(DEFAULT_IMAGE_TOPICS.values())
+    context = Context()
+    rclpy.init(context=context)
+    try:
+        node = rclpy.create_node("fastumi_image_probe", context=context)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            known = dict(node.get_topic_names_and_types())
+            for candidate in candidates:
+                for type_name in known.get(candidate, []):
+                    mode = mode_for_message_type(type_name)
+                    if mode is not None and node.count_publishers(candidate) > 0:
+                        return mode, candidate
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.2)
+    finally:
+        context.try_shutdown()
+
+
+def _mode_from_topic_name(topic: str) -> str:
+    """无法探测时按话题后缀推断图像模式。"""
+    if topic.endswith("/compressed"):
+        return MODE_COMPRESSED
+    if topic.endswith(H264_TOPIC_SUFFIX):
+        return MODE_H264
+    return MODE_RAW
+
+
+def _resolve_image_source(
+    requested_mode: str, requested_topic: str, start_camera: bool, timeout_s: float
+) -> Tuple[str, str]:
+    """确定实际的图像模式和话题。
+
+    ``auto`` 且启动本地相机时使用 raw；连接已有设备时按发布端的消息类型订阅，
+    探测不到发布端则退回话题后缀或 raw 默认值并给出提示。
+    """
+    mode = requested_mode.strip().lower()
+    if mode != MODE_AUTO:
+        mode = validate_image_mode(mode)
+        return mode, resolve_image_topic(mode, requested_topic)
+    if start_camera:
+        return MODE_RAW, resolve_image_topic(MODE_RAW, requested_topic)
+    found = _probe_image_source(requested_topic, timeout_s)
+    if found is not None:
+        print(f"[fastumi_collection] 检测到图像话题 {found[1]}，模式 {found[0]}")
+        return found
+    fallback = _mode_from_topic_name(requested_topic) if requested_topic else MODE_RAW
+    topic = resolve_image_topic(fallback, requested_topic)
+    print(
+        f"[fastumi_collection] {timeout_s:g} s 内没有发现图像发布端，按 {fallback} 订阅 {topic}；"
+        "设备稍后启动时若类型不同，开始前检查会提示不一致"
+    )
+    return fallback, topic
+
+
+def _camera_namespace(image_topic: str, image_mode: str = MODE_RAW) -> str:
+    """从 ``/<namespace>/image_raw[/compressed|/ffmpeg]`` 推导 USB 相机命名空间。"""
+    suffix = IMAGE_TOPIC_SUFFIXES[image_mode]
+    if not image_topic.startswith("/") or not image_topic.endswith(suffix):
         raise ValueError(
-            f"启动相机时 image_topic 必须形如 /<namespace>{IMAGE_TOPIC_SUFFIX}，"
+            f"启动相机时 image_topic 必须形如 /<namespace>{suffix}，"
             f"当前为 {image_topic!r}"
         )
-    namespace = image_topic[1 : -len(IMAGE_TOPIC_SUFFIX)]
+    namespace = image_topic[1 : -len(suffix)]
     if not namespace:
         raise ValueError("启动相机时 image_topic 必须带命名空间")
     return namespace
+
+
+def _h264_base_topic(image_topic: str) -> str:
+    """H.264 编码话题去掉 ``/ffmpeg`` 后得到接收器和编码器使用的基础话题。"""
+    if not image_topic.endswith(H264_TOPIC_SUFFIX) or image_topic == H264_TOPIC_SUFFIX:
+        raise ValueError(
+            f"h264 的 image_topic 必须形如 /<基础话题>{H264_TOPIC_SUFFIX}，"
+            f"当前为 {image_topic!r}"
+        )
+    return image_topic[: -len(H264_TOPIC_SUFFIX)]
+
+
+def _transport_prefix(base_topic: str) -> str:
+    """ffmpeg_image_transport 参数前缀：去掉开头 ``/``，余下 ``/`` 改为 ``.``。"""
+    return base_topic.lstrip("/").replace("/", ".") + ".ffmpeg."
+
+
+def _write_ffmpeg_config(base_topic: str) -> str:
+    """为指定基础话题生成本地 H.264 编码配置，返回临时 YAML 路径。
+
+    以包内 ``ffmpeg.yaml`` 为模板：话题改为 ``base_topic``，编码插件参数前缀
+    按文档规则同步改名，其余编码参数（libx264、GOP、无 B 帧）保持不变。
+    """
+    source = (
+        Path(get_package_share_directory("fastumi_usb_camera")) / "config" / "ffmpeg.yaml"
+    )
+    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    parameters = document["usb_camera_ffmpeg"]["ros__parameters"]
+    old_prefix = _transport_prefix(parameters["topic"])
+    new_prefix = _transport_prefix(base_topic)
+    rewritten = {}
+    for key, value in parameters.items():
+        if key == "topic":
+            rewritten[key] = base_topic
+        elif key.startswith(old_prefix):
+            rewritten[new_prefix + key[len(old_prefix):]] = value
+        else:
+            rewritten[key] = value
+    document["usb_camera_ffmpeg"]["ros__parameters"] = rewritten
+    target = Path(tempfile.mkdtemp(prefix="fastumi_ffmpeg_")) / "ffmpeg.yaml"
+    target.write_text(
+        yaml.safe_dump(document, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return str(target)
+
+
+def _rviz_config_for(config: str, view_topic: str) -> str:
+    """让 RViz2 的 UMI 视频显示订阅实际的原始图像话题。
+
+    只改订阅包内默认话题的 Image 显示；话题已相同或用户自定义配置指向
+    其他话题时原样使用，不生成临时文件。
+    """
+    if view_topic == RVIZ_DEFAULT_IMAGE_TOPIC:
+        return config
+    document = yaml.safe_load(Path(config).read_text(encoding="utf-8"))
+    changed = False
+    for display in document.get("Visualization Manager", {}).get("Displays", []):
+        topic = display.get("Topic")
+        if (
+            display.get("Class") == "rviz_default_plugins/Image"
+            and isinstance(topic, dict)
+            and topic.get("Value") == RVIZ_DEFAULT_IMAGE_TOPIC
+        ):
+            topic["Value"] = view_topic
+            changed = True
+    if not changed:
+        return config
+    target = Path(tempfile.mkdtemp(prefix="fastumi_rviz_")) / Path(config).name
+    target.write_text(
+        yaml.safe_dump(document, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return str(target)
 
 
 def _gripper_snapshot_files(
@@ -87,6 +266,56 @@ def _gripper_snapshot_files(
     return [camera, gripper]
 
 
+def _decoder_node(
+    image_mode: str,
+    image_topic: str,
+    decoded_image_topic: str,
+    image_reliability: str,
+    image_qos_depth: int,
+    decoder_backend: str,
+) -> Node:
+    """创建在线解码节点：JPEG/PNG 用可配置 QoS 的解码节点，H.264 用 C++ 接收器。
+
+    ``image_transport republish`` 的订阅固定为 RELIABLE，无法匹配 BEST_EFFORT 的
+    相机发布端，因此 JPEG/PNG 不使用它。
+    """
+    if image_mode == MODE_COMPRESSED:
+        return Node(
+            package="fastumi_data",
+            executable="image_decoder",
+            name="image_decoder",
+            output="screen",
+            parameters=[
+                {
+                    "image_mode": image_mode,
+                    "input_topic": image_topic,
+                    "output_topic": decoded_image_topic,
+                    "image_reliability": image_reliability,
+                    "image_qos_depth": image_qos_depth,
+                }
+            ],
+        )
+    base_topic = _h264_base_topic(image_topic)
+    return Node(
+        package="fastumi_usb_camera",
+        executable="usb_camera_receiver",
+        name="usb_camera_receiver",
+        output="screen",
+        parameters=[
+            {
+                "input_topic": base_topic,
+                "output_topic": decoded_image_topic,
+                "decoder_backend": decoder_backend,
+                "output_queue_depth": 5,
+                "input_reliability": image_reliability,
+                "input_queue_depth": image_qos_depth,
+                # 软件解码，避免 cuvid 解码帧的 PTS 无法匹配 Jetson 流。
+                f"{_transport_prefix(base_topic)}decoders.h264": "h264",
+            }
+        ],
+    )
+
+
 def _launch_setup(context: LaunchContext) -> list:
     """校验参数并按需展开采集节点、设备子 launch 和 RViz2。"""
     if _text(context, "record_mcap").lower() == "true":
@@ -94,7 +323,25 @@ def _launch_setup(context: LaunchContext) -> list:
     start_camera = _flag(context, "start_camera")
     start_tracker = _flag(context, "start_tracker")
     start_gripper = _flag(context, "start_gripper")
-    image_topic = _text(context, "image_topic")
+    image_mode, image_topic = _resolve_image_source(
+        _text(context, "image_mode"),
+        _text(context, "image_topic"),
+        start_camera,
+        float(_text(context, "image_probe_timeout_s")),
+    )
+    decoded_image_topic = _text(context, "decoded_image_topic")
+    image_reliability = validate_image_reliability(_text(context, "image_reliability"))
+    image_qos_depth = validate_image_qos_depth(int(_text(context, "image_qos_depth")))
+    h264_start_timeout_s = float(_text(context, "h264_start_timeout_s"))
+    decoder_backend = _text(context, "decoder_backend")
+    if decoder_backend not in DECODER_BACKENDS:
+        raise ValueError(
+            f"decoder_backend 必须是 {'、'.join(DECODER_BACKENDS)} 之一，当前为 {decoder_backend!r}"
+        )
+    if not decoded_image_topic.startswith("/"):
+        raise ValueError(f"decoded_image_topic 必须是绝对话题，当前为 {decoded_image_topic!r}")
+    # 夹爪估计和 RViz2 订阅原始图像：raw 直接用相机话题，编码模式用解码话题。
+    view_topic = image_topic if image_mode == MODE_RAW else decoded_image_topic
     video_device = _text(context, "video_device")
     camera_calibration = _text(context, "camera_calibration_path")
     gripper_calibration = _text(context, "gripper_calibration_path")
@@ -106,11 +353,23 @@ def _launch_setup(context: LaunchContext) -> list:
     if profile and FASTDDS_PROFILE_ENV not in os.environ:
         actions.append(SetEnvironmentVariable(FASTDDS_PROFILE_ENV, profile))
     if start_camera:
-        if not video_device:
-            raise ValueError("start_camera:=true 时必须显式提供 video_device")
-        if not is_physical_video_device_path(video_device):
+        # video_device 留空时由相机节点自动选择编号最小的 USB 主视频节点。
+        if video_device and not is_physical_video_device_path(video_device):
             raise ValueError(
                 "video_device 必须使用 /dev/v4l/by-path/*-video-index0 物理端口路径"
+            )
+        # 本地相机三种输出对应现有节点：raw、仅 JPEG、软件 H.264；连接 Jetson 等
+        # 外部发布的话题时不启动本地相机，直接给出对应的 image_mode 与话题。
+        namespace = _camera_namespace(image_topic, image_mode)
+        camera_arguments = {"namespace": namespace}
+        if video_device:
+            camera_arguments["video_device"] = video_device
+        if image_mode == MODE_COMPRESSED:
+            camera_arguments["publish_compressed"] = "true"
+        elif image_mode == MODE_H264:
+            camera_arguments["enable_ffmpeg"] = "true"
+            camera_arguments["ffmpeg_config"] = _write_ffmpeg_config(
+                _h264_base_topic(image_topic)
             )
         actions.append(
             IncludeLaunchDescription(
@@ -123,10 +382,7 @@ def _launch_setup(context: LaunchContext) -> list:
                         ]
                     )
                 ),
-                launch_arguments={
-                    "namespace": _camera_namespace(image_topic),
-                    "video_device": video_device,
-                }.items(),
+                launch_arguments=camera_arguments.items(),
             )
         )
     if start_tracker:
@@ -154,7 +410,7 @@ def _launch_setup(context: LaunchContext) -> list:
         camera_calibration, gripper_calibration
     )
     gripper_arguments = {
-        "image_topic": image_topic,
+        "image_topic": view_topic,
         "publish_debug_image": "true" if _flag(context, "publish_debug_image") else "false",
         "camera_calibration_path": resolved_camera,
         "gripper_calibration_path": resolved_gripper,
@@ -175,9 +431,29 @@ def _launch_setup(context: LaunchContext) -> list:
             )
         )
 
+    use_rviz = _flag(context, "use_rviz")
+    if image_mode != MODE_RAW and _flag(context, "start_decoder") and (
+        start_gripper or use_rviz
+    ):
+        actions.append(
+            _decoder_node(
+                image_mode,
+                image_topic,
+                decoded_image_topic,
+                image_reliability,
+                image_qos_depth,
+                decoder_backend,
+            )
+        )
+
     parameters: dict = {
         "dataset_root": _text(context, "dataset_root"),
+        "image_mode": image_mode,
         "image_topic": image_topic,
+        "decoded_image_topic": decoded_image_topic,
+        "image_reliability": image_reliability,
+        "image_qos_depth": image_qos_depth,
+        "h264_start_timeout_s": h264_start_timeout_s,
     }
     for launch_name, parameter in (
         ("extrinsic_path", "extrinsic_path"),
@@ -211,7 +487,7 @@ def _launch_setup(context: LaunchContext) -> list:
     )
     # 在此解析而不是用运行时条件：Tracker 子 launch 的 use_rviz:=false 参数会泄漏到
     # 同一上下文，使稍后求值的 IfCondition 误判为关闭。
-    if _flag(context, "use_rviz"):
+    if use_rviz:
         actions.append(
             Node(
                 package="rviz2",
@@ -220,7 +496,7 @@ def _launch_setup(context: LaunchContext) -> list:
                 output="screen",
                 arguments=[
                     "-d",
-                    _text(context, "rviz_config"),
+                    _rviz_config_for(_text(context, "rviz_config"), view_topic),
                     "-f",
                     _text(context, "fixed_frame"),
                 ],
@@ -240,9 +516,68 @@ def generate_launch_description() -> LaunchDescription:
             description="数据集根目录；内含 <task>/<UTC>_<UUID>、.staging 和 .trash。",
         ),
         DeclareLaunchArgument(
+            "image_mode",
+            default_value=MODE_AUTO,
+            choices=[MODE_AUTO, *IMAGE_MODES],
+            description=(
+                "相机输出：auto（默认）按发布端实际消息类型订阅，启动本地相机时为 raw；"
+                "raw（sensor_msgs/Image）、compressed（JPEG/PNG 的 CompressedImage）"
+                "或 h264（无 B 帧的 FFMPEGPacket）可显式指定。MCAP 原样保存收到的消息。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "image_probe_timeout_s",
+            default_value=str(DEFAULT_PROBE_TIMEOUT_S),
+            description="image_mode:=auto 连接已有设备时等待图像发布端出现的秒数。",
+        ),
+        DeclareLaunchArgument(
             "image_topic",
-            default_value=DEFAULT_IMAGE_TOPIC,
-            description="UMI 相机原始 sensor_msgs/Image 话题。",
+            default_value="",
+            description=(
+                "录制的图像话题；留空按 image_mode 使用 /umi_camera/image_raw、"
+                "/umi_camera/image_raw/compressed 或 /umi_camera/image_raw/ffmpeg。"
+                "连接 Jetson 等外部发布端时显式给出其话题。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "decoded_image_topic",
+            default_value=DEFAULT_DECODED_IMAGE_TOPIC,
+            description="编码模式下在线解码后发布的原始图像话题，供夹爪估计和 RViz2 订阅。",
+        ),
+        DeclareLaunchArgument(
+            "image_reliability",
+            default_value=DEFAULT_IMAGE_RELIABILITY,
+            choices=list(IMAGE_RELIABILITIES),
+            description="图像订阅可靠性；默认 best_effort 兼容当前相机发布端。",
+        ),
+        DeclareLaunchArgument(
+            "image_qos_depth",
+            default_value=str(DEFAULT_IMAGE_QOS_DEPTH),
+            description="图像订阅 KEEP_LAST 队列深度。",
+        ),
+        DeclareLaunchArgument(
+            "h264_start_timeout_s",
+            default_value=str(DEFAULT_H264_START_TIMEOUT_S),
+            description="h264 模式下开始采集等待首个 SPS/PPS+IDR 关键帧的最长秒数。",
+        ),
+        DeclareLaunchArgument(
+            "start_decoder",
+            default_value="true",
+            choices=flag_choices,
+            description=(
+                "编码模式下是否启动在线解码节点；夹爪估计或 RViz2 启用时才会创建。"
+                "已有外部解码节点发布 decoded_image_topic 时设为 false。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "decoder_backend",
+            default_value="auto",
+            choices=list(DECODER_BACKENDS),
+            description=(
+                "h264 在线解码后端（usb_camera_receiver）：auto 优先 GPU（h264_cuvid），"
+                "初始化失败用同一关键帧改用软件，运行失败后在下一关键帧切换软件并保持到重启；"
+                "transport 为 image_transport 软件插件；cuda 仅 GPU，失败即退出。"
+            ),
         ),
         DeclareLaunchArgument(
             "extrinsic_path",
@@ -274,12 +609,15 @@ def generate_launch_description() -> LaunchDescription:
             "start_camera",
             default_value="false",
             choices=flag_choices,
-            description="是否启动 USB 相机；启用时必须提供 video_device。",
+            description="是否启动 USB 相机；video_device 留空时自动选择第一个 USB 相机。",
         ),
         DeclareLaunchArgument(
             "video_device",
             default_value="",
-            description="相机 /dev/v4l/by-path/*-video-index0 物理端口路径。",
+            description=(
+                "相机 /dev/v4l/by-path/*-video-index0 物理端口路径；留空则自动选择"
+                "第一个可用的 USB 相机（多相机时不保证端口稳定，建议显式指定）。"
+            ),
         ),
         DeclareLaunchArgument(
             "start_tracker",

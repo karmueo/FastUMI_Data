@@ -24,17 +24,56 @@ from fastumi_data.extrinsic import (
     calibration_passes_acceptance,
     load_tracker_tcp_extrinsic,
 )
+from fastumi_data.image_modes import (
+    DEFAULT_IMAGE_MODE,
+    DEFAULT_IMAGE_QOS_DEPTH,
+    DEFAULT_IMAGE_RELIABILITY,
+    IMAGE_MODES,
+    IMAGE_RELIABILITIES,
+    MODE_RAW,
+    message_type_for_mode,
+    resolve_image_topic,
+    validate_image_mode,
+    validate_image_qos_depth,
+    validate_image_reliability,
+)
 
 
-# 默认录制的数据和 episode 边界话题。
-DEFAULT_TOPICS = [
-    "/umi_camera/image_raw",
+# 默认录制的非图像数据和 episode 边界话题；图像话题由所选模式决定。
+NON_IMAGE_TOPICS = [
     "/gripper/state",
     "/vive_tracker/pose",
     "/vive_tracker/status",
     "/fastumi/episode/events",
     "/tf_static",
 ]
+
+
+def default_topics(image_topic: str) -> List[str]:
+    """返回默认录制列表，所选图像话题排在最前。"""
+    return [image_topic, *NON_IMAGE_TOPICS]
+
+
+def resolve_record_topics(
+    explicit_topics: Optional[List[str]], image_topic: str
+) -> List[str]:
+    """确定录制话题：未显式给出时使用默认列表，否则必须包含图像话题。
+
+    Raises:
+        ValueError: 显式列表缺少所选图像话题。
+    """
+    if not explicit_topics:
+        return default_topics(image_topic)
+    if image_topic not in explicit_topics:
+        raise ValueError(
+            f"显式 --topic 列表必须包含所选图像话题 {image_topic}，"
+            "否则录制的会话没有图像"
+        )
+    return list(explicit_topics)
+
+
+# raw 模式的默认录制列表，保持既有名称供外部引用。
+DEFAULT_TOPICS = default_topics(resolve_image_topic(DEFAULT_IMAGE_MODE))
 
 
 class _TerminalKeyReader:
@@ -158,7 +197,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="默认使用 fastumi_data 包内的同步配置",
     )
     parser.add_argument(
-        "--topic", action="append", dest="topics", help="覆盖默认录制话题"
+        "--topic",
+        action="append",
+        dest="topics",
+        help="覆盖默认录制话题；必须包含所选图像话题",
+    )
+    parser.add_argument(
+        "--image-mode",
+        choices=IMAGE_MODES,
+        default=DEFAULT_IMAGE_MODE,
+        help="图像消息模式：raw、compressed（JPEG/PNG）或 h264（无 B 帧）",
+    )
+    parser.add_argument(
+        "--image-topic",
+        default="",
+        help="图像话题；留空按模式使用 /umi_camera/image_raw、.../compressed 或 .../ffmpeg",
+    )
+    parser.add_argument(
+        "--image-reliability",
+        choices=IMAGE_RELIABILITIES,
+        default=DEFAULT_IMAGE_RELIABILITY,
+        help="图像订阅可靠性；默认 best_effort 兼容现有相机发布端",
+    )
+    parser.add_argument(
+        "--image-qos-depth",
+        type=int,
+        default=DEFAULT_IMAGE_QOS_DEPTH,
+        help="图像订阅 KEEP_LAST 队列深度",
     )
     parser.add_argument(
         "--snapshot",
@@ -193,6 +258,51 @@ def _copy_snapshot(
     }
 
 
+def _write_processing_snapshot(
+    source_text: str, snapshot_dir: Path, image_mode: str, image_topic: str
+) -> dict:
+    """写入带实际图像模式和话题的处理配置快照，使离线转换与录制一致。"""
+    source = Path(source_text).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"快照文件不存在: {source}")
+    document = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    if not isinstance(document, dict):
+        raise ValueError(f"处理配置必须是 YAML 映射: {source}")
+    document["image_mode"] = image_mode
+    document["topics"] = {**(document.get("topics") or {}), "image": image_topic}
+    destination = snapshot_dir / "processing.yaml"
+    if destination.exists():
+        raise FileExistsError(f"快照目标重名: {destination.name}")
+    destination.write_text(
+        yaml.safe_dump(document, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return {
+        "path": f"calibration_snapshot/{destination.name}",
+        "sha256": _sha256(destination),
+    }
+
+
+def _write_qos_overrides(
+    path: Path, image_topic: str, reliability: str, depth: int
+) -> Path:
+    """写出 rosbag2 的 QoS 覆盖文件，使图像订阅使用配置的可靠性和深度。"""
+    path.write_text(
+        yaml.safe_dump(
+            {
+                image_topic: {
+                    "history": "keep_last",
+                    "depth": depth,
+                    "reliability": reliability,
+                    "durability": "volatile",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _terminate_process(process: subprocess.Popen) -> None:
     """向子进程发送 SIGINT，并在必要时升级为终止。"""
     if process.poll() is not None:
@@ -205,9 +315,11 @@ def _terminate_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5.0)
 
 
-def _build_bag_command(raw_dir: Path, topics: List[str]) -> List[str]:
+def _build_bag_command(
+    raw_dir: Path, topics: List[str], qos_overrides: Optional[Path] = None
+) -> List[str]:
     """构造关闭 rosbag 自带键盘控制的连续录制命令。"""
-    return [
+    command = [
         "ros2",
         "bag",
         "record",
@@ -218,21 +330,24 @@ def _build_bag_command(raw_dir: Path, topics: List[str]) -> List[str]:
         "--disable-keyboard-controls",
         "--output",
         str(raw_dir / "bag"),
-        "--topics",
-        *topics,
     ]
+    if qos_overrides is not None:
+        command += ["--qos-profile-overrides-path", str(qos_overrides)]
+    return [*command, "--topics", *topics]
 
 
 def _wait_for_recording_processes(
-    manager_process: subprocess.Popen,
+    manager_process: Optional[subprocess.Popen],
     bag_process: subprocess.Popen,
     key_reader: Optional[_TerminalKeyReader] = None,
     command_handler: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """监管录制进程，并在交互终端中处理 episode 快捷键。"""
+    """监管录制进程并处理快捷键；编码模式的边界服务与录包共用一个进程。"""
     episode_active = False  # 当前录制器快捷键对应的 episode 状态。
     while True:
-        manager_exit_code = manager_process.poll()
+        manager_exit_code = (
+            manager_process.poll() if manager_process is not None else None
+        )
         if manager_exit_code is not None:
             raise RuntimeError(
                 "episode_manager 意外退出，退出码为 "
@@ -248,7 +363,7 @@ def _wait_for_recording_processes(
         if bag_exit_code is not None:
             if bag_exit_code != 0:
                 raise RuntimeError(
-                    f"ros2 bag record 退出码为 {bag_exit_code}"
+                    f"MCAP 录制进程退出码为 {bag_exit_code}"
                 )
             return
         if key_reader is None:
@@ -266,8 +381,14 @@ def _wait_for_recording_processes(
 
 
 def main(argv: Optional[List[str]] = None) -> None:
-    """启动 episode 管理节点和 ros2 bag MCAP 录制进程。"""
+    """创建会话并启动录制；编码模式共享图像订阅和边界服务的执行器。"""
     arguments = _build_parser().parse_args(argv)
+    # 先校验图像参数：配置错误不应在读取外参或创建会话目录之后才暴露。
+    image_mode = validate_image_mode(arguments.image_mode)
+    image_topic = resolve_image_topic(image_mode, arguments.image_topic)
+    image_reliability = validate_image_reliability(arguments.image_reliability)
+    image_qos_depth = validate_image_qos_depth(arguments.image_qos_depth)
+    topics = resolve_record_topics(arguments.topics, image_topic)
     extrinsic = load_tracker_tcp_extrinsic(arguments.extrinsic)
     if not calibration_passes_acceptance(extrinsic.metadata):
         raise ValueError("Tracker 到 TCP 外参未通过 2 mm、1° 验收")
@@ -279,8 +400,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     ).resolve()
     raw_dir = session_dir / "raw"
     snapshot_dir = session_dir / "calibration_snapshot"
-    topics = arguments.topics or DEFAULT_TOPICS
-
     raw_dir.mkdir(parents=True, exist_ok=False)
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     processing_config = arguments.processing_config or str(
@@ -293,10 +412,14 @@ def main(argv: Optional[List[str]] = None) -> None:
         snapshot_dir,
         "tracker_to_tcp.yaml",
     )
-    processing_snapshot = _copy_snapshot(
-        processing_config,
-        snapshot_dir,
-        "processing.yaml",
+    processing_snapshot = _write_processing_snapshot(
+        processing_config, snapshot_dir, image_mode, image_topic
+    )
+    qos_overrides = _write_qos_overrides(
+        session_dir / "image_qos_overrides.yaml",
+        image_topic,
+        image_reliability,
+        image_qos_depth,
     )
     copied_snapshots = []
     for source_text in arguments.snapshot:
@@ -311,6 +434,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         "storage_id": "mcap",
         "bag_uri": "raw/bag",
         "topics": topics,
+        "image": {
+            "mode": image_mode,
+            "topic": image_topic,
+            "message_type": message_type_for_mode(image_mode),
+            "reliability": image_reliability,
+            "qos_depth": image_qos_depth,
+        },
         "tracker_to_tcp": extrinsic_snapshot,
         "processing_config": processing_snapshot,
         "additional_snapshots": copied_snapshots,
@@ -330,14 +460,32 @@ def main(argv: Optional[List[str]] = None) -> None:
         f"task_name:={arguments.task}",
         "-p",
         f"session_id:={session_id}",
+        "-p",
+        f"image_mode:={image_mode}",
+        "-p",
+        f"image_topic:={image_topic}",
+        "-p",
+        f"image_reliability:={image_reliability}",
+        "-p",
+        f"image_qos_depth:={image_qos_depth}",
     ]
-    bag_command = _build_bag_command(raw_dir, topics)
+    bag_command = _build_bag_command(raw_dir, topics, qos_overrides)
+    if image_mode != MODE_RAW:
+        # 共享录制进程在写入图像后更新就绪状态，消除独立订阅的关键帧竞态。
+        bag_command = [
+            sys.executable, "-m", "fastumi_data.continuous_recorder",
+            "--bag-uri", str(raw_dir / "bag"),
+        ]
+        for topic in topics:
+            bag_command += ["--topic", topic]
+        bag_command += manager_command[4:]
     print(f"会话目录: {session_dir}")
     manager_process = None
     bag_process = None
     control_node = None
     try:
-        manager_process = subprocess.Popen(manager_command)
+        if image_mode == MODE_RAW:
+            manager_process = subprocess.Popen(manager_command)
         bag_process = subprocess.Popen(bag_command)
         with _TerminalKeyReader() as key_reader:
             if not key_reader.enabled:

@@ -43,6 +43,16 @@ def test_returns_when_bag_finishes_cleanly() -> None:
     bag_process.wait.assert_called_once_with(timeout=0.2)
 
 
+def test_shared_recorder_needs_no_separate_manager_process() -> None:
+    """编码录制的单个进程正常退出时，监督函数无需独立管理器。"""
+    bag_process = Mock()
+    bag_process.wait.return_value = 0
+
+    _wait_for_recording_processes(None, bag_process)
+
+    bag_process.wait.assert_called_once_with(timeout=0.2)
+
+
 def test_retries_while_both_processes_are_running() -> None:
     """验证录包等待超时后会继续检查管理器状态。"""
     manager_process = Mock()

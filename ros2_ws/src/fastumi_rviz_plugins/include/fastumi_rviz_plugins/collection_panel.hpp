@@ -144,6 +144,7 @@ private:
   QLabel * connection_label_;
   QLabel * state_label_;
   QLabel * calibration_label_;
+  QLabel * video_type_label_;
   QLabel * duration_label_;
   QLabel * message_label_;
   QLineEdit * task_edit_;

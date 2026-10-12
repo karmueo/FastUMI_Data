@@ -41,6 +41,8 @@ ament_target_dependencies(usb_camera_ffmpeg
   builtin_interfaces image_transport pluginlib rclcpp sensor_msgs)
 
 add_executable(usb_camera_receiver src/usb_camera_receiver.cpp)
+target_include_directories(usb_camera_receiver PRIVATE
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 ament_target_dependencies(usb_camera_receiver
   ffmpeg_encoder_decoder ffmpeg_image_transport_msgs image_transport pluginlib rclcpp sensor_msgs)
 
@@ -78,6 +80,20 @@ if(BUILD_TESTING)
   target_link_libraries(test_image_message ${PROJECT_NAME}_core ${OpenCV_LIBRARIES})
   target_include_directories(test_image_message PRIVATE ${OpenCV_INCLUDE_DIRS})
   ament_target_dependencies(test_image_message builtin_interfaces sensor_msgs)
+
+  ament_add_gtest(test_h264_access_unit test/test_h264_access_unit.cpp)
+  target_link_libraries(test_h264_access_unit ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_decoder_policy test/test_decoder_policy.cpp)
+  target_link_libraries(test_decoder_policy ${PROJECT_NAME}_core)
+
+  add_executable(test_usb_camera_receiver test/test_usb_camera_receiver.cpp)
+  target_include_directories(test_usb_camera_receiver PRIVATE
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+  ament_target_dependencies(test_usb_camera_receiver
+    ffmpeg_encoder_decoder ffmpeg_image_transport_msgs image_transport pluginlib rclcpp sensor_msgs)
+  add_test(NAME test_usb_camera_receiver COMMAND test_usb_camera_receiver)
+  set_tests_properties(test_usb_camera_receiver PROPERTIES TIMEOUT 60)
 
   add_executable(test_ffmpeg_round_trip test/test_ffmpeg_round_trip.cpp)
   ament_target_dependencies(test_ffmpeg_round_trip

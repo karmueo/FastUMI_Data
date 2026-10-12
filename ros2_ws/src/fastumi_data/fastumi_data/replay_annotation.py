@@ -31,13 +31,31 @@ from rosgraph_msgs.msg import Clock
 from std_srvs.srv import Trigger
 
 from fastumi_data.episode_manager import EpisodeManager, EpisodeSnapshot
+from fastumi_data.image_modes import (
+    IMAGE_MESSAGE_TYPES,
+    IMAGE_MODES,
+    MODE_COMPRESSED,
+    MODE_H264,
+    MODE_RAW,
+    mode_for_message_type,
+)
 
 
 EVENT_TOPIC = "/fastumi/episode/events"
 TRACKER_TOPIC = "/vive_tracker/pose"
 GRIPPER_TOPIC = "/gripper/state"
-IMAGE_TYPE = "sensor_msgs/msg/Image"
+IMAGE_TYPE = IMAGE_MESSAGE_TYPES[MODE_RAW]
 EVENT_TYPE = "fastumi_interfaces/msg/EpisodeEvent"
+# 回放时 RViz 面板订阅的原始图像话题；编码图像由解码节点发布到这里。
+REPLAY_IMAGE_TOPIC = "/fastumi/replay/image"
+# 编码图像在回放中的基础话题，解码节点从这里读取。
+REPLAY_ENCODED_BASE = "/fastumi/replay/encoded"
+# 回放时编码图像话题的后缀。
+REPLAY_ENCODED_SUFFIX = {MODE_COMPRESSED: "/compressed", MODE_H264: "/ffmpeg"}
+# --image-mode 自动检测的取值。
+IMAGE_MODE_AUTO = "auto"
+# 回放 H.264 的解码后端。
+DECODER_BACKENDS = ("transport", "cuda", "auto")
 
 
 def _stamp_to_ns(stamp: Time) -> int:
@@ -551,33 +569,70 @@ def source_topics(uri: Path) -> dict[str, object]:
         _close_if_supported(reader)
 
 
-def detect_image_topic(uri: Path, requested_topic: str = "") -> str:
-    """优先检测 XV RGB 图像，或校验用户指定的 Image 话题。"""
+@dataclass(frozen=True)
+class ImageSource:
+    """源 MCAP 中选定的图像话题及其消息模式。"""
+
+    topic: str
+    mode: str
+
+
+def detect_image_source(
+    uri: Path, requested_topic: str = "", requested_mode: str = IMAGE_MODE_AUTO
+) -> ImageSource:
+    """检测回放使用的图像话题和模式。
+
+    候选是消息类型为 Image、CompressedImage 或 FFMPEGPacket 的话题；
+    ``requested_mode`` 不是 ``auto`` 时只考虑该模式的类型。优先唯一的 XV RGB
+    原始图像，其余情况要求候选唯一，否则用 ``--image-topic`` 选择。
+    """
+    if requested_mode != IMAGE_MODE_AUTO and requested_mode not in IMAGE_MODES:
+        raise ValueError(
+            f"--image-mode 必须是 {IMAGE_MODE_AUTO}、{'、'.join(IMAGE_MODES)} 之一"
+        )
     metadata = source_topics(uri)
-    image_topics = [
-        name
+    candidates = {
+        name: mode
         for name, topic_metadata in metadata.items()
-        if topic_metadata.type == IMAGE_TYPE
-    ]
+        if (mode := mode_for_message_type(topic_metadata.type)) is not None
+        and requested_mode in (IMAGE_MODE_AUTO, mode)
+    }
     if requested_topic:
-        if requested_topic not in image_topics:
-            raise ValueError("--image-topic 必须是源 MCAP 内的 sensor_msgs/msg/Image")
-        return requested_topic
+        if requested_topic not in candidates:
+            wanted = (
+                "图像类型"
+                if requested_mode == IMAGE_MODE_AUTO
+                else IMAGE_MESSAGE_TYPES[requested_mode]
+            )
+            raise ValueError(
+                f"--image-topic 必须是源 MCAP 内的 {wanted} 话题"
+                "（sensor_msgs/Image、CompressedImage 或 FFMPEGPacket）"
+            )
+        return ImageSource(requested_topic, candidates[requested_topic])
     xv_topics = [
-        name for name in image_topics
-        if name.startswith("/xv_sdk/") and name.endswith("/rgb/image")
+        name for name, mode in candidates.items()
+        if mode == MODE_RAW
+        and name.startswith("/xv_sdk/") and name.endswith("/rgb/image")
     ]
     if len(xv_topics) == 1:
-        return xv_topics[0]
+        return ImageSource(xv_topics[0], MODE_RAW)
     if len(xv_topics) > 1:
         raise ValueError("检测到多个 XV RGB 图像话题，请使用 --image-topic 选择")
-    if len(image_topics) != 1:
-        raise ValueError("源 MCAP 必须包含唯一 Image，或使用 --image-topic 选择")
-    return image_topics[0]
+    if len(candidates) != 1:
+        raise ValueError("源 MCAP 必须包含唯一图像话题，或使用 --image-topic 选择")
+    topic, mode = next(iter(candidates.items()))
+    return ImageSource(topic, mode)
 
 
-def validate_source_bag(uri: Path, requested_image_topic: str = "") -> str:
-    """检查源目录、必要话题及消息类型，并返回检测到的图像话题。"""
+def detect_image_topic(uri: Path, requested_topic: str = "") -> str:
+    """优先检测 XV RGB 图像，或校验用户指定的图像话题，返回话题名。"""
+    return detect_image_source(uri, requested_topic).topic
+
+
+def validate_source_image(
+    uri: Path, requested_image_topic: str = "", requested_mode: str = IMAGE_MODE_AUTO
+) -> ImageSource:
+    """检查源目录、必要话题及消息类型，并返回检测到的图像话题和模式。"""
     if not uri.is_dir():
         raise ValueError(f"输入 MCAP 目录不存在: {uri}")
     metadata = source_topics(uri)
@@ -593,7 +648,12 @@ def validate_source_bag(uri: Path, requested_image_topic: str = "") -> str:
     if missing or wrong_type:
         details = [*(f"缺少 {name}" for name in missing), *(f"类型不兼容 {name}" for name in wrong_type)]
         raise ValueError("源 MCAP 不满足回放标注要求: " + "；".join(details))
-    return detect_image_topic(uri, requested_image_topic)
+    return detect_image_source(uri, requested_image_topic, requested_mode)
+
+
+def validate_source_bag(uri: Path, requested_image_topic: str = "") -> str:
+    """检查源目录、必要话题及消息类型，并返回检测到的图像话题。"""
+    return validate_source_image(uri, requested_image_topic).topic
 
 
 def read_playback_bounds(uri: Path) -> PlaybackBounds:
@@ -733,12 +793,64 @@ def _validate_merged_bag(
         raise RuntimeError("临时包的新 episode 事件序列不匹配")
 
 
-def build_player_command(bag: Path, image_topic: str, rate: float) -> list[str]:
-    """构造以模拟时钟启动、禁用键盘并重映射图像的 rosbag2 回放命令。"""
+def replay_encoded_topic(image_mode: str) -> str:
+    """返回编码图像在回放中的话题，供播放器重映射和解码节点订阅。"""
+    return REPLAY_ENCODED_BASE + REPLAY_ENCODED_SUFFIX[image_mode]
+
+
+def build_player_command(
+    bag: Path, image_topic: str, rate: float, image_mode: str = MODE_RAW
+) -> list[str]:
+    """构造以模拟时钟启动、禁用键盘并重映射图像的 rosbag2 回放命令。
+
+    原始图像直接重映射到 RViz 订阅的话题；编码图像重映射到回放编码话题，
+    由 :func:`build_decoder_command` 的解码节点转成原始图像。
+    """
+    target = (
+        REPLAY_IMAGE_TOPIC if image_mode == MODE_RAW
+        else replay_encoded_topic(image_mode)
+    )
     return [
         "ros2", "bag", "play", str(bag), "--clock", "--start-paused",
         "--disable-keyboard-controls", "--exclude-topics", EVENT_TOPIC,
-        "--rate", str(rate), "--remap", f"{image_topic}:=/fastumi/replay/image",
+        "--rate", str(rate), "--remap", f"{image_topic}:={target}",
+    ]
+
+
+def _decoders_parameter(base_topic: str) -> str:
+    """ffmpeg_image_transport 软件解码器参数名：话题去掉开头 ``/``，``/`` 改 ``.``。"""
+    return base_topic.lstrip("/").replace("/", ".") + ".ffmpeg.decoders.h264"
+
+
+def build_decoder_command(
+    image_mode: str, decoder_backend: str = "auto"
+) -> Optional[list[str]]:
+    """构造把回放编码图像解码到 :data:`REPLAY_IMAGE_TOPIC` 的节点命令。
+
+    JPEG/PNG 使用可配置 QoS 的 ``image_decoder``（``image_transport republish``
+    只能 RELIABLE 订阅，连不上 BEST_EFFORT 的发布端）；H.264 使用 C++ 接收器。
+    原始图像无需解码，返回 ``None``。
+    """
+    if image_mode == MODE_RAW:
+        return None
+    if image_mode == MODE_COMPRESSED:
+        return [
+            "ros2", "run", "fastumi_data", "image_decoder", "--ros-args",
+            "-p", f"image_mode:={MODE_COMPRESSED}",
+            "-p", f"input_topic:={replay_encoded_topic(MODE_COMPRESSED)}",
+            "-p", f"output_topic:={REPLAY_IMAGE_TOPIC}",
+        ]
+    if decoder_backend not in DECODER_BACKENDS:
+        raise ValueError(
+            f"--decoder-backend 必须是 {'、'.join(DECODER_BACKENDS)} 之一"
+        )
+    return [
+        "ros2", "run", "fastumi_usb_camera", "usb_camera_receiver", "--ros-args",
+        "-p", f"input_topic:={REPLAY_ENCODED_BASE}",
+        "-p", f"output_topic:={REPLAY_IMAGE_TOPIC}",
+        "-p", f"decoder_backend:={decoder_backend}",
+        "-p", "output_queue_depth:=5",
+        "-p", f"{_decoders_parameter(REPLAY_ENCODED_BASE)}:=h264",
     ]
 
 
@@ -767,7 +879,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rate", type=float, default=1.0, help="回放倍率")
     parser.add_argument(
         "--image-topic", default="",
-        help="可选源 Image 话题；默认优先唯一 XV RGB 话题",
+        help="可选源图像话题；默认优先唯一 XV RGB 话题，否则要求图像话题唯一",
+    )
+    parser.add_argument(
+        "--image-mode", default=IMAGE_MODE_AUTO,
+        choices=(IMAGE_MODE_AUTO, *IMAGE_MODES),
+        help="源图像消息模式：auto 按 MCAP 类型检测，也可限定 raw、compressed 或 h264",
+    )
+    parser.add_argument(
+        "--decoder-backend", default="auto", choices=DECODER_BACKENDS,
+        help="h264 回放解码后端：auto 优先 GPU、失败回退软件；transport 软件；cuda 仅 GPU",
     )
     parser.add_argument("--rviz-config", default="", help="可选 RViz 配置路径")
     return parser
@@ -790,9 +911,14 @@ def _wait_for_playback(
     player: subprocess.Popen[bytes],
     rviz: subprocess.Popen[bytes],
     manual_finish_requested: threading.Event,
+    decoder: Optional[subprocess.Popen[bytes]] = None,
 ) -> bool:
-    """监督回放和 RViz，并响应已经通过服务校验的手动结束请求。"""
+    """监督回放、RViz 和可选的解码节点，并响应已经通过服务校验的手动结束请求。"""
     while True:
+        if decoder is not None and decoder.poll() is not None:
+            raise RuntimeError(
+                f"图像解码节点在回放完成前退出，退出码为 {decoder.returncode}"
+            )
         if manual_finish_requested.is_set():
             print("[保存] 已收到手动结束请求，正在停止回放并冻结标注…", flush=True)
             _terminate(player)
@@ -829,7 +955,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     )
     if not rviz_config.is_file():
         raise ValueError(f"RViz 配置不存在: {rviz_config}")
-    image_topic = validate_source_bag(bag, arguments.image_topic.strip())
+    source = validate_source_image(
+        bag, arguments.image_topic.strip(), arguments.image_mode
+    )
+    decoder_command = build_decoder_command(source.mode, arguments.decoder_backend)
     playback_bounds = read_playback_bounds(bag)
     task = arguments.task.strip() or bag.name
     session_id = arguments.session_id.strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -875,15 +1004,21 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     spin_thread.start()
     player: Optional[subprocess.Popen[bytes]] = None
     rviz: Optional[subprocess.Popen[bytes]] = None
+    decoder: Optional[subprocess.Popen[bytes]] = None
     snapshot: Optional[EpisodeSnapshot] = None
     try:
-        player = subprocess.Popen(build_player_command(bag, image_topic, arguments.rate))
+        # 解码节点先于播放器启动，保证首个关键帧到来时订阅已建立。
+        if decoder_command is not None:
+            decoder = subprocess.Popen(decoder_command)
+        player = subprocess.Popen(
+            build_player_command(bag, source.topic, arguments.rate, source.mode)
+        )
         rviz_command = build_rviz_command(
             rviz_config, playback_bounds, arguments.rate
         )
         rviz = subprocess.Popen(rviz_command)
         manual_finish = _wait_for_playback(
-            player, rviz, finish_controller.requested
+            player, rviz, finish_controller.requested, decoder
         )
         snapshot = finish_controller.snapshot if manual_finish else manager.freeze()
         if snapshot is None:
@@ -909,6 +1044,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             _terminate(rviz)
         if player is not None and player.poll() is None:
             _terminate(player)
+        if decoder is not None and decoder.poll() is None:
+            _terminate(decoder)
         executor.shutdown()
         manager.destroy_node()
         clock_node.destroy_node()

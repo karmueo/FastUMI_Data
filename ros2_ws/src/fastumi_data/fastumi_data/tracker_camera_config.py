@@ -10,6 +10,8 @@ from ament_index_python.packages import get_package_share_directory
 import numpy as np
 import yaml
 
+from fastumi_data.image_modes import validate_image_mode
+
 
 def _checked_mapping(value: Any, description: str) -> Mapping[str, Any]:
     """把 YAML 节点校验为映射并返回。"""
@@ -179,6 +181,7 @@ class CalibrationSettings:
     """保存标定话题、筛选、时间搜索和默认质量门。"""
 
     image_topic: str = "/tof_stereo_camera/rgb/image_raw"
+    image_mode: str = "raw"
     tracker_topic: str = "/vive_tracker/odom"
     status_topic: str = "/vive_tracker/status"
     tag_family: str = "tag36h11"
@@ -199,6 +202,7 @@ class CalibrationSettings:
         for name in ("image_topic", "tracker_topic", "status_topic"):
             if not getattr(self, name):
                 raise ValueError(f"{name} 不能为空")
+        validate_image_mode(self.image_mode)
         if self.frame_stride <= 0:
             raise ValueError("frame_stride 必须为正整数")
         if self.min_tags <= 0:

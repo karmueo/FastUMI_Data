@@ -13,6 +13,15 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
+from fastumi_data.image_modes import (
+    DEFAULT_IMAGE_MODE,
+    DEFAULT_IMAGE_QOS_DEPTH,
+    DEFAULT_IMAGE_RELIABILITY,
+    MODE_RAW,
+    validate_image_mode,
+)
+from fastumi_data.video_decoding import DecodeReadiness
+
 
 SnapshotPayload = TypeVar("SnapshotPayload")
 """状态锁内读取回调返回的泛型 payload 类型。"""
@@ -36,16 +45,26 @@ class EpisodeManager(Node):
     def __init__(
         self,
         event_observer: Optional[Callable[[EpisodeEvent], None]] = None,
+        image_readiness: Optional[DecodeReadiness] = None,
     ) -> None:
         """声明服务和发布器。
 
         Args:
             event_observer: 可选同步观察器。在事件发布、状态提交前调用，
-                用于回放标注进程缓存序列化字节。
+                用于回放标注进程缓存序列化字节，或同步写入连续录制的 MCAP。
+            image_readiness: 可选录包端就绪状态，只在实际写入图像后更新；
+                编码模式必须提供，以确认关键帧已由录包端保存。
+        Raises:
+            ValueError: 编码模式缺少录包端就绪状态，或任务名称为空。
         """
         super().__init__("episode_manager")
         self.declare_parameter("task_name", "test")
         self.declare_parameter("session_id", "")
+        # 编码模式的首个 episode 依据注入的实际录包状态门控。
+        self.declare_parameter("image_mode", DEFAULT_IMAGE_MODE)
+        self.declare_parameter("image_topic", "")
+        self.declare_parameter("image_reliability", DEFAULT_IMAGE_RELIABILITY)
+        self.declare_parameter("image_qos_depth", DEFAULT_IMAGE_QOS_DEPTH)
         self._task_name = str(self.get_parameter("task_name").value).strip()
         configured_session = str(self.get_parameter("session_id").value).strip()
         self._session_id = configured_session or datetime.now(timezone.utc).strftime(
@@ -53,6 +72,13 @@ class EpisodeManager(Node):
         )
         if not self._task_name:
             raise ValueError("task_name 不能为空")
+        try:
+            self._readiness = (
+                image_readiness if image_readiness is not None else self._create_readiness()
+            )
+        except ValueError:
+            self.destroy_node()
+            raise
 
         self._event_qos = QoSProfile(
             depth=20,
@@ -77,9 +103,20 @@ class EpisodeManager(Node):
         self._active = False
         self._frozen = False
         self._revision = 0
+        # 首个 episode 成功开始后不再门控：解码状态此后持续跟随码流。
+        self._first_episode_started = False
         self.get_logger().info(
             f"会话 {self._session_id} 已就绪，任务: {self._task_name}"
         )
+
+    def _create_readiness(self) -> DecodeReadiness:
+        """raw 无需门控；编码模式禁止以独立订阅者的状态代替实际录包确认。"""
+        mode = validate_image_mode(str(self.get_parameter("image_mode").value))
+        if mode != MODE_RAW:
+            raise ValueError(
+                "编码模式需要录包端的就绪状态，请通过 record_session 启动共享录制器"
+            )
+        return DecodeReadiness(mode)
 
     def freeze(self) -> EpisodeSnapshot:
         """冻结状态转换并返回可供离线合并校验的稳定快照。"""
@@ -270,8 +307,12 @@ class EpisodeManager(Node):
     def _start(
         self, request: Trigger.Request, response: Trigger.Response
     ) -> Trigger.Response:
-        """开始一条 episode，拒绝嵌套开始或冻结后的请求。"""
+        """开始一条 episode，拒绝嵌套开始、冻结后以及视频尚不可解码的请求。"""
         del request
+        if not self._first_episode_started and not self._readiness.ready:
+            response.success = False
+            response.message = f"首个 episode 暂不能开始：{self._readiness.status}"
+            return response
         response.success, response.message = self._transition(
             EpisodeEvent.START,
             False,
@@ -279,6 +320,7 @@ class EpisodeManager(Node):
             "已有活动 episode，请先 stop 或 abort",
         )
         if response.success:
+            self._first_episode_started = True
             self.get_logger().info(response.message)
         return response
 
