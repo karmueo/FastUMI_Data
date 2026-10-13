@@ -7,6 +7,17 @@ from setuptools import find_packages, setup
 
 # ROS 2 包名，用于共享目录和入口点安装。
 PACKAGE_NAME = "fastumi_data"
+# 仓库根目录（相对本文件）；默认外参与 JPEG XL codec 只在仓库根保留一份源码。
+REPOSITORY_ROOT = "../../.."
+# 转换默认使用的设备组合外参及其 Tracker 绑定清单。
+DEFAULT_CALIBRATION_FILES = [
+    f"{REPOSITORY_ROOT}/config/calibration/{name}"
+    for name in (
+        "T_cam_tracker.yaml",
+        "T_cam_tracker.binding.yaml",
+        "T_cam_end.yaml",
+    )
+]
 
 
 setup(
@@ -24,6 +35,11 @@ setup(
             glob("config/*.yaml") + glob("config/*.rviz") + glob("config/*.xml"),
         ),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
+        (f"share/{PACKAGE_NAME}/config/calibration", DEFAULT_CALIBRATION_FILES),
+        (
+            f"share/{PACKAGE_NAME}/codecs",
+            [f"{REPOSITORY_ROOT}/imagecodecs_numcodecs.py"],
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

@@ -74,6 +74,8 @@ def write_session_bag(
     image_type: Optional[str] = None,
     b_frames: int = 0,
     unclosed_tail: bool = False,
+    serial_of: Optional[Callable[[int], str]] = None,
+    image_delay_ns: int = 0,
 ) -> Dict[str, str]:
     """写出连续 30 Hz 会话。
 
@@ -86,6 +88,8 @@ def write_session_bag(
         image_override: 可替换某帧图像消息，用于注入损坏数据。
         image_type: 覆盖图像话题的注册类型，用于模拟配置不匹配。
         unclosed_tail: 最后一个 START 之后不写 STOP。
+        serial_of: 可按帧号返回 Tracker 状态序列号，缺省为 ``LHR-TEST``。
+        image_delay_ns: 图像的 bag 接收时间延迟（纳秒），保留原始 Header 时间。
 
     Returns:
         话题映射。
@@ -124,7 +128,7 @@ def write_session_bag(
             message = payloads[index]
             if image_override is not None:
                 message = image_override(index, message)
-            records.append((stamp_ns, TOPICS["image"], message))
+            records.append((stamp_ns + image_delay_ns, TOPICS["image"], message))
         pose = PoseStamped()
         pose.header.stamp = _time(stamp_ns)
         pose.header.frame_id = "steamvr_tracking_ros"
@@ -133,7 +137,7 @@ def write_session_bag(
         records.append((stamp_ns, TOPICS["tracker_pose"], pose))
         status = TrackerStatus()
         status.header.stamp = _time(stamp_ns)
-        status.serial_number = "LHR-TEST"
+        status.serial_number = "LHR-TEST" if serial_of is None else serial_of(index)
         status.device_connected = True
         status.pose_valid = True
         status.tracking_state = TrackerStatus.TRACKING_RUNNING_OK

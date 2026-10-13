@@ -24,6 +24,7 @@
 
 #include "fastumi_usb_camera/decoder_policy.hpp"
 #include "fastumi_usb_camera/h264_access_unit.hpp"
+#include "fastumi_usb_camera/output_decimator.hpp"
 
 namespace fastumi_usb_camera
 {
@@ -39,6 +40,8 @@ struct PacketIntervalStats
   uint64_t keyframes = 0;
   /** 已提交发布的解码图像数。 */
   uint64_t frames = 0;
+  /** 按 output_every_n_frames 主动跳过的解码图像数（不是丢帧）。 */
+  uint64_t skipped = 0;
   /** 解码失败的压缩包数。 */
   uint64_t decode_failures = 0;
   /** 两个相邻包的源时间戳间隔超过 50 毫秒的次数。 */
@@ -142,6 +145,9 @@ public:
     const auto input_reliability = declare_parameter<std::string>(
       "input_reliability", "best_effort");
     const auto input_queue_depth = declare_parameter<int64_t>("input_queue_depth", 20);
+    // 每 N 个解码帧发布一帧（默认 1 即全部）；所有压缩包仍送入解码器。
+    decimator_ = std::make_unique<OutputDecimator>(
+      declare_parameter<int64_t>("output_every_n_frames", 1));
     if (input_topic.empty() || input_topic.front() != '/' ||
       input_topic.back() == '/' || output_topic.empty() ||
       output_topic.front() != '/' || output_topic.back() == '/')
@@ -177,7 +183,9 @@ public:
       decoder_->subscribe(
         this, input_topic,
         [this](const sensor_msgs::msg::Image::ConstSharedPtr & image) {
-          output_->publish(*image);
+          if (decimator_->take()) {
+            output_->publish(*image);
+          }
         }, qos);
     } else {
       packet_decoder_ = std::make_unique<FfmpegPacketDecoder>(
@@ -197,8 +205,9 @@ public:
     }
 
     RCLCPP_INFO(
-      get_logger(), "Decoding %s/ffmpeg -> %s with %s backend",
-      input_topic.c_str(), output_topic.c_str(), backend.c_str());
+      get_logger(), "Decoding %s/ffmpeg -> %s with %s backend, publishing every %ld decoded frame(s)",
+      input_topic.c_str(), output_topic.c_str(), backend.c_str(),
+      static_cast<long>(decimator_->every_n()));
   }
 
   /** @brief 关闭订阅并释放发布端。 */
@@ -234,6 +243,10 @@ private:
   /** @brief 发布解码图像并记录发布耗时。 */
   void publish_image(const sensor_msgs::msg::Image & image)
   {
+    if (!decimator_->take()) {
+      ++stats_.skipped;
+      return;
+    }
     const auto publish_started_at = std::chrono::steady_clock::now();
     output_->publish(image);
     const double publish_ms = std::chrono::duration<double, std::milli>(
@@ -304,12 +317,13 @@ private:
     RCLCPP_INFO(
       get_logger(),
       "H.264 rx %.1f pkt/s, %.2f MB/s, keyframes %lu, stamp gaps %lu (max %.1f ms); "
-      "publish %.1f frame/s, decode failures %lu, max decode %.1f ms, max publish %.1f ms, "
-      "decoder %s",
+      "publish %.1f frame/s, skipped by decimation %lu, decode failures %lu, max decode %.1f ms, "
+      "max publish %.1f ms, decoder %s",
       stats_.packets / seconds, stats_.bytes / seconds / 1.0e6,
       static_cast<unsigned long>(stats_.keyframes),
       static_cast<unsigned long>(stats_.stamp_gaps), stats_.max_stamp_gap_ms,
-      stats_.frames / seconds, static_cast<unsigned long>(stats_.decode_failures),
+      stats_.frames / seconds, static_cast<unsigned long>(stats_.skipped),
+      static_cast<unsigned long>(stats_.decode_failures),
       stats_.max_decode_ms, stats_.max_publish_ms,
       policy_->active_decoder().empty() ? "none" : policy_->active_decoder().c_str());
     stats_ = {};
@@ -325,6 +339,8 @@ private:
   std::unique_ptr<FfmpegPacketDecoder> packet_decoder_;
   /** 选择 CUDA 或软件解码器的策略。 */
   std::unique_ptr<DecoderPolicy> policy_;
+  /** 解码帧输出降频，两种后端共用。 */
+  std::unique_ptr<OutputDecimator> decimator_;
   /** 当前五秒统计周期内的收包与发布数据。 */
   PacketIntervalStats stats_;
   /** 上一个压缩包的源时间戳，用于统计包间断档。 */

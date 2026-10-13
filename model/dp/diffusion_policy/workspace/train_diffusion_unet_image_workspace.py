@@ -43,6 +43,33 @@ from torch.utils.data import DataLoader, Subset, default_collate
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
+# 必须在根属性声明 frequency 且与训练契约一致的数据格式。
+FREQUENCY_REQUIRED_FORMATS = ("fastumi-rm75-link7-v1",)
+
+
+def check_dataset_frequency(dataset_attrs, contract) -> None:
+    """核对数据集根属性 frequency 与 task.contract.frequency_hz 一致。
+
+    示教 Link7 格式必须同时声明两者且相等；其他格式在两者都存在时也要求一致。
+
+    Raises:
+        ValueError: 缺失（对必需格式）或不一致。
+    """
+    attrs = dataset_attrs or {}
+    expected = None if contract is None else contract.get("frequency_hz")
+    actual = attrs.get("frequency")
+    if attrs.get("format") in FREQUENCY_REQUIRED_FORMATS:
+        if expected is None or actual is None:
+            raise ValueError(
+                f"{attrs.get('format')} requires dataset frequency and task.contract.frequency_hz; "
+                f"got {actual!r} and {expected!r}")
+    if expected is None or actual is None:
+        return
+    if isinstance(actual, bool) or not isinstance(actual, (int, float)) or float(actual) != float(expected):
+        raise ValueError(
+            f"Dataset frequency {actual!r} does not match task.contract.frequency_hz={expected!r}")
+
+
 def _instantiate_env_runner(env_runner_cfg, output_dir) -> Optional[BaseImageRunner]:
     """按配置创建图像环境 runner，允许离线训练跳过 runner。
 
@@ -397,6 +424,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         dataset = hydra.utils.instantiate(cfg.task.dataset)
         assert isinstance(dataset, BaseImageDataset) or isinstance(dataset, BaseDataset)
         contract = cfg.task.get("contract")
+        check_dataset_frequency(getattr(dataset, "dataset_attrs", {}), contract)
         if contract is not None and "urdf_sha256" in contract:
             urdf_sha256 = dataset.dataset_attrs.get("urdf_sha256")
             if (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64

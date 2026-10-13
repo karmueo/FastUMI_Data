@@ -3,3 +3,7 @@
 numpy==1.26.4
 opencv-python==4.11.0.86
 pytest>=7.4,<8
+# convert_mcap 导出 fastumi-rm75-link7-v1 Zarr（JPEG XL 无损图像）所需的已验证版本。
+zarr==2.18.7
+numcodecs==0.12.1
+imagecodecs==2026.1.14

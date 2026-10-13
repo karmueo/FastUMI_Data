@@ -6,7 +6,8 @@
 
 输入：
     --input 为单个 Zarr 目录或包含 Zarr 目录的父目录；递归查找时不跟随符号链接。
-    --type 必选，可选 rm75_joint 或 rm75_umi。--action-horizon 默认 16，
+    --type 必选，可选 rm75_joint 或 rm75_umi；rm75_umi 同时接受 convert_mcap 输出的
+    fastumi-rm75-link7-v1（示教 Link7 格式）。--action-horizon 默认 16，
     --seed 默认 42，--val-ratio 默认 0.1，三者用于计算训练和验证窗口。
     输入路径按当前工作目录解析，数据集须包含 meta 和 data 中的必需数组。
 
@@ -35,17 +36,45 @@ except ImportError as exc:
     print(f"缺少验证依赖：{exc}。请使用根目录 .venv 或安装 numpy、zarr。", file=sys.stderr)
     sys.exit(2)
 
+# 仓库根目录的 imagecodecs_numcodecs 是 JPEG XL 等图像 chunk 编解码器的唯一实现。
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+try:
+    from imagecodecs_numcodecs import register_codecs
+except ImportError:  # 缺少 imagecodecs 时仍可检查未压缩或 Blosc 数据集。
+    register_codecs = None
+else:
+    register_codecs(verbose=False)
+
 
 # 两种训练数据类型允许的 Zarr 根属性 format 值。
 FORMATS = {
     "rm75_joint": {"rm75-joint-image-v1", "rm75-joint-image-v2"},
-    "rm75_umi": {"rm75-umi-pose-v1", "rm75-umi-pose-v2"},
+    "rm75_umi": {"rm75-umi-pose-v1", "rm75-umi-pose-v2", "fastumi-rm75-link7-v1"},
 }
+# convert_mcap 输出的示教 Link7 格式：存储坐标为 episode 起始 Link7，部署输出到 base_link。
+LINK7_FORMAT = "fastumi-rm75-link7-v1"
 # 数组形状只列出帧维之后的维度，帧数由 meta/episode_ends 确定。
 COMMON = {"camera0_rgb": (224, 224, 3), "timestamp": (), "source_image_index": ()}
 JOINT = {"robot0_joint_pos": (7,), "robot0_gripper_position": (1,), "action": (8,)}
 UMI = {"robot0_eef_pos": (3,), "robot0_eef_rot_axis_angle": (3,),
        "robot0_gripper_width": (1,), "robot0_demo_start_pose": (6,), "action": (7,)}
+# 示教 Link7 格式额外要求的追溯数组。
+LINK7_EXTRA = {"dropped_frames_before": (), "image_timestamp_ns": (), "nominal_timestamp_ns": ()}
+# 示教 Link7 格式固定的根属性。
+LINK7_CONTRACT = {
+    "stored_action_layout": "xyz_rotvec_gripper", "pose_frame": "episode_start_link7",
+    "deployment_base_frame": "base_link", "end_frame": "Link7", "position_unit": "m",
+    "rotation_unit": "rad", "gripper_representation": "normalized_0_1",
+    "normalization_contract": "fixed-gripper-0-1-v1", "action_source": "demonstration_trajectory",
+    "timestamp_semantics": "nominal_frame_time", "state_time_reference": "image_timestamp",
+    "action_time_reference": "image_timestamp",
+}
+# 同频逐帧路径相邻实际间隔相对整数倍周期的默认容差（秒）。
+INTERVAL_TOLERANCE_S = 0.008
+# 名义时间相邻差允许的整数纳秒舍入误差。
+NOMINAL_TOLERANCE_NS = 1
 JOINT_NAMES = [f"joint{index}" for index in range(1, 8)]
 HEX_SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 # 每类问题在报告中保留的定位样例上限。
@@ -129,13 +158,27 @@ def check_contract(attrs, kind, findings):
     check_equal(attrs, "image_size", 224, findings)
     check_equal(attrs, "action_layout", "joint8" if kind == "rm75_joint" else "pose10", findings)
     limits = None
-    if kind == "rm75_umi":
+    if format_name == LINK7_FORMAT:
+        # 存储坐标为 episode 起始 Link7，部署输出到 base_link；不要求虚构关节属性。
+        for key, expected in LINK7_CONTRACT.items():
+            check_equal(attrs, key, expected, findings)
+        for key in ("gripper_lower", "gripper_upper"):
+            value = attrs.get(key)
+            expected = 0.0 if key == "gripper_lower" else 1.0
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != expected:
+                findings.add("errors", "ATTRIBUTE_MISMATCH", key, expected, value)
+        status = attrs.get("time_calibration_status")
+        if status not in ("provisional", "verified"):
+            findings.add("errors", "ATTRIBUTE_INVALID", "time_calibration_status",
+                         "provisional 或 verified", status)
+    elif kind == "rm75_umi":
         for key, expected in (("stored_action_layout", "xyz_rotvec_gripper"),
                               ("base_frame", "base_link"), ("end_frame", "Link7"),
                               ("position_unit", "m"), ("rotation_unit", "rad"),
                               ("gripper_representation", "normalized_0_1"),
                               ("joint_names", JOINT_NAMES)):
             check_equal(attrs, key, expected, findings)
+    if kind == "rm75_umi":
         offset = attrs.get("tool_offset")
         try:
             valid_offset = np.asarray(offset, dtype=np.float64).shape == (4, 4) and np.allclose(
@@ -194,7 +237,7 @@ def read_meta(root, findings):
     return ends.astype(np.int64), [str(name) for name in names]
 
 
-def describe_arrays(root, kind, count, findings):
+def describe_arrays(root, kind, count, findings, link7=False):
     """检查必需数组的类型、形状和 dtype，返回 (arrays, shapes)。
 
     count 是总帧数；arrays 只包含形状符合预期、可继续扫描的数组，
@@ -202,6 +245,8 @@ def describe_arrays(root, kind, count, findings):
     """
     required = dict(COMMON)
     required.update(JOINT if kind == "rm75_joint" else UMI)
+    if link7:
+        required.update(LINK7_EXTRA)
     arrays = {}
     shapes = {}
     for name, tail in required.items():
@@ -221,7 +266,9 @@ def describe_arrays(root, kind, count, findings):
         shapes[name] = list(array.shape)
         expected_dtype = np.dtype("uint8" if name == "camera0_rgb" else
                                   "float64" if name == "timestamp" else
-                                  "int64" if name == "source_image_index" else "float32")
+                                  "int32" if name == "dropped_frames_before" else
+                                  "int64" if name in ("source_image_index", "image_timestamp_ns",
+                                                      "nominal_timestamp_ns") else "float32")
         dtype_ok = (array.dtype == expected_dtype if name not in
                     ("timestamp", "source_image_index") else
                     array.dtype.kind == expected_dtype.kind)
@@ -343,6 +390,150 @@ def check_sequence(array, name, ends, findings, frequency):
             previous = values[-1]
 
 
+def _episode_metadata(attrs, names, findings):
+    """返回与 episode 顺序对应的元数据列表；缺失或不一致时记录错误并返回 None。"""
+    records = attrs.get("episode_metadata")
+    if not isinstance(records, list) or len(records) != len(names):
+        findings.add("errors", "EPISODE_METADATA_INVALID", "episode_metadata",
+                     f"{len(names)} 条逐 episode 元数据", type(records).__name__)
+        return None
+    statuses = []
+    for episode, (record, name) in enumerate(zip(records, names)):
+        if not isinstance(record, dict) or record.get("name") != name:
+            findings.add("errors", "EPISODE_METADATA_INVALID", "episode_metadata",
+                         f"名称 {name}", record.get("name") if isinstance(record, dict) else record,
+                         episode)
+            return None
+        fps = record.get("nominal_source_fps")
+        if record.get("selection_path") not in ("same_rate", "high_rate") or \
+                isinstance(fps, bool) or not isinstance(fps, (int, float)) or \
+                not np.isfinite(fps) or fps <= 0:
+            findings.add("errors", "EPISODE_METADATA_INVALID", "episode_metadata",
+                         "selection_path 为 same_rate/high_rate，nominal_source_fps 为有限正数",
+                         [record.get("selection_path"), fps], episode)
+            return None
+        statuses.append(record.get("time_calibration_status"))
+    if any(status not in ("provisional", "verified") for status in statuses):
+        findings.add("errors", "ATTRIBUTE_INVALID", "episode_metadata.time_calibration_status",
+                     "provisional 或 verified", statuses[:MAX_EXAMPLES])
+    expected_root = "verified" if all(status == "verified" for status in statuses) else "provisional"
+    if attrs.get("time_calibration_status") != expected_root:
+        findings.add("errors", "ATTRIBUTE_MISMATCH", "time_calibration_status",
+                     f"{expected_root}（全部来源 verified 时才为 verified）",
+                     attrs.get("time_calibration_status"))
+    return records
+
+
+def _fit_rate(times_ns, frame_numbers):
+    """最小二乘拟合 t ≈ a + n/f，返回 f；数据不足时返回 None。"""
+    if len(times_ns) < 2 or np.ptp(frame_numbers) <= 0:
+        return None
+    seconds = (times_ns - times_ns[0]).astype(np.float64) / 1e9
+    centered = frame_numbers.astype(np.float64) - frame_numbers.mean()
+    slope = float(np.dot(centered, seconds - seconds.mean()) / np.dot(centered, centered))
+    return 1.0 / slope if slope > 0 else None
+
+
+def check_link7_timing(arrays, ends, attrs, names, findings):
+    """检查示教 Link7 格式的名义时间、实际图像时间、源索引和丢帧一致性。
+
+    名义时间相邻差须为 (1 + dropped_frames_before)/30 秒（允许 1 ns 舍入）；同频路径
+    源索引连续、实际间隔落在对应整数倍周期 ±8 ms 内、拟合帧率偏差不超过 0.5%；
+    高帧率路径 dropped_frames_before 全为 0 且实际时间与名义时间之差不超过两倍匹配门限。
+    返回逐 episode 的实际间隔抖动摘要。
+    """
+    required = ("timestamp", "nominal_timestamp_ns", "image_timestamp_ns",
+                "source_image_index", "dropped_frames_before")
+    if not all(name in arrays for name in required):
+        return None
+    records = _episode_metadata(attrs, names, findings)
+    if records is None:
+        return None
+    starts = np.r_[0, ends[:-1]]
+    summary = []
+    for episode, (start, end, record) in enumerate(zip(starts, ends, records)):
+        start, end = int(start), int(end)
+        try:
+            seconds = arrays["timestamp"][start:end].astype(np.float64)
+            nominal = arrays["nominal_timestamp_ns"][start:end].astype(np.int64)
+            image = arrays["image_timestamp_ns"][start:end].astype(np.int64)
+            source = arrays["source_image_index"][start:end].astype(np.int64)
+            dropped = arrays["dropped_frames_before"][start:end].astype(np.int64)
+        except Exception as exc:
+            findings.add("errors", "CHUNK_READ_FAILED", "data", "可读取的时间数组",
+                         f"{type(exc).__name__}: {exc}", episode)
+            continue
+        if dropped[0] != 0 or np.any(dropped < 0):
+            findings.add("errors", "DROPPED_FRAMES_INVALID", "data/dropped_frames_before",
+                         "首帧为 0，其余非负", dropped[:5].tolist(), episode, start)
+        if nominal[0] != 0 or abs(seconds[0]) > 1e-12:
+            findings.add("errors", "TIMESTAMP_INVALID", "data/timestamp", "每段首帧名义时间为 0",
+                         float(seconds[0]), episode, start)
+        steps = 1 + dropped[1:]
+        expected_ns = steps * 1e9 / 30.0
+        bad = np.abs(np.diff(nominal) - expected_ns) > NOMINAL_TOLERANCE_NS
+        mark_bad(findings, "TIMESTAMP_INVALID", "nominal_timestamp_ns",
+                 "相邻差 (1+dropped_frames_before)/30 秒 ±1 ns", np.diff(nominal), bad, start + 1, ends)
+        bad = np.abs(np.diff(seconds) - steps / 30.0) > (NOMINAL_TOLERANCE_NS + 0.5) * 1e-9
+        mark_bad(findings, "TIMESTAMP_INVALID", "timestamp",
+                 "相邻差 (1+dropped_frames_before)/30 秒 ±1 ns", np.diff(seconds), bad, start + 1, ends)
+        bad = np.abs(seconds - nominal / 1e9) > 1e-9
+        mark_bad(findings, "TIMESTAMP_INVALID", "timestamp", "等于 nominal_timestamp_ns/1e9",
+                 seconds, bad, start, ends)
+        mark_bad(findings, "IMAGE_TIMESTAMP_INVALID", "image_timestamp_ns", "严格递增",
+                 np.diff(image), np.diff(image) <= 0, start + 1, ends)
+        mark_bad(findings, "SOURCE_INDEX_INVALID", "source_image_index", "episode 内严格递增",
+                 np.diff(source), np.diff(source) <= 0, start + 1, ends)
+        fps = float(record["nominal_source_fps"])
+        deltas = np.diff(image).astype(np.float64)
+        item = {"episode": episode, "selection_path": record["selection_path"]}
+        if record["selection_path"] == "same_rate":
+            mark_bad(findings, "SOURCE_INDEX_INVALID", "source_image_index",
+                     "同频路径源索引连续", np.diff(source), np.diff(source) != 1, start + 1, ends)
+            residual = deltas - steps * 1e9 / fps
+            bad = np.abs(residual) > INTERVAL_TOLERANCE_S * 1e9
+            mark_bad(findings, "INTERVAL_OUT_OF_TOLERANCE", "image_timestamp_ns",
+                     "实际相邻间隔落在 (1+dropped)/f_source ±8 ms 内", deltas / 1e6, bad,
+                     start + 1, ends)
+            fitted = _fit_rate(image, np.r_[0, np.cumsum(steps)])
+            if fitted is None or abs(fitted / fps - 1) > 0.005:
+                findings.add("errors", "FRAME_RATE_DEVIATION", "image_timestamp_ns",
+                             f"拟合帧率相对 {fps:g} Hz 偏差 ≤0.5%", fitted, episode)
+            meta_fit = record.get("fitted_frame_rate_hz")
+            if fitted is not None and isinstance(meta_fit, (int, float)) and \
+                    abs(fitted / float(meta_fit) - 1) > 1e-3:
+                findings.add("errors", "REPORT_MISMATCH", "episode_metadata.fitted_frame_rate_hz",
+                             f"与实际时间拟合值 {fitted:.4f} Hz 一致（±0.1%）", meta_fit, episode)
+            item["fitted_frame_rate_hz"] = fitted
+            item["interval_deviation_ms"] = {
+                "p95": float(np.percentile(np.abs(residual), 95) / 1e6) if len(residual) else None,
+                "p99": float(np.percentile(np.abs(residual), 99) / 1e6) if len(residual) else None,
+                "max": float(np.max(np.abs(residual)) / 1e6) if len(residual) else None,
+            }
+        else:
+            mark_bad(findings, "DROPPED_FRAMES_INVALID", "dropped_frames_before",
+                     "高帧率路径全为 0", dropped, dropped != 0, start, ends)
+            limit = 2 * (0.5 / fps + 0.002) * 1e9
+            offset = (image - image[0]) - nominal
+            mark_bad(findings, "MATCH_ERROR_EXCEEDED", "image_timestamp_ns",
+                     "实际时间与名义网格之差 ≤ 两倍匹配门限", offset / 1e6,
+                     np.abs(offset) > limit, start, ends)
+        drops = int(dropped.sum())
+        if record.get("frame_drop_count") != drops:
+            findings.add("errors", "REPORT_MISMATCH", "episode_metadata.frame_drop_count",
+                         drops, record.get("frame_drop_count"), episode)
+        if drops:
+            findings.add("warnings", "FRAME_DROP", "data/dropped_frames_before",
+                         "同频逐帧无丢帧", drops, episode)
+        item["dropped_frames"] = drops
+        item["actual_interval_ms"] = {
+            "min": float(deltas.min() / 1e6) if len(deltas) else None,
+            "max": float(deltas.max() / 1e6) if len(deltas) else None,
+        }
+        summary.append(item)
+    return summary
+
+
 def check_start_pose(data, ends, findings):
     """检查 Link7 起始姿态在每个 episode 内恒定且等于首帧观测。
 
@@ -429,14 +620,19 @@ def validate_dataset(path, kind, horizon=16, seed=42, val_ratio=0.1):
         result["frames"] = count
         result["episodes"] = len(ends)
         result["windows"] = check_windows(ends, horizon, seed, val_ratio, findings)
-        arrays, result["shapes"] = describe_arrays(root, kind, count, findings)
+        link7 = attrs.get("format") == LINK7_FORMAT and kind == "rm75_umi"
+        arrays, result["shapes"] = describe_arrays(root, kind, count, findings, link7)
         for name, array in arrays.items():
             check_chunks(array, name, path, findings)
             scan_array(array, name, ends, findings,
                        limits if kind == "rm75_joint" else None)
-        for name in ("timestamp", "source_image_index"):
-            if name in arrays:
-                check_sequence(arrays[name], name, ends, findings, 30)
+        if link7:
+            # 丢帧使名义时间按 (1+dropped)/30 跳变，由专用检查覆盖。
+            result["timing"] = check_link7_timing(arrays, ends, attrs, names or [], findings)
+        else:
+            for name in ("timestamp", "source_image_index"):
+                if name in arrays:
+                    check_sequence(arrays[name], name, ends, findings, 30)
         if kind == "rm75_umi" and all(name in arrays for name in
                                       ("robot0_demo_start_pose", "robot0_eef_pos",
                                        "robot0_eef_rot_axis_angle")):

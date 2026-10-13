@@ -254,3 +254,100 @@ def test_status_message_reports_the_published_video_type(tmp_path) -> None:
 
         assert message.image_mode == expected_mode
         assert message.image_format.startswith(expected_format)
+
+
+def test_session_records_nominal_source_fps_and_timestamp_source(tmp_path) -> None:
+    """采集入口确认的标称源帧率、来源和时间戳来源写入 session.yaml。"""
+    harness = make_harness(
+        tmp_path,
+        _config(
+            "compressed", JPEG_TOPIC, nominal_source_fps=30.0,
+            nominal_source_fps_source="camera_launch",
+            image_timestamp_source="v4l2_buffer_monotonic_mapped_to_ros",
+        ),
+    )
+    started = harness.controller.start("r-start", "pick", "")
+    assert started.completed, started
+    harness.controller.stop_and_save("r-stop", started.collection_uuid)
+    destination = harness.storage.find_saved(started.collection_uuid)
+    image = yaml.safe_load((destination / "session.yaml").read_text("utf-8"))["image"]
+    assert image["nominal_source_fps"] == 30.0
+    assert image["nominal_source_fps_source"] == "camera_launch"
+    assert image["timestamp_source"] == "v4l2_buffer_monotonic_mapped_to_ros"
+
+
+def test_unknown_external_fps_is_recorded_as_unknown(tmp_path) -> None:
+    """外部相机未声明帧率时快照标记为未知，而不是采集入口默认值。"""
+    harness = make_harness(tmp_path, _config("compressed", JPEG_TOPIC))
+    started = harness.controller.start("r-start", "pick", "")
+    harness.controller.stop_and_save("r-stop", started.collection_uuid)
+    destination = harness.storage.find_saved(started.collection_uuid)
+    image = yaml.safe_load((destination / "session.yaml").read_text("utf-8"))["image"]
+    assert image["nominal_source_fps"] is None
+    assert image["nominal_source_fps_source"] == "unknown"
+
+
+def _timing_message(generation: int, index: int = 0) -> bytes:
+    """构造带映射代号的相机时间诊断。"""
+    from sensor_msgs.msg import TimeReference
+
+    message = TimeReference()
+    message.header.stamp.sec = 1
+    message.time_ref.sec = 2
+    message.source = f"mode=v4l2_buffer;clock=monotonic;tsrc=soe;seq={index};gen={generation}"
+    return serialize_message(message)
+
+
+TIMING_TOPIC = "/umi_camera/image_raw/time_reference"
+
+
+def test_image_timing_topic_is_recorded(tmp_path) -> None:
+    """配置时间诊断话题时声明 TimeReference 类型并原样录制。"""
+    harness = make_harness(
+        tmp_path,
+        CollectionConfig(
+            topics=TopicMap(image=JPEG_TOPIC, image_mode="compressed", image_timing=TIMING_TOPIC),
+            min_free_disk_bytes=0,
+        ),
+    )
+    harness.controller.on_image_timing(_timing_message(1), 1)
+    started = harness.controller.start("r-start", "pick", "")
+    assert started.completed, started
+    payload = _timing_message(1, 5)
+    harness.controller.on_image_timing(payload, 1)
+    harness.controller.stop_and_save("r-stop", started.collection_uuid)
+    backend = harness.backends[0]
+    assert {t.name: t.type_name for t in backend.topics}[TIMING_TOPIC] == (
+        "sensor_msgs/msg/TimeReference"
+    )
+    assert [d for t, d, _ in backend.writes if t == TIMING_TOPIC] == [payload]
+
+
+def test_clock_mapping_reset_during_recording_fails_collection(tmp_path) -> None:
+    """采集中映射代号变化（系统时间跳变）使当前采集进入错误状态。"""
+    harness = make_harness(
+        tmp_path,
+        CollectionConfig(
+            topics=TopicMap(image=JPEG_TOPIC, image_mode="compressed", image_timing=TIMING_TOPIC),
+            min_free_disk_bytes=0,
+        ),
+    )
+    harness.controller.on_image_timing(_timing_message(1), 1)
+    started = harness.controller.start("r-start", "pick", "")
+    assert started.completed
+    harness.controller.on_image_timing(_timing_message(1), 1)
+    assert harness.controller.tick().state == "recording"
+    harness.controller.on_image_timing(_timing_message(2), 2)
+    status = harness.controller.tick()
+    assert status.state == "error"
+    assert status.last_result_code == "CLOCK_MAPPING_RESET"
+    assert "时钟映射" in status.last_error
+
+
+def test_timing_generation_parser() -> None:
+    """从 TimeReference.source 读取 gen 字段。"""
+    from fastumi_data.collection_node import timing_generation
+
+    assert timing_generation("mode=v4l2_buffer;gen=3;offset_ns=1") == 3
+    assert timing_generation("mode=callback_now") == 0
+    assert timing_generation("gen=x") == 0

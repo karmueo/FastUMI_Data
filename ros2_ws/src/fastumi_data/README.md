@@ -3,7 +3,12 @@
 # fastumi_data
 
 该包负责 ROS2 FastUMI 的服务化 UMI 采集、episode 事件、连续 MCAP 会话、
-Tracker 到 TCP 标定、20 Hz 离线同步、FastUMI HDF5 写入和质量报告。
+Tracker 到 TCP 标定，以及 MCAP→30 Hz Link7 HDF5→合并 Zarr 的离线训练数据转换
+（`convert_mcap`，见“MCAP→Link7 训练数据”）。
+
+**默认链路**：相机采集 30 Hz，本地相机推荐并默认 JPEG（`compressed`）原样录制，
+`convert_mcap` 同频逐帧转换为 30 Hz 数据，再通过 `model/dp/train_vr_umi.sh` 的现有 30 Hz
+配置训练。
 
 本包使用工作区共享的 `.venv-numpy1`，因为 MCAP 图像转换依赖系统
 `cv_bridge`。每个运行终端先加载 Jazzy、`.venv-numpy1` 和工作区
@@ -27,13 +32,20 @@ ros2 launch fastumi_data fastumi_collection.launch.py dataset_root:=dataset
 ros2 launch fastumi_data fastumi_collection.launch.py \
   start_camera:=true \
   start_tracker:=true \
-  start_gripper:=true
+  start_gripper:=true \
+  image_mode:=compressed \
+  camera_fps:=30
 ```
 
 | launch 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `dataset_root` | `dataset` | 数据集根目录，含正式记录、`.staging` 暂存区和 `.trash` 回收区。 |
-| `image_mode` | `auto` | `auto` 按发布端实际消息类型订阅（启动本地相机时为 `raw`，连接已有设备时探测 `image_probe_timeout_s`=5 s，探测不到按话题后缀或 `raw`）；也可显式指定 `raw`、`compressed`（JPEG/PNG）、`h264`，见下文“压缩图像与 H.264”。 |
+| `image_mode` | `auto` | `auto` 启动本地相机时为 `compressed`（相机 JPEG 原样录制）；连接已有设备时按发布端实际消息类型订阅（探测 `image_probe_timeout_s`=5 s，探测不到按话题后缀或 `raw`）。也可显式指定 `raw`、`compressed`（JPEG/PNG）、`h264`，见下文“压缩图像与 H.264”。 |
+| `camera_fps` | `30` | 本地相机请求帧率（正整数），透传给相机子 launch 的 `fps`，三种输出模式都生效；设备协商值与请求不一致时相机节点报错，不接受静默降帧。同时作为标称源帧率写入 `session.yaml`。独立相机入口 `usb_camera.launch.py` 的默认值不变。 |
+| `external_camera_fps` | 空 | `start_camera:=false` 时外部相机的标称帧率（如 `30`、`29.97`）。留空记为未知：不检查图像绝对速率，离线转换须用 `--source-camera-fps` 声明。 |
+| `decode_every_n_frames` | `1` | 在线解码降负载：每 N 帧解码发布一帧。只影响夹爪估计和预览，MCAP 仍录完整编码流；H.264 全部包仍送入解码器，只按解码后帧序号降频。夹爪期望频率按 `camera_fps / N` 计算。 |
+| `camera_timestamp_mode` | `v4l2_buffer` | 本地相机 Header 时间来源：`v4l2_buffer` 把 V4L2 缓冲区单调时间映射到 ROS 时间；`callback_now` 为兼容模式（回调中读取 ROS 时间），来源写入快照。见“30 Hz 采集与时间戳”。 |
+| `exposure_auto_priority` | `leave` | V4L2 曝光优先控制：`leave` 只读取并记录，`disable` 写 0 并读回确认；结果如实记录，不放宽帧率门限。 |
 | `image_topic` | 空 | 录制的图像话题；留空按模式取 `/umi_camera/image_raw`、`…/compressed` 或 `…/ffmpeg`，显式给出的话题优先。启动本地相机时命名空间由它推导。 |
 | `decoded_image_topic` | `/umi_camera/image_decoded` | 编码模式下在线解码后的原始图像话题，夹爪估计和 RViz2 订阅它。 |
 | `image_reliability` / `image_qos_depth` | `best_effort` / `30` | 图像订阅 QoS；默认兼容当前相机发布端。 |
@@ -78,8 +90,8 @@ export FASTRTPS_DEFAULT_PROFILES_FILE=$(ros2 pkg prefix fastumi_data)/share/fast
 
 | `image_mode` | 消息类型 | 默认话题 |
 | --- | --- | --- |
-| `raw`（默认） | `sensor_msgs/msg/Image` | `/umi_camera/image_raw` |
-| `compressed` | `sensor_msgs/msg/CompressedImage`（JPEG/PNG） | `/umi_camera/image_raw/compressed` |
+| `raw` | `sensor_msgs/msg/Image` | `/umi_camera/image_raw` |
+| `compressed`（本地相机默认） | `sensor_msgs/msg/CompressedImage`（JPEG/PNG） | `/umi_camera/image_raw/compressed` |
 | `h264` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | `/umi_camera/image_raw/ffmpeg` |
 
 H.264 只支持**无 B 帧、每包一个访问单元的 Annex B 码流**，关键帧须在包内携带 SPS/PPS。
@@ -112,13 +124,50 @@ ros2 launch fastumi_data fastumi_collection.launch.py image_mode:=h264 \
   因此 JPEG/PNG 使用 QoS 可配置的 `ros2 run fastumi_data image_decoder`。
 * **离线转换与标定**：采集快照 `processing.yaml` 记录 `image_mode` 和图像话题，`convert_mcap` 据此解码并校验
   MCAP 话题类型；不一致、损坏数据、B 帧或 episode 内出现无法解码的前缀都会报告原因并失败。H.264 解码状态跨越
-  episode，参考包持续输入，解码后才筛选 episode；首个关键帧之前的启动前缀被跳过并计入输出摘要
-  （`image_packets_skipped_before_keyframe`）。标定命令加 `--image-mode compressed|h264`（默认 `raw`）：
+  episode，参考包持续输入，解码后才筛选 episode；首个关键帧之前的启动前缀被跳过并计入记录报告
+  （`skipped_before_keyframe`）。标定命令加 `--image-mode compressed|h264`（默认 `raw`）：
 
 ```bash
 ros2 run fastumi_data calibrate_tracker_camera --bag … --image-mode h264 …
 ros2 run fastumi_data calibrate_aruco_tcp <bag> --image-mode h264 …
 ```
+
+### 30 Hz 采集与时间戳
+
+**帧率与资源**：相机、HDF5/Zarr 和 DP 策略统一为 30 Hz。当前设备 1920×1080 MJPG 枚举档位为
+`90/30/20/10/5` Hz，采集入口显式请求 30 Hz。下表来自 2026-10-12 六份约 30 Hz 录制的整包增长速率，
+场景各不相同，只作容量预算参考，不是同场景画质或压缩率基准：
+
+| 模式 | 现有 MCAP 增长 | 约每小时 | 路径特点 |
+|---|---:|---:|---|
+| raw | 116.65–118.16 MB/s | 420–425 GB | JPEG 解码、6.2 MB/帧大图传输与序列化，再 zstd 压缩 |
+| JPEG（推荐） | 7.18–7.24 MB/s | 约 26 GB | 相机 JPEG 直接录制，各帧可独立解码 |
+| H.264 | 0.169–0.196 MB/s | 需按码率与内容实测 | 本地 MJPEG→libx264 软件转码，再次有损压缩 |
+
+1080p 三通道 30 Hz 未压缩像素量为 186.624 MB/s（约 0.672 TB/小时），这是消息载荷和压缩前处理量，
+不等同于磁盘写入带宽。JPEG 模式下夹爪估计和 RViz2 订阅在线解码后的 30 Hz raw 话题（`image_decoder`
+保留源 Header），MCAP 只录 JPEG。
+
+**图像时间戳**：本地相机默认（`camera_timestamp_mode:=v4l2_buffer`）取出队缓冲区的
+`v4l2_buffer.timestamp`（`CLOCK_MONOTONIC`，驱动标记 SOE/EOF），经成对采样建立的映射
+`t_ros = t_mono + offset` 转为 ROS 时间；raw、JPEG、H.264 与在线解码沿用同一时间，不重新打时间戳。
+SOE 只是驱动声明的语义，**不证明是真实曝光开始的硬件时间**（本机 uvcvideo `clock=CLOCK_MONOTONIC`、
+`hwtimestamps=0`，即主机在开始接收新帧时打时间戳）；曝光对齐偏移须标定。缓冲区未声明单调时钟或时间戳为 0
+时相机节点报错退出，不静默回退；本地采集要求 `use_sim_time=false`。相机节点每秒重新采样映射：
+偏移变化 ≤2 ms 时跟随（NTP 校正），超过视为系统时间跳变，重建映射并递增代号。
+
+每帧另在 `/umi_camera/image_raw/time_reference` 发布 `sensor_msgs/TimeReference`（`time_ref` 为原始
+V4L2 时间，`source` 为 `mode;clock;tsrc;seq;recv_ns;pub_ns;gen;offset_ns;unc_ns;exp_prio` 键值），
+`collection_node` 将其录入 MCAP，区分驱动源时间与回调/发布延迟；**采集中映射代号变化时当前采集进入
+`error`（`CLOCK_MAPPING_RESET`）**，须在新映射下重新开始。采样次数、误差门限（默认 200 µs）和跳变门限
+（默认 2 ms）可在相机节点参数中调整，须在目标机器实测确认。
+
+**曝光优先**：当前设备读取 `exposure_auto_priority` 返回 EIO，状态记为 `read_error(value=unknown)`，
+不会把失败后的伪值 0 当作已关闭。方案按“无法可靠关闭”执行：采集与部署须统一稳定、充足的照明，
+在目标光照下完成帧率预检和持续监控。
+
+**旧记录**：本次改动前的录制图像 Header 都是回调 `now()`，`session.yaml` 没有 `timestamp_source`，
+转换时视为 `callback_now`。旧 MCAP 无法恢复未记录的 V4L2 时间戳。
 
 ### 生命周期与服务
 
@@ -177,8 +226,10 @@ dataset/
     └── calibration_snapshot/         实际处理配置、外参（若提供）及内参/夹爪标定快照
 ```
 
-未提供外参时清单记为 `uncalibrated`；转换为 HDF5 时仍需向 `convert_mcap --extrinsic`
-提供通过验收的外参。清理只处理带有效归属标记的暂存目录，已保存记录不会被误删。
+`session.yaml` 的 `image` 段另记录 `nominal_source_fps`（采集入口确认的标称源帧率，外部相机未声明时为
+`null`）、`nominal_source_fps_source`（`camera_launch`/`external_declared`/`unknown`）和
+`timestamp_source`；本地相机还录制 `…/image_raw/time_reference`。清理只处理带有效归属标记的暂存目录，
+已保存记录不会被误删。
 
 ### 健康监控
 
@@ -188,6 +239,13 @@ dataset/
 Tracker 按最近源时间戳在 30 ms 窗口内配对，无匹配时显示不可用。面板分别显示源时间差、
 消息年龄、配对到达时间差和频率；到达时间差包含传输与排队，不是纯算法耗时。采集中出现
 断流、无效、乱序、疑似丢帧、无匹配或夹爪滞后时继续记录，同时报警并写入 `quality.yaml`。
+
+**绝对频率**：开始前须积累完整 2 s 窗口，编码图像和**有效**夹爪状态各自的源时间戳速率与接收速率都达到
+期望频率的 95%（默认 30 Hz → ≥28.5 Hz），否则以 `*_RATE_WINDOW_INCOMPLETE` / `*_LOW_RATE` 阻止开始；
+它补充相邻间隔检查，使稳定低帧率不会被误判为健康。录制中连续低于门限 2 s 报 `IMAGE_LOW_RATE` /
+`GRIPPER_LOW_RATE`，连续达标 2 s 后清除当前告警，历史告警保留在 `quality.yaml`，MCAP 继续保存供诊断，
+不会被静默标为质量通过。`quality.yaml` 分别记录 `source_rate_hz` 与 `receive_rate_hz`，用于区分相机降频
+和传输/处理积压。启动检查不能保证后续光照变化不影响采集。
 
 ### 验证与未覆盖项
 
@@ -221,6 +279,121 @@ SIGINT/SIGKILL 重启清理）。
 真实外参下的 HDF5 位姿；设备运动时的时间指标；RViz2 默认布局中“UMI 视频”停靠面板初始为折叠状态，
 需要手动拖开一次（图像显示本身正常，面板左侧的 `UMI 视频` 标题栏即是）。
 
+## MCAP→Link7 训练数据（convert_mcap）
+
+`convert_mcap` 手动执行，完成 MCAP→`fastumi_ros2_link7_v1` HDF5→合并
+`fastumi-rm75-link7-v1` Zarr。实施约定与资源评估见
+[`convert_mcap_rm75_plan.md`](convert_mcap_rm75_plan.md)。
+
+```bash
+ros2 run fastumi_data convert_mcap <输入目录> \
+  --output-dir <新输出目录> \
+  --urdf <实际部署使用的URDF> \
+  [--tracker-camera-extrinsic <T_cam_tracker.yaml>] \
+  [--end-camera-extrinsic <T_cam_end.yaml>] \
+  [--tracker-serial <自定义外参缺少绑定时声明的序列号>] \
+  [--source-camera-fps <标称源帧率覆盖值>] \
+  [--config <处理配置>]
+```
+
+- **输入**：单个 bag（目录或 `.mcap`）、单条已保存记录（含 `session.yaml`）或任务目录；任务目录按来源路径稳定
+  排序，跳过 `.staging`、`.trash`。`--urdf`、`--output-dir` 必填，输出目录必须尚不存在。
+- **配置**：按“显式 `--config`、记录 processing 快照、包默认配置”选首个文档。显式配置的 `sample_rate_hz`
+  只接受 30；快照或包默认中的旧值（如 20）覆盖为 30 并写入报告；缺省按 30。非数值、非有限或非正值报错。
+  显式 `require_tracker_status=false` 报错，旧快照的 false 升级为 true。所有调整写入报告。
+- **标称源帧率**：`--source-camera-fps` 优先，否则读快照 `image.nominal_source_fps`；缺失时报错，**不用实测帧率
+  推断**。旧记录须按实际采集配置声明（2026-10-12 的六份记录为 30）。30 Hz ±1%（含 29.97）走同频逐帧路径，
+  ≥60 Hz 走高帧率抽帧路径，其他值在转换前报错。
+- **外参与设备身份**：缺省使用安装到包 share 的 `T_cam_tracker.yaml`、`T_cam_end.yaml`（源文件在仓库
+  `config/calibration/`）。Tracker 外参必须有身份：文件内 `tracker_serial` 和/或同目录
+  `<名>.binding.yaml`（保存 `tracker_serial`、原始外参字节 `calibration_sha256`、来源记录 UUID、状态话题、
+  时间偏移语义、时间标定状态与标定时间戳来源）。默认绑定为 **`LHR-B77A06A7`**。缺少身份时须用
+  `--tracker-serial` 声明（记为用户声明），该参数不能覆盖既有绑定。图像解码前，预检所有来源记录选定状态话题：
+  非空、序列号非空、唯一且等于绑定，否则整批中止，不能靠关闭状态检查绕过。
+- **时间戳来源一致性**：绑定的 `time_calibration_timestamp_source` 必须与记录的图像时间戳来源一致，否则在输出前
+  报错。默认外参的偏移来自回调 `now()` 链路（旧记录视为 `callback_now`）；**新 V4L2 缓冲区时间戳链路的记录必须
+  先在该链路下重新标定时间偏移**。实测回调时刻比 V4L2 缓冲区时间平均晚约 33.2 ms，与旧偏移 32.364 ms 量级相同，
+  混用会引入约一帧的系统误差。
+
+### 几何与同步
+
+`T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7`，两份外参的 `cam0.T_cam_hand`
+分别为 `T_Cu_Tracker`、`T_Cd_Link7`，再以裁剪后首帧归一化为 episode 起始 Link7 相对位姿。默认外参记录
+`t_camera = t_tracker + offset`（+32.364 ms），Tracker 查询时间为 `t_image − 32.364 ms`，标记 `provisional`。
+
+- **同频逐帧**：裁剪后的每张图像依次输出，源索引连续，不用固定 `1/30` 网格匹配（相机实际约 30.06 Hz，固定网格
+  7–8 s 后就会误跳帧）。相邻间隔 `m = round(Δt·f)`：`m=1` 且偏差 ≤8 ms 为正常；`m≥2` 且在容差内记 `FRAME_DROP`
+  提示、保留 episode；其余（含重复或倒退时间戳）记 `FRAME_INTERVAL_ANOMALY` 并拒绝。最小二乘拟合帧率偏差超过
+  0.5% 拒绝。
+- **高帧率抽帧**：从首帧起生成精确 30 Hz 纳秒网格（间隔 33,333,333/33,333,334 ns），每点取最近源图像（等距取
+  较早），匹配误差上限 `0.5/f + 2 ms`（90 Hz 约 7.556 ms），零复用。
+- 两条路径都要求原 episode 范围内有效源帧率 ≥ 标称值 95%。位姿在 `t_image − offset` 插值（位置线性、旋转
+  SLERP，跟踪状态同时刻检查），夹爪在 `t_image` 插值。首尾缺少插值支撑可裁剪；内部同步缺口或跟踪异常拒绝
+  整条 episode；最终至少 16 帧。`data/timestamp` 是名义时间（同频路径 `n/30`，丢帧处跳 `m/30`），实际图像时间
+  另存；按 +0.2% 速率偏差，35 s 名义与实际约差 70 ms，报告记录该累积量。
+
+### 输出
+
+```text
+<输出目录>/
+├── manifest.json                     参数、外参与 URDF 摘要、逐来源结果、Zarr 摘要、状态
+├── snapshots/calibration/            两份外参与绑定清单快照
+├── snapshots/urdf/<名>.urdf          URDF 快照（摘要与 Zarr 根属性一致）
+├── records/<任务>/<记录>/
+│   ├── episodes/episode_XXXX.hdf5    fastumi_ros2_link7_v1，逐条原子发布
+│   ├── reports/episode_XXXX.json     接受或拒绝原因、质量统计、丢帧、名义—实际累积差
+│   └── record_report.json            配置来源与调整、身份预检、解码统计
+└── dataset.zarr                      fastumi-rm75-link7-v1，全部写入并回读验收后才发布
+```
+
+- **HDF5**：原分辨率 RGB、`qpos`/`action`（`[xyz, quaternion_xyzw, gripper]`，同一示教轨迹在图像时刻的值）、
+  名义时间、实际图像时间、源索引、`dropped_frames_before`、质量数组（高帧率路径另有匹配误差与复用标记），
+  根属性含选帧路径、标称/实测/拟合帧率、外参与绑定摘要、期望与实测 Tracker 序列号、时间偏移及来源、
+  `time_calibration_status` 和 URDF 摘要。
+- **Zarr**：224×224 letterbox RGB（与部署 `letterbox_rgb` 相同，JPEG XL `lossless=True, effort=3,
+  numthreads=1`，逐帧回读确认无损）、末端位置、旋转向量、夹爪、起始位姿、7D 动作、`meta/episode_names`
+  （`<任务>/<记录>/episode_XXXX`）、`data/timestamp`、`source_image_index`、`dropped_frames_before`、
+  `image_timestamp_ns`、`nominal_timestamp_ns`；根属性写入计划第 4 节契约（`frequency: 30`、
+  `pose_frame: episode_start_link7`、`normalization_contract: fixed-gripper-0-1-v1`、`urdf_sha256` 等），
+  `episode_metadata` 逐条保留来源、帧率、身份、外参摘要和时间标定状态；根 `time_calibration_status`
+  仅在全部来源 verified 时为 verified，`complete=true` 不表示时间标定已验证。
+- **失败行为**：质量拒绝跳过并写报告；损坏文件、标定或身份错误、导出异常中止并返回非零，保留诊断产物；
+  零条有效 episode 返回失败；只有一条时成功但提示当前训练默认验证划分至少需要两条。转换按 episode 把解码帧
+  暂存到磁盘，内存不随 episode 长度增长。
+
+### 校验与训练
+
+```bash
+# 仓库根目录
+.venv/bin/python datatool/validate_dp_dataset.py --input <输出目录>/dataset.zarr --type rm75_umi
+# 单条 episode 用 --val-ratio 0
+DATASET_PATH=<输出目录的绝对路径>/dataset.zarr bash model/dp/train_vr_umi.sh
+```
+
+校验器对新格式实际解码 JPEG XL chunk，检查根属性契约、坐标系（存储 `episode_start_link7`、部署
+`base_link`）、夹爪契约与 `[0,1]` 开度、URDF 摘要、名义时间差 `(1+dropped)/30 ±1 ns`、源索引与实际
+时间严格递增、同频路径源索引连续与实际间隔 ±8 ms、拟合帧率与报告一致，以及起始位姿和训练窗口。训练沿用
+`train_diffusion_unet_timm_vr_umi_workspace.yaml`（`task.contract.frequency_hz=30`），workspace 启动时要求
+新格式 Zarr 的 `frequency` 与之一致，夹爪观测与动作固定使用 `[0,1]` 输入边界（与 v2 checkpoint 相同缩放），
+checkpoint 写入 30 Hz 契约和真实 URDF 摘要。
+
+### 本轮验证（2026-10-13）
+
+- 六份真实录制（raw、JPEG、H.264 各两份，`--source-camera-fps 30`）批量转换：6 个 episode 全部接受、
+  5853 帧，零丢帧、零间隔异常；`tag_jpeg_1` 拟合 30.0616 Hz（+0.205%），相邻间隔 31.9–36.1 ms，35 s
+  名义—实际累积差 70.9 ms。单进程用时约 9 分 20 秒（约 10 帧/s，主要耗在原分辨率 RGB 的 HDF5 gzip 写入），峰值常驻内存约 270 MB。校验器默认划分通过（训练 4685、验证 1078 窗口）。
+- `train_vr_umi.sh` 单进程、batch 8、1 epoch 短训练：损失 1.21→0.08 有限，val_loss 0.115；checkpoint
+  重新加载后 `frequency_hz=30`、`urdf_sha256` 与 Zarr 和 URDF 文件一致，夹爪 normalizer 为固定 `[0,1]`。
+- 当前相机 1080p30 JPEG 冒烟（12 s）：Header 与 V4L2 缓冲区时间映射逐帧一致（误差界约 40 ns，无跳变），
+  Header 速率 30.059 Hz、间隔 31.6–36.0 ms；回调比缓冲区时间晚 31.7–36.2 ms（均值 33.2 ms），订阅端到达
+  比 Header 晚均值 33.9 ms；时间戳来源 `v4l2_buffer_monotonic_soe_mapped_to_ros`。H.264 路径同样使用缓冲区
+  时间，接收器 `output_every_n_frames=2` 时全部 30 包/s 解码、按源时间发布 15 帧/s。
+
+**仍未完成或不能据此宣称**：新时间戳链路下的时间偏移重新标定与真实运动验收（当前数据与由其训练的模型均为
+`provisional`，只用于流程验证）；含 Tracker、夹爪和预览的 5 分钟 30 Hz 完整采集资源验收（CPU、内存、写盘、
+排空时间）；图像—Tracker 残差；曝光优先关闭写入及光照变化测试；两台相机成像差异比较；部署 dry-run（历史
+目标 `1/30` s、15 ms 容差下的放弃比例等）作为独立任务。
+
 ## 连续录制（record_session）
 
 最短流程：
@@ -246,11 +419,10 @@ ros2 run fastumi_data episode_command start
 ros2 run fastumi_data episode_command stop
 ros2 run fastumi_data episode_command abort
 
-# 4. 离线转换
-ros2 run fastumi_data convert_mcap \
-  dataset/pick_place/<session>/raw/bag \
-  --extrinsic dataset/pick_place/<session>/calibration_snapshot/tracker_to_tcp.yaml \
-  --config dataset/pick_place/<session>/calibration_snapshot/processing.yaml
+# 4. 离线转换为 30 Hz Link7 训练数据（连续录制的快照没有标称源帧率，须显式声明）
+ros2 run fastumi_data convert_mcap dataset/pick_place/<session>/raw/bag \
+  --output-dir /data/converted/pick_place_link7 \
+  --urdf /path/to/rm_75.urdf --source-camera-fps 30
 ```
 
 连续录制同样支持压缩图像：`record_session` 增加 `--image-mode`、`--image-topic`、
@@ -266,8 +438,8 @@ ros2 run fastumi_data record_session --task pick_place --extrinsic … \
   --image-mode h264 --image-topic /wrist_camera/image_raw/ffmpeg
 ```
 
-默认输出为 session 下的 `episodes/` 和 `reports/`。同步门限位于
-`config/processing.yaml`。完整流程、数据结构和验收步骤见仓库
+旧的 TCP 格式（`fastumi_ros2_v2`，按处理配置采样率）仍保留为 `McapEpisodeConverter` 库接口，
+命令行不再提供 `--extrinsic` 用法。完整流程、数据结构和验收步骤见仓库
 `docs/ros2_fastumi_pipeline.md`。
 
 ## 回放补标 episode

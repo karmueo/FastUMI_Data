@@ -5,11 +5,17 @@
 按需启动。采集由 ``/fastumi/collection`` 服务或 RViz2 面板开始，不再随
 launch 自动录包。
 
-``image_mode`` 选择相机输出：``raw``（默认）、``compressed``（JPEG/PNG）或
-``h264``（无 B 帧）。MCAP 始终保存编码话题；夹爪估计和 RViz2 订阅原始图像，
-编码模式下由在线解码节点发布到 ``decoded_image_topic``。
+``image_mode`` 选择相机输出：``auto``（默认）、``raw``、``compressed``（JPEG/PNG）
+或 ``h264``（无 B 帧）。``auto`` 启动本地相机时使用 compressed（相机 JPEG 原样录制），
+连接外部相机时按实际消息类型订阅。MCAP 始终保存编码话题；夹爪估计和 RViz2 订阅
+原始图像，编码模式下由在线解码节点发布到 ``decoded_image_topic``。
+
+``camera_fps``（默认 30）透传给本地相机，并作为标称源帧率写入采集快照；外部相机
+的帧率由发布端设置，需用 ``external_camera_fps`` 声明其标称值。在线解码默认处理
+全部帧（``decode_every_n_frames=1``），夹爪期望频率按 ``camera_fps / N`` 计算。
 """
 
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -65,6 +71,15 @@ H264_TOPIC_SUFFIX = "/ffmpeg"
 MODE_AUTO = "auto"
 # 自动检测时等待发布端出现的默认秒数。
 DEFAULT_PROBE_TIMEOUT_S = 5.0
+# 本地相机默认请求的帧率（Hz）；采集、在线解码和离线数据均为 30 Hz。
+DEFAULT_CAMERA_FPS = 30
+# 本地 USB 相机节点给图像 Header 打时间戳的方式，写入采集快照。
+LOCAL_CAMERA_TIMESTAMP_SOURCE = "v4l2_buffer_monotonic_mapped_to_ros"
+# 本地相机每帧时间诊断（sensor_msgs/TimeReference）相对图像基础话题的后缀。
+TIME_REFERENCE_SUFFIX = "/image_raw/time_reference"
+# 相机时间戳模式与曝光优先控制的合法取值。
+CAMERA_TIMESTAMP_MODES = ("v4l2_buffer", "callback_now")
+EXPOSURE_PRIORITY_CHOICES = ("leave", "disable")
 # 在线 H.264 解码后端，由 usb_camera_receiver 实现。
 DECODER_BACKENDS = ("transport", "cuda", "auto")
 # 包内 collection.rviz 中 UMI 视频显示默认订阅的话题。
@@ -92,6 +107,32 @@ def _flag(context: LaunchContext, name: str) -> bool:
 def _text(context: LaunchContext, name: str) -> str:
     """读取字符串启动参数并去除首尾空白。"""
     return LaunchConfiguration(name).perform(context).strip()
+
+
+def _positive_int(context: LaunchContext, name: str) -> int:
+    """读取正整数启动参数。"""
+    text = _text(context, name)
+    try:
+        value = int(text, 10)
+    except ValueError as error:
+        raise ValueError(f"{name} 必须是正整数，当前为 {text!r}") from error
+    if value <= 0:
+        raise ValueError(f"{name} 必须是正整数，当前为 {value}")
+    return value
+
+
+def _optional_positive_float(context: LaunchContext, name: str) -> float:
+    """读取可留空的正有限数参数；留空返回 0。"""
+    text = _text(context, name)
+    if not text:
+        return 0.0
+    try:
+        value = float(text)
+    except ValueError as error:
+        raise ValueError(f"{name} 必须是正数，当前为 {text!r}") from error
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} 必须是有限正数，当前为 {text!r}")
+    return value
 
 
 def _probe_image_source(
@@ -139,15 +180,15 @@ def _resolve_image_source(
 ) -> Tuple[str, str]:
     """确定实际的图像模式和话题。
 
-    ``auto`` 且启动本地相机时使用 raw；连接已有设备时按发布端的消息类型订阅，
-    探测不到发布端则退回话题后缀或 raw 默认值并给出提示。
+    ``auto`` 且启动本地相机时使用 compressed（相机 JPEG 原样录制）；连接已有设备
+    时按发布端的消息类型订阅，探测不到发布端则退回话题后缀或 raw 默认值并给出提示。
     """
     mode = requested_mode.strip().lower()
     if mode != MODE_AUTO:
         mode = validate_image_mode(mode)
         return mode, resolve_image_topic(mode, requested_topic)
     if start_camera:
-        return MODE_RAW, resolve_image_topic(MODE_RAW, requested_topic)
+        return MODE_COMPRESSED, resolve_image_topic(MODE_COMPRESSED, requested_topic)
     found = _probe_image_source(requested_topic, timeout_s)
     if found is not None:
         print(f"[fastumi_collection] 检测到图像话题 {found[1]}，模式 {found[0]}")
@@ -273,6 +314,7 @@ def _decoder_node(
     image_reliability: str,
     image_qos_depth: int,
     decoder_backend: str,
+    decode_every_n_frames: int = 1,
 ) -> Node:
     """创建在线解码节点：JPEG/PNG 用可配置 QoS 的解码节点，H.264 用 C++ 接收器。
 
@@ -292,6 +334,7 @@ def _decoder_node(
                     "output_topic": decoded_image_topic,
                     "image_reliability": image_reliability,
                     "image_qos_depth": image_qos_depth,
+                    "decode_every_n_frames": decode_every_n_frames,
                 }
             ],
         )
@@ -309,6 +352,8 @@ def _decoder_node(
                 "output_queue_depth": 5,
                 "input_reliability": image_reliability,
                 "input_queue_depth": image_qos_depth,
+                # 全部访问单元都送入解码器，只按解码后帧序号降频发布。
+                "output_every_n_frames": decode_every_n_frames,
                 # 软件解码，避免 cuvid 解码帧的 PTS 无法匹配 Jetson 流。
                 f"{_transport_prefix(base_topic)}decoders.h264": "h264",
             }
@@ -333,6 +378,21 @@ def _launch_setup(context: LaunchContext) -> list:
     image_reliability = validate_image_reliability(_text(context, "image_reliability"))
     image_qos_depth = validate_image_qos_depth(int(_text(context, "image_qos_depth")))
     h264_start_timeout_s = float(_text(context, "h264_start_timeout_s"))
+    camera_fps = _positive_int(context, "camera_fps")
+    external_camera_fps = _optional_positive_float(context, "external_camera_fps")
+    decode_every_n_frames = _positive_int(context, "decode_every_n_frames")
+    camera_timestamp_mode = _text(context, "camera_timestamp_mode")
+    if camera_timestamp_mode not in CAMERA_TIMESTAMP_MODES:
+        raise ValueError(
+            f"camera_timestamp_mode 必须是 {'、'.join(CAMERA_TIMESTAMP_MODES)} 之一，"
+            f"当前为 {camera_timestamp_mode!r}"
+        )
+    exposure_auto_priority = _text(context, "exposure_auto_priority")
+    if exposure_auto_priority not in EXPOSURE_PRIORITY_CHOICES:
+        raise ValueError(
+            f"exposure_auto_priority 必须是 {'、'.join(EXPOSURE_PRIORITY_CHOICES)} 之一，"
+            f"当前为 {exposure_auto_priority!r}"
+        )
     decoder_backend = _text(context, "decoder_backend")
     if decoder_backend not in DECODER_BACKENDS:
         raise ValueError(
@@ -361,7 +421,12 @@ def _launch_setup(context: LaunchContext) -> list:
         # 本地相机三种输出对应现有节点：raw、仅 JPEG、软件 H.264；连接 Jetson 等
         # 外部发布的话题时不启动本地相机，直接给出对应的 image_mode 与话题。
         namespace = _camera_namespace(image_topic, image_mode)
-        camera_arguments = {"namespace": namespace}
+        camera_arguments = {
+            "namespace": namespace,
+            "fps": str(camera_fps),
+            "timestamp_mode": camera_timestamp_mode,
+            "exposure_auto_priority": exposure_auto_priority,
+        }
         if video_device:
             camera_arguments["video_device"] = video_device
         if image_mode == MODE_COMPRESSED:
@@ -443,11 +508,45 @@ def _launch_setup(context: LaunchContext) -> list:
                 image_reliability,
                 image_qos_depth,
                 decoder_backend,
+                decode_every_n_frames,
             )
         )
 
+    # 标称源帧率：本地相机为确认透传的 camera_fps；外部相机须显式声明，不用采集
+    # 入口的默认值冒充设备实际配置。
+    if start_camera:
+        nominal_fps, nominal_source = float(camera_fps), "camera_launch"
+    elif external_camera_fps > 0.0:
+        nominal_fps, nominal_source = external_camera_fps, "external_declared"
+    else:
+        nominal_fps, nominal_source = 0.0, "unknown"
+        print(
+            "[fastumi_collection] 外部相机未声明 external_camera_fps，采集快照的标称源帧率"
+            "记为未知；离线转换时需用 --source-camera-fps 声明"
+        )
+    # 编码模式的夹爪估计订阅解码话题，期望频率随在线降频按 N 降低。
+    gripper_rate = nominal_fps if image_mode == MODE_RAW else nominal_fps / decode_every_n_frames
     parameters: dict = {
         "dataset_root": _text(context, "dataset_root"),
+        "nominal_source_fps": nominal_fps,
+        "nominal_source_fps_source": nominal_source,
+        "expected_image_rate_hz": nominal_fps,
+        "expected_gripper_rate_hz": gripper_rate,
+        "image_timestamp_source": (
+            (
+                LOCAL_CAMERA_TIMESTAMP_SOURCE
+                if camera_timestamp_mode == "v4l2_buffer"
+                else "callback_now"
+            )
+            if start_camera
+            else "external_publisher"
+        ),
+        # 本地相机录制每帧时间诊断，并在时钟映射重建时让当前采集失败。
+        "image_timing_topic": (
+            f"/{_camera_namespace(image_topic, image_mode)}{TIME_REFERENCE_SUFFIX}"
+            if start_camera
+            else ""
+        ),
         "image_mode": image_mode,
         "image_topic": image_topic,
         "decoded_image_topic": decoded_image_topic,
@@ -516,11 +615,54 @@ def generate_launch_description() -> LaunchDescription:
             description="数据集根目录；内含 <task>/<UTC>_<UUID>、.staging 和 .trash。",
         ),
         DeclareLaunchArgument(
+            "camera_fps",
+            default_value=str(DEFAULT_CAMERA_FPS),
+            description=(
+                "本地相机请求帧率（正整数，默认 30），透传给相机子 launch 的 fps，"
+                "设备无法达到时明确报错；同时作为标称源帧率写入采集快照。"
+                "对 raw、JPEG、H.264 三种输出均生效；调整需重启相机节点。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "external_camera_fps",
+            default_value="",
+            description=(
+                "start_camera:=false 时外部相机的标称帧率（如 30、29.97）；留空记为未知，"
+                "此时不检查图像绝对速率，离线转换需显式声明。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "camera_timestamp_mode",
+            default_value="v4l2_buffer",
+            choices=list(CAMERA_TIMESTAMP_MODES),
+            description=(
+                "本地相机 Header 时间：v4l2_buffer（默认）把 V4L2 缓冲区单调时间映射到 ROS 时间；"
+                "callback_now 为兼容模式，在回调中读取 ROS 时间，来源写入快照。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "exposure_auto_priority",
+            default_value="leave",
+            choices=list(EXPOSURE_PRIORITY_CHOICES),
+            description=(
+                "V4L2 曝光优先控制：leave（默认）只读取并记录；disable 写 0 并读回确认，"
+                "失败如实记录、不放宽帧率门限。当前设备无法可靠关闭，须统一稳定照明。"
+            ),
+        ),
+        DeclareLaunchArgument(
+            "decode_every_n_frames",
+            default_value="1",
+            description=(
+                "在线解码降负载：每 N 帧解码发布一帧（默认 1 即全部 30 Hz）。只影响夹爪估计"
+                "和预览；MCAP 仍录制完整编码流，H.264 所有包仍送入解码器。"
+            ),
+        ),
+        DeclareLaunchArgument(
             "image_mode",
             default_value=MODE_AUTO,
             choices=[MODE_AUTO, *IMAGE_MODES],
             description=(
-                "相机输出：auto（默认）按发布端实际消息类型订阅，启动本地相机时为 raw；"
+                "相机输出：auto（默认）按发布端实际消息类型订阅，启动本地相机时为 compressed；"
                 "raw（sensor_msgs/Image）、compressed（JPEG/PNG 的 CompressedImage）"
                 "或 h264（无 B 帧的 FFMPEGPacket）可显式指定。MCAP 原样保存收到的消息。"
             ),

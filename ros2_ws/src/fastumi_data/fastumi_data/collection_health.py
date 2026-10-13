@@ -1,7 +1,10 @@
 """评估图像、Tracker 和夹爪三路输入的新鲜度、有效性、匹配与时间指标。
 
 新鲜度只依赖单调接收时钟，不依赖位姿是否变化，因此静止但持续发布的
-Tracker 仍然健康。图像与夹爪按完全相同的源时间戳配对，Tracker 按最近源
+Tracker 仍然健康。图像和有效夹爪状态另按完整的 ``rate_window_s`` 窗口分别计算
+源时间戳速率和接收速率，两者都须达到期望频率的 ``min_rate_ratio``：开始前窗口
+不足或未达标时阻止开始；录制中连续低于门限 ``low_rate_persist_s`` 时报警
+``IMAGE_LOW_RATE``/``GRIPPER_LOW_RATE``，连续达标同样时长后清除。图像与夹爪按完全相同的源时间戳配对，Tracker 按最近源
 时间戳在窗口内配对。到达时间差反映消息先后到达采集节点的间隔，包含传输
 与排队，不应被解释为纯算法耗时。
 """
@@ -29,7 +32,7 @@ TRACKING_RUNNING_OK = 3
 TRACKING_UNKNOWN = 255
 # 乱序报警在最近一次乱序之后保持的秒数。
 OUT_OF_ORDER_HOLD_S = 2.0
-# 每路保留的最近样本数量，需覆盖 100 Hz Tracker 的匹配窗口。
+# 每路最少保留的样本数量，用于匹配；高帧率或长窗口额外保留完整频率窗口。
 HISTORY_SAMPLES = 256
 # 从最新图像向前尝试配对的图像数量。
 PAIR_LOOKBACK_IMAGES = 8
@@ -55,6 +58,21 @@ class HealthConfig:
     """夹爪最新源时间戳落后最新图像超过该值时报警。"""
     image_mode: str = MODE_RAW
     """图像消息模式；h264 时跟踪关键帧。"""
+    expected_image_rate_hz: float = 0.0
+    """编码图像输入的期望频率；0 表示不检查绝对速率。"""
+    expected_gripper_rate_hz: float = 0.0
+    """有效夹爪状态的期望频率；0 表示不检查绝对速率。"""
+    min_rate_ratio: float = 0.95
+    """源时间戳速率与接收速率相对期望频率的下限比例。"""
+    low_rate_persist_s: float = 2.0
+    """低频报警的触发与清除都要求条件连续保持的秒数。"""
+
+    def expected_rate_hz(self, stream: str) -> float:
+        """返回需检查绝对速率的输入的期望频率，其余为 0。"""
+        return {
+            IMAGE: self.expected_image_rate_hz,
+            GRIPPER: self.expected_gripper_rate_hz,
+        }.get(stream, 0.0)
 
     def timeout_s(self, stream: str) -> float:
         """返回指定输入的新鲜度超时。"""
@@ -96,6 +114,16 @@ class StreamHealth:
     """仅 h264 图像流：尚未收到含 SPS/PPS 的 IDR 关键帧，无法开始解码。"""
     keyframes: int = 0
     """仅 h264 图像流：已收到的关键帧数量。"""
+    source_rate_hz: float = math.nan
+    """完整窗口内有效样本的源时间戳速率 ``(N−1)/(t_last − t_first)``。"""
+    receive_rate_hz: float = math.nan
+    """完整窗口内有效样本的接收速率（个数 / 窗口秒数）。"""
+    rate_window_complete: bool = False
+    """是否已积累完整频率窗口。"""
+    expected_rate_hz: float = 0.0
+    """期望频率；0 表示该路不检查绝对速率。"""
+    below_rate: bool = False
+    """当前窗口的源或接收速率低于期望频率的门限。"""
 
 
 @dataclass(frozen=True)
@@ -123,15 +151,18 @@ class _Sample:
 
     source_ns: int
     recv_ns: int
+    valid: bool = True
 
 
 @dataclass
 class _StreamState:
     """单路输入的累积状态。"""
 
-    samples: Deque[_Sample] = field(
-        default_factory=lambda: deque(maxlen=HISTORY_SAMPLES)
-    )
+    samples: Deque[_Sample] = field(default_factory=deque)
+    # 按接收时间保留的频率窗口长度，与样本数量下限共同限制历史淘汰。
+    history_window_ns: int = 2_000_000_000
+    # 首条消息的单调接收时间，独立于可淘汰的匹配历史；0 是合法时刻。
+    first_receive_ns: Optional[int] = None
     received: int = 0
     out_of_order: int = 0
     last_out_of_order_ns: Optional[int] = None
@@ -141,7 +172,7 @@ class _StreamState:
     valid: bool = False
     detail: str = "尚未收到数据"
 
-    def observe(self, source_ns: int, recv_ns: int) -> None:
+    def observe(self, source_ns: int, recv_ns: int, valid: bool = True) -> None:
         """记录一条消息并检测源时间戳回退。"""
         if self.samples and source_ns < self.samples[-1].source_ns:
             self.out_of_order += 1
@@ -158,7 +189,16 @@ class _StreamState:
                         interval = 0
                 if interval > 0:
                     self.intervals.append(interval)
-        self.samples.append(_Sample(source_ns, recv_ns))
+        self.samples.append(_Sample(source_ns, recv_ns, bool(valid)))
+        if self.first_receive_ns is None:
+            self.first_receive_ns = recv_ns
+        # 当前消息对应的频率窗口起点；匹配所需的最小历史仍保留。
+        cutoff_ns = recv_ns - self.history_window_ns
+        while (
+            len(self.samples) > HISTORY_SAMPLES
+            and self.samples[0].recv_ns <= cutoff_ns
+        ):
+            self.samples.popleft()
         self.received += 1
 
 
@@ -186,6 +226,22 @@ def preflight_issues(
             issues.append(
                 PreflightIssue(f"{name.upper()}_INVALID", f"{label}数据无效: {stream.detail}")
             )
+        elif stream.expected_rate_hz > 0.0 and not stream.rate_window_complete:
+            issues.append(
+                PreflightIssue(
+                    f"{name.upper()}_RATE_WINDOW_INCOMPLETE",
+                    f"{label}正在积累 {config.rate_window_s:g} s 频率窗口",
+                )
+            )
+        elif stream.below_rate:
+            threshold = config.min_rate_ratio * stream.expected_rate_hz
+            issues.append(
+                PreflightIssue(
+                    f"{name.upper()}_LOW_RATE",
+                    f"{label}源时间戳速率 {stream.source_rate_hz:.2f} Hz、接收速率 "
+                    f"{stream.receive_rate_hz:.2f} Hz，低于 {threshold:.2f} Hz",
+                )
+            )
     return issues
 
 
@@ -209,7 +265,8 @@ class CollectionHealthMonitor:
         self._mono_ns = mono_clock_ns
         self._wall_ns = wall_clock_ns
         self._streams: Dict[str, _StreamState] = {
-            name: _StreamState() for name in STREAMS
+            name: _StreamState(history_window_ns=int(config.rate_window_s * 1e9))
+            for name in STREAMS
         }
         self._tracker_status_ns: Optional[int] = None
         self._tracker_status_ok = False
@@ -218,6 +275,10 @@ class CollectionHealthMonitor:
         self._gripper_percent = math.nan
         self._image_format = ""
         self._keyframes = 0
+        # 低频报警状态机：条件开始成立/恢复的单调时间及当前是否报警。
+        self._low_since: Dict[str, Optional[int]] = {name: None for name in STREAMS}
+        self._ok_since: Dict[str, Optional[int]] = {name: None for name in STREAMS}
+        self._low_alarm: Dict[str, bool] = {name: False for name in STREAMS}
 
     @property
     def config(self) -> HealthConfig:
@@ -239,7 +300,7 @@ class CollectionHealthMonitor:
             keyframe: h264 包含 SPS/PPS 和 IDR，可作为解码起点。
         """
         state = self._streams[IMAGE]
-        state.observe(source_ns, self._mono_ns())
+        state.observe(source_ns, self._mono_ns(), valid)
         state.valid = valid
         state.detail = "" if valid else (detail or "图像尺寸或数据长度异常")
         if label:
@@ -288,8 +349,8 @@ class CollectionHealthMonitor:
     ) -> None:
         """记录一条夹爪状态；无效或 NaN 开合度视为内容异常。"""
         state = self._streams[GRIPPER]
-        state.observe(source_ns, self._mono_ns())
         usable = bool(valid) and math.isfinite(openness)
+        state.observe(source_ns, self._mono_ns(), usable)
         state.valid = usable
         state.detail = "" if usable else "夹爪估计无效或开合度为 NaN"
         self._gripper_percent = (
@@ -356,6 +417,47 @@ class CollectionHealthMonitor:
         if len(recent) < 2 or recent[-1] == recent[0]:
             return math.nan
         return (len(recent) - 1) / ((recent[-1] - recent[0]) / 1e9)
+
+    def _window_rates(self, name: str, now_mono: int) -> Tuple[bool, float, float]:
+        """返回 ``(窗口是否完整, 接收速率, 源时间戳速率)``，只统计有效样本。"""
+        window_ns = int(self._config.rate_window_s * 1e9)
+        # 首次接收时刻独立保留，避免历史淘汰后窗口重新变为未满。
+        state = self._streams[name]
+        samples = state.samples
+        complete = (
+            state.first_receive_ns is not None
+            and now_mono - state.first_receive_ns >= window_ns
+        )
+        recent = [
+            sample for sample in samples
+            if sample.valid and now_mono - sample.recv_ns < window_ns
+        ]
+        receive = len(recent) / self._config.rate_window_s if window_ns > 0 else math.nan
+        sources = sorted({sample.source_ns for sample in recent})
+        source = (
+            (len(sources) - 1) / ((sources[-1] - sources[0]) / 1e9)
+            if len(sources) >= 2 and sources[-1] > sources[0]
+            else 0.0
+        )
+        return complete, receive, source
+
+    def _update_low_rate(self, name: str, below: bool, now_mono: int) -> None:
+        """按连续保持时长更新低频报警：触发与清除都需持续 ``low_rate_persist_s``。"""
+        persist_ns = int(self._config.low_rate_persist_s * 1e9)
+        if below:
+            self._ok_since[name] = None
+            if self._low_since[name] is None:
+                self._low_since[name] = now_mono
+            if now_mono - self._low_since[name] >= persist_ns:
+                self._low_alarm[name] = True
+        else:
+            self._low_since[name] = None
+            if self._low_alarm[name]:
+                if self._ok_since[name] is None:
+                    self._ok_since[name] = now_mono
+                if now_mono - self._ok_since[name] >= persist_ns:
+                    self._low_alarm[name] = False
+                    self._ok_since[name] = None
 
     def _pair_gripper(self) -> Optional[Tuple[_Sample, _Sample]]:
         """从最新夹爪样本向前，在图像历史中查找源时间戳完全相同的帧。
@@ -440,6 +542,15 @@ class CollectionHealthMonitor:
             source_delta = abs(other.source_ns - image_sample.source_ns) / 1e6
             arrival_delta = (other.recv_ns - image_sample.recv_ns) / 1e6
         image_h264 = name == IMAGE and self._config.image_mode == MODE_H264
+        expected = self._config.expected_rate_hz(name)
+        complete, receive_rate, source_rate = self._window_rates(name, now_mono)
+        threshold = self._config.min_rate_ratio * expected
+        below = (
+            expected > 0.0 and complete
+            and (receive_rate < threshold or source_rate < threshold)
+        )
+        if expected > 0.0:
+            self._update_low_rate(name, below, now_mono)
         return StreamHealth(
             name=name,
             discovered=discovered,
@@ -457,6 +568,11 @@ class CollectionHealthMonitor:
             format=self._image_format if name == IMAGE else "",
             awaiting_keyframe=image_h264 and self._keyframes == 0,
             keyframes=self._keyframes if image_h264 else 0,
+            source_rate_hz=source_rate if complete else math.nan,
+            receive_rate_hz=receive_rate if complete else math.nan,
+            rate_window_complete=complete,
+            expected_rate_hz=expected,
+            below_rate=below,
         )
 
     def _alarms(
@@ -485,6 +601,8 @@ class CollectionHealthMonitor:
             last_gap = self._streams[name].last_gap_ns
             if last_gap is not None and (now_mono - last_gap) / 1e9 <= GAP_HOLD_S:
                 alarms.append(f"{prefix}_GAP")
+            if self._low_alarm[name]:
+                alarms.append(f"{prefix}_LOW_RATE")
         image = streams[IMAGE]
         for other in (TRACKER, GRIPPER):
             stream = streams[other]

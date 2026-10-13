@@ -87,6 +87,18 @@ if(BUILD_TESTING)
   ament_add_gtest(test_decoder_policy test/test_decoder_policy.cpp)
   target_link_libraries(test_decoder_policy ${PROJECT_NAME}_core)
 
+  ament_add_gtest(test_clock_mapping test/test_clock_mapping.cpp)
+  target_link_libraries(test_clock_mapping ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_frame_timestamper test/test_frame_timestamper.cpp)
+  target_link_libraries(test_frame_timestamper ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_exposure_priority test/test_exposure_priority.cpp)
+  target_link_libraries(test_exposure_priority ${PROJECT_NAME}_core)
+
+  ament_add_gtest(test_output_decimator test/test_output_decimator.cpp)
+  target_link_libraries(test_output_decimator ${PROJECT_NAME}_core)
+
   add_executable(test_usb_camera_receiver test/test_usb_camera_receiver.cpp)
   target_include_directories(test_usb_camera_receiver PRIVATE
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")

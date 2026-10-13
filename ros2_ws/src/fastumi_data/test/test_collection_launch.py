@@ -147,6 +147,13 @@ def test_collection_node_receives_defaults_file_and_overrides() -> None:
     assert parameters[0].endswith("/share/fastumi_data/config/collection.yaml")
     assert parameters[1] == {
         "dataset_root": "/data/umi",
+        # 外部相机未声明帧率：标称值未知，不检查绝对速率。
+        "nominal_source_fps": 0.0,
+        "nominal_source_fps_source": "unknown",
+        "expected_image_rate_hz": 0.0,
+        "expected_gripper_rate_hz": 0.0,
+        "image_timestamp_source": "external_publisher",
+        "image_timing_topic": "",
         "image_mode": "raw",
         "image_topic": "/umi_camera/image_raw",
         "decoded_image_topic": "/umi_camera/image_decoded",
@@ -167,16 +174,100 @@ def test_start_camera_requires_explicit_valid_video_device() -> None:
 
 
 def test_start_camera_includes_usb_camera_in_image_namespace() -> None:
-    """验证相机子 launch 的命名空间由图像话题推导，发布 /umi_camera/image_raw。"""
+    """本地相机默认 compressed：命名空间由图像话题推导，并透传 30 fps。"""
     _, _, includes, _ = _expand(start_camera="true", video_device=VIDEO_DEVICE)
 
     assert [_include_name(i) for i in includes] == ["fastumi_usb_camera/usb_camera.launch.py"]
     assert dict(includes[0].launch_arguments) == {
         "namespace": "umi_camera",
+        "fps": "30",
+        "timestamp_mode": "v4l2_buffer",
+        "exposure_auto_priority": "leave",
+        "video_device": VIDEO_DEVICE,
+        "publish_compressed": "true",
+    }
+    _, _, includes, _ = _expand(
+        start_camera="true", video_device=VIDEO_DEVICE, image_mode="raw"
+    )
+    assert dict(includes[0].launch_arguments) == {
+        "namespace": "umi_camera",
+        "fps": "30",
+        "timestamp_mode": "v4l2_buffer",
+        "exposure_auto_priority": "leave",
         "video_device": VIDEO_DEVICE,
     }
     with pytest.raises(ValueError, match="image_raw"):
         _expand(start_camera="true", video_device=VIDEO_DEVICE, image_topic="/cam/raw")
+
+
+@pytest.mark.parametrize("mode", ["raw", "compressed", "h264"])
+def test_camera_fps_is_forwarded_and_snapshotted_for_every_mode(mode) -> None:
+    """camera_fps 默认 30、显式覆盖生效，三种模式都透传并写为标称源帧率。"""
+    for value, expected in (("30", 30), ("90", 90)):
+        overrides = {"start_camera": "true", "image_mode": mode}
+        if value != "30":
+            overrides["camera_fps"] = value
+        _, nodes, includes, _ = _expand(**overrides)
+        assert dict(includes[0].launch_arguments)["fps"] == str(expected)
+        parameters = nodes[-2]["parameters"][1] if nodes[-1]["executable"] == "rviz2" else nodes[-1]["parameters"][1]
+        assert parameters["nominal_source_fps"] == float(expected)
+        assert parameters["nominal_source_fps_source"] == "camera_launch"
+        assert parameters["expected_image_rate_hz"] == float(expected)
+        assert parameters["image_timestamp_source"] == "v4l2_buffer_monotonic_mapped_to_ros"
+        assert parameters["image_timing_topic"] == "/umi_camera/image_raw/time_reference"
+
+
+def test_callback_timestamp_mode_and_exposure_request_are_forwarded() -> None:
+    """兼容回调时间模式写入快照来源；曝光优先请求透传给相机，非法值被拒绝。"""
+    _, nodes, includes, _ = _expand(
+        start_camera="true", camera_timestamp_mode="callback_now",
+        exposure_auto_priority="disable",
+    )
+    arguments = dict(includes[0].launch_arguments)
+    assert arguments["timestamp_mode"] == "callback_now"
+    assert arguments["exposure_auto_priority"] == "disable"
+    collection = next(n for n in nodes if n["executable"] == "collection_node")
+    assert collection["parameters"][1]["image_timestamp_source"] == "callback_now"
+    with pytest.raises(ValueError, match="camera_timestamp_mode"):
+        _expand(start_camera="true", camera_timestamp_mode="now")
+    with pytest.raises(ValueError, match="exposure_auto_priority"):
+        _expand(start_camera="true", exposure_auto_priority="off")
+
+
+@pytest.mark.parametrize("value", ["0", "-30", "29.97", "abc", ""])
+def test_invalid_camera_fps_is_rejected(value) -> None:
+    """camera_fps 必须为正整数。"""
+    with pytest.raises(ValueError, match="camera_fps"):
+        _expand(start_camera="true", camera_fps=value)
+
+
+def test_external_camera_declares_nominal_fps() -> None:
+    """外部相机由 external_camera_fps 声明标称值，不用采集入口的默认值。"""
+    _, nodes, _, _ = _expand(external_camera_fps="29.97", image_mode="compressed")
+    parameters = next(n for n in nodes if n["executable"] == "collection_node")["parameters"][1]
+    assert parameters["nominal_source_fps"] == pytest.approx(29.97)
+    assert parameters["nominal_source_fps_source"] == "external_declared"
+    with pytest.raises(ValueError, match="external_camera_fps"):
+        _expand(external_camera_fps="-1")
+
+
+def test_decode_every_n_frames_sets_decoder_and_gripper_rate() -> None:
+    """在线解码默认 N=1；显式 N 透传给解码节点，夹爪期望频率按 30/N 计算。"""
+    _, nodes, _, _ = _expand(start_camera="true", start_gripper="true")
+    decoder = next(n for n in nodes if n["executable"] == "image_decoder")
+    assert decoder["parameters"][0]["decode_every_n_frames"] == 1
+    _, nodes, _, _ = _expand(start_camera="true", start_gripper="true", decode_every_n_frames="3")
+    decoder = next(n for n in nodes if n["executable"] == "image_decoder")
+    assert decoder["parameters"][0]["decode_every_n_frames"] == 3
+    collection = next(n for n in nodes if n["executable"] == "collection_node")
+    assert collection["parameters"][1]["expected_gripper_rate_hz"] == pytest.approx(10.0)
+    _, nodes, _, _ = _expand(
+        start_camera="true", start_gripper="true", image_mode="h264", decode_every_n_frames="2"
+    )
+    receiver = next(n for n in nodes if n["executable"] == "usb_camera_receiver")
+    assert receiver["parameters"][0]["output_every_n_frames"] == 2
+    with pytest.raises(ValueError, match="decode_every_n_frames"):
+        _expand(decode_every_n_frames="0")
 
 
 def test_start_tracker_disables_its_own_rviz_and_forwards_serial() -> None:

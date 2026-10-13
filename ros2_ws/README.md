@@ -172,7 +172,7 @@ PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–�
 | `episode_manager` | 提供 episode 开始、停止和放弃服务，并发布边界事件。 |
 | `episode_command` | 从命令行调用 episode 控制服务。 |
 | `record_session` | 连续录制一场 MCAP 会话并保存配置和标定快照。 |
-| `convert_mcap` | 同步图像、Tracker、夹爪和事件，生成 episode HDF5 与质量报告。 |
+| `convert_mcap` | 批量把 MCAP 记录转换为 30 Hz Link7 HDF5 与合并 `fastumi-rm75-link7-v1` Zarr，并输出报告和清单。 |
 | `calibrate_tracker_tcp` | 求解 Tracker 到 TCP 的刚体外参。 |
 | `calibrate_tracker_camera` | 从录包数据求解 Tracker 与相机间的手眼关系。 |
 | `calibrate_aruco_tcp` | 通过 ArUco 观测估计相机/Tracker 到 TCP 的标定关系。 |

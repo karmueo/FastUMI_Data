@@ -16,7 +16,7 @@ from rclpy.executors import SingleThreadedExecutor  # noqa: E402
 from rclpy.qos import QoSProfile, ReliabilityPolicy  # noqa: E402
 from sensor_msgs.msg import CompressedImage, Image  # noqa: E402
 
-from fastumi_data.image_decoder_node import ImageDecoderNode  # noqa: E402
+from fastumi_data.image_decoder_node import FrameDecimator, ImageDecoderNode  # noqa: E402
 from video_fixtures import (  # noqa: E402
     band_column,
     compressed_message,
@@ -30,11 +30,12 @@ from video_fixtures import (  # noqa: E402
 class _Rig:
     """同进程的解码节点、BEST_EFFORT 发布端和输出订阅者。"""
 
-    def __init__(self, mode: str, input_topic: str, message_type) -> None:
+    def __init__(self, mode: str, input_topic: str, message_type, every_n: int = 1) -> None:
         """用命令行参数配置解码节点并创建收发两端。"""
         rclpy.init(args=[
             "--ros-args", "-p", f"image_mode:={mode}",
             "-p", f"input_topic:={input_topic}", "-p", "output_topic:=/test/decoded",
+            "-p", f"decode_every_n_frames:={every_n}",
         ])
         self.node = ImageDecoderNode()
         self.helper = rclpy.create_node("decoder_test_helper")
@@ -143,6 +144,53 @@ def test_h264_waits_for_keyframe_and_recovers_after_corruption(h264_rig) -> None
     assert h264_rig.frames[3].header.stamp.sec * 1_000_000_000 + h264_rig.frames[
         3
     ].header.stamp.nanosec == stamp_of(20)
+
+
+def _stamps(frames) -> list:
+    """输出帧的 Header 纳秒时间。"""
+    return [f.header.stamp.sec * 1_000_000_000 + f.header.stamp.nanosec for f in frames]
+
+
+def test_frame_decimator_selects_every_nth_index() -> None:
+    """N=1 全部选中；N=3 选中 0、3、6…；非法 N 被拒绝。"""
+    assert [FrameDecimator(1).take() for _ in range(4)] == [True] * 4
+    decimator = FrameDecimator(3)
+    assert [decimator.take() for _ in range(7)] == [True, False, False, True, False, False, True]
+    for value in (0, -1, 1.5, True):
+        with pytest.raises(ValueError):
+            FrameDecimator(value)
+
+
+def test_jpeg_decimation_skips_before_decoding_and_keeps_headers() -> None:
+    """JPEG N=3：按输入序号只解码 0、3、6，Header 原样保留，跳过数与失败数分开。"""
+    rig = _Rig("compressed", "/test/compressed_n", CompressedImage, every_n=3)
+    try:
+        for index in range(9):
+            rig.send(compressed_message(index))
+        rig.wait_frames(3)
+        rig.send(compressed_message(9), settle_s=0.1)
+        assert _stamps(rig.frames) == [stamp_of(0), stamp_of(3), stamp_of(6), stamp_of(9)]
+        assert rig.node._total_skipped == 6 and rig.node._failures == 0
+        assert rig.node._decoder.stats.packets == 4
+    finally:
+        rig.close()
+
+
+def test_h264_decimation_feeds_every_packet_and_publishes_decoded_index() -> None:
+    """H.264 N=2：全部访问单元送入解码器，只按解码帧序号发布 0、2、4…"""
+    rig = _Rig("h264", "/test/ffmpeg_n", FFMPEGPacket, every_n=2)
+    try:
+        packets = h264_packets(10, gop_size=10)
+        for index in range(10):
+            rig.send(ffmpeg_message(index, packets[index]))
+        rig.wait_frames(5)
+        assert _stamps(rig.frames) == [stamp_of(i) for i in (0, 2, 4, 6, 8)]
+        assert rig.node._decoder.stats.packets == 10
+        assert rig.node._decoder.stats.frames == 10
+        pixels = np.frombuffer(bytes(rig.frames[2].data), np.uint8).reshape(48, 64, 3)
+        assert abs(band_column(pixels) - band_column(frame_pixels_bgr(4))) <= 2
+    finally:
+        rig.close()
 
 
 def test_unsupported_mode_is_rejected() -> None:

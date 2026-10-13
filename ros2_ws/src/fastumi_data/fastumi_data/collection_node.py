@@ -51,6 +51,7 @@ from rclpy.qos import (
 )
 from rclpy.serialization import deserialize_message, serialize_message
 from rosidl_runtime_py.utilities import get_message
+from sensor_msgs.msg import TimeReference
 from tf2_msgs.msg import TFMessage
 
 from fastumi_data.collection_health import (
@@ -219,6 +220,18 @@ def encode_episode_event(
     return serialize_message(message)
 
 
+def timing_generation(source: str) -> int:
+    """从 ``TimeReference.source`` 的 ``gen=N`` 字段读取时钟映射代号，缺失为 0。"""
+    for item in str(source).split(";"):
+        key, _, value = item.partition("=")
+        if key.strip() == "gen":
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+    return 0
+
+
 def _pose_is_finite(message: PoseStamped) -> bool:
     """位姿各分量有限且四元数近似单位长度。"""
     pose = message.pose
@@ -269,8 +282,14 @@ class CollectionNode(Node):
             gripper_state=self._text("gripper_state_topic"),
             episode_event=self._text("episode_event_topic"),
             tf_static=self._text("tf_static_topic"),
+            image_timing=self._text("image_timing_topic"),
         )
         self._topics = topics
+        nominal_fps = float(self.get_parameter("nominal_source_fps").value)
+        if not math.isfinite(nominal_fps) or nominal_fps < 0.0:
+            raise ValueError(
+                f"nominal_source_fps 必须为非负有限数，当前为 {nominal_fps!r}"
+            )
         processing_template = self._text("processing_config") or str(
             Path(get_package_share_directory("fastumi_data"))
             / "config"
@@ -289,6 +308,11 @@ class CollectionNode(Node):
             decoded_image_topic=self._text("decoded_image_topic"),
             image_reliability=self._image_reliability,
             image_qos_depth=self._image_qos_depth,
+            nominal_source_fps=nominal_fps,
+            nominal_source_fps_source=(
+                self._text("nominal_source_fps_source") if nominal_fps > 0.0 else "unknown"
+            ),
+            image_timestamp_source=self._text("image_timestamp_source") or "unrecorded",
             min_free_disk_bytes=int(
                 float(self.get_parameter("min_free_disk_gib").value) * 1024 ** 3
             ),
@@ -306,7 +330,18 @@ class CollectionNode(Node):
                 tracker_timeout_s=float(self.get_parameter("tracker_timeout_s").value),
                 gripper_timeout_s=float(self.get_parameter("gripper_timeout_s").value),
                 match_window_s=float(self.get_parameter("match_window_s").value),
+                rate_window_s=float(self.get_parameter("rate_window_s").value),
                 image_mode=image_mode,
+                expected_image_rate_hz=float(
+                    self.get_parameter("expected_image_rate_hz").value
+                ),
+                expected_gripper_rate_hz=float(
+                    self.get_parameter("expected_gripper_rate_hz").value
+                ),
+                min_rate_ratio=float(self.get_parameter("min_rate_ratio").value),
+                low_rate_persist_s=float(
+                    self.get_parameter("low_rate_persist_s").value
+                ),
             ),
             mono_clock_ns=time.monotonic_ns,
             wall_clock_ns=lambda: self.get_clock().now().nanoseconds,
@@ -363,6 +398,8 @@ class CollectionNode(Node):
             "gripper_state_topic": TopicMap().gripper_state,
             "episode_event_topic": TopicMap().episode_event,
             "tf_static_topic": TopicMap().tf_static,
+            # 本地相机的时间诊断话题（sensor_msgs/TimeReference），为空不录制。
+            "image_timing_topic": "",
             "processing_config": "",
             "extrinsic_path": "",
             "snapshot_files": [""],
@@ -370,6 +407,16 @@ class CollectionNode(Node):
             "tracker_timeout_s": 0.25,
             "gripper_timeout_s": 0.25,
             "match_window_s": 0.030,
+            # 开始前与录制中的绝对频率检查；期望频率为 0 时不检查该路。
+            "rate_window_s": 2.0,
+            "expected_image_rate_hz": 30.0,
+            "expected_gripper_rate_hz": 30.0,
+            "min_rate_ratio": 0.95,
+            "low_rate_persist_s": 2.0,
+            # 标称源帧率及来源写入采集快照；0.0 表示未知。
+            "nominal_source_fps": 0.0,
+            "nominal_source_fps_source": "unknown",
+            "image_timestamp_source": "unrecorded",
             "queue_max_messages": 600,
             "queue_max_mib": 768.0,
             "finish_timeout_s": 60.0,
@@ -640,6 +687,11 @@ class CollectionInputs(Node):
             (TFMessage, topics.tf_static, self._on_tf_static, latched_qos),
         ):
             self.create_subscription(message_type, topic, callback, qos, raw=True)
+        if topics.image_timing:
+            self.create_subscription(
+                TimeReference, topics.image_timing, self._on_image_timing,
+                reliable_qos(60), raw=True,
+            )
 
     def _on_image(self, data: bytes) -> None:
         """图像（原始、压缩或 H.264 包）原始字节：解析头部后更新健康并按需写入。"""
@@ -677,6 +729,12 @@ class CollectionInputs(Node):
         self._controller.on_gripper_state(
             raw, stamp_ns, bool(message.valid), float(message.filtered_openness)
         )
+
+    def _on_image_timing(self, data: bytes) -> None:
+        """相机时间诊断原始字节：解析映射代号并录制。"""
+        raw = bytes(data)
+        message = deserialize_message(raw, TimeReference)
+        self._controller.on_image_timing(raw, timing_generation(message.source))
 
     def _on_tf_static(self, data: bytes) -> None:
         """静态 TF 原始字节：缓存并在采集中写入。"""

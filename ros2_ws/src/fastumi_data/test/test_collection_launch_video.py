@@ -223,12 +223,14 @@ def test_auto_mode_probes_the_explicit_topic_and_falls_back_by_suffix() -> None:
     assert (parameters["image_mode"], parameters["image_topic"]) == ("raw", "/umi_camera/image_raw")
 
 
-def test_auto_mode_with_local_camera_is_raw_without_probing() -> None:
-    """启动本地相机时 auto 等同 raw，不需要探测图。"""
+def test_auto_mode_with_local_camera_is_compressed_without_probing() -> None:
+    """启动本地相机时 auto 解析为 compressed（相机 JPEG 原样录制），不需要探测图。"""
     def probe(topic, timeout):
         """不应被调用。"""
         raise AssertionError("不应探测")
 
     _, nodes, _, _ = _expand(probe=probe, start_camera="true")
 
-    assert _by_executable(nodes)["collection_node"]["parameters"][1]["image_mode"] == "raw"
+    parameters = _by_executable(nodes)["collection_node"]["parameters"][1]
+    assert parameters["image_mode"] == "compressed"
+    assert parameters["image_topic"] == "/umi_camera/image_raw/compressed"

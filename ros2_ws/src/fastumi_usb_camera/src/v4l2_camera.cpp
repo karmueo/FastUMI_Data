@@ -261,6 +261,12 @@ public:
     return device_path_;
   }
 
+  /** @return 曝光优先控制状态。 */
+  const ExposurePriorityStatus & exposure_priority_status() const noexcept
+  {
+    return exposure_priority_;
+  }
+
 private:
   /** @brief 配置能力、MJPEG 模式、帧率、mmap 队列并开启视频流。 */
   void open_and_start(const CameraConfiguration & config)
@@ -310,9 +316,28 @@ private:
         parameters.parm.capture.timeperframe.numerator;  ///< 驱动采用的帧周期分子。
       const uint32_t denominator =
         parameters.parm.capture.timeperframe.denominator;  ///< 驱动采用的帧周期分母。
-      if (numerator == 0U || denominator != static_cast<uint32_t>(config.fps) * numerator) {
-        throw std::runtime_error("camera did not accept the requested frame rate");
+      if (!frame_rate_matches(config.fps, numerator, denominator)) {
+        throw std::runtime_error(
+                "camera did not accept the requested frame rate " + std::to_string(config.fps) +
+                " fps (negotiated " + std::to_string(denominator) + "/" +
+                std::to_string(numerator) + ")");
       }
+
+      // 曝光优先控制：读取或关闭并读回，如实记录；失败不改变帧率门限。
+      const int descriptor = file_descriptor_;  ///< 控制访问使用的设备描述符。
+      const auto errno_of = [](int result) {return result < 0 ? errno : 0;};
+      ControlIo io;  ///< 基于真实 ioctl 的控制访问。
+      io.query = [descriptor, errno_of](v4l2_queryctrl & query) {
+          return errno_of(ioctl_retry(descriptor, VIDIOC_QUERYCTRL, &query));
+        };
+      io.get = [descriptor, errno_of](v4l2_control & control) {
+          return errno_of(ioctl_retry(descriptor, VIDIOC_G_CTRL, &control));
+        };
+      io.set = [descriptor, errno_of](v4l2_control & control) {
+          return errno_of(ioctl_retry(descriptor, VIDIOC_S_CTRL, &control));
+        };
+      exposure_priority_ = configure_exposure_priority(
+        io, parse_exposure_priority_request(config.exposure_auto_priority));
 
       v4l2_requestbuffers request{};  ///< mmap 缓冲区申请参数与实际数量。
       request.count = kCaptureBufferCount;
@@ -397,8 +422,13 @@ private:
           buffer.bytesused <= buffers_[buffer.index].length &&
           (buffer.flags & V4L2_BUF_FLAG_ERROR) == 0U;  ///< 当前帧是否可安全读取。
         if (valid && running_.load()) {
+          FrameMetadata metadata;  ///< 缓冲区源时间、序号与时间戳标志。
+          metadata.timestamp_ns = timeval_to_ns(buffer.timestamp);
+          metadata.sequence = buffer.sequence;
+          metadata.flags = buffer.flags;
           callback_(
-            static_cast<const uint8_t *>(buffers_[buffer.index].address), buffer.bytesused);
+            static_cast<const uint8_t *>(buffers_[buffer.index].address), buffer.bytesused,
+            metadata);
         } else if (!valid) {
           invalid_count_.fetch_add(1);
         }
@@ -455,6 +485,7 @@ private:
   std::atomic<uint64_t> invalid_count_{0};  ///< 无效或错误 V4L2 帧数量。
   mutable std::mutex error_mutex_;  ///< 保护采集错误文本。
   std::string error_message_;  ///< 采集线程最后错误说明。
+  ExposurePriorityStatus exposure_priority_;  ///< 启动时曝光优先控制结果。
 };
 
 V4l2Camera::V4l2Camera(const CameraConfiguration & config, FrameCallback callback)
@@ -487,6 +518,11 @@ uint64_t V4l2Camera::invalid_count() const noexcept
 const std::string & V4l2Camera::device_path() const noexcept
 {
   return impl_->device_path();
+}
+
+const ExposurePriorityStatus & V4l2Camera::exposure_priority_status() const noexcept
+{
+  return impl_->exposure_priority_status();
 }
 
 }  // namespace fastumi_usb_camera

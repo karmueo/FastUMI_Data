@@ -36,6 +36,21 @@ collection_node:
     gripper_timeout_s: 0.25
     # 图像与 Tracker 按最近源时间戳配对的窗口，单位秒。
     match_window_s: 0.030
+    # 绝对频率检查：开始前须积累完整窗口，编码图像与有效夹爪状态的源时间戳速率和
+    # 接收速率都达到期望频率 × min_rate_ratio（默认 30 Hz × 0.95 = 28.5 Hz）。
+    # 录制中连续低于门限 low_rate_persist_s 报 IMAGE_LOW_RATE/GRIPPER_LOW_RATE，
+    # 连续达标同样时长后清除。期望频率为 0 时不检查该路。launch 按相机帧率覆盖。
+    rate_window_s: 2.0
+    expected_image_rate_hz: 30.0
+    expected_gripper_rate_hz: 30.0
+    min_rate_ratio: 0.95
+    low_rate_persist_s: 2.0
+    # 确认生效的标称源帧率及来源，写入 session.yaml 供离线转换选择选帧路径；
+    # 0.0 表示未知（外部相机须通过 launch 的 external_camera_fps 声明）。
+    nominal_source_fps: 0.0
+    nominal_source_fps_source: unknown
+    # 图像 Header 时间戳来源，写入清单；本地相机由 launch 按相机节点实际行为设置。
+    image_timestamp_source: unrecorded
     # 写入队列上限；溢出会使本次采集失败，不会静默丢帧。
     queue_max_messages: 600
     queue_max_mib: 768.0

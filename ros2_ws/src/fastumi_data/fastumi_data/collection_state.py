@@ -114,6 +114,8 @@ class TopicMap:
     tf_static: str = "/tf_static"
     image_mode: str = MODE_RAW
     """图像话题的消息模式：raw、compressed 或 h264，决定 MCAP 中的类型声明。"""
+    image_timing: str = ""
+    """可选相机时间诊断话题（``sensor_msgs/TimeReference``）；为空时不录制。"""
 
     def __post_init__(self) -> None:
         """拒绝未知图像模式。"""
@@ -128,7 +130,11 @@ class TopicMap:
             TopicSpec(self.gripper_state, "fastumi_interfaces/msg/GripperState"),
             TopicSpec(self.episode_event, "fastumi_interfaces/msg/EpisodeEvent"),
             TopicSpec(self.tf_static, "tf2_msgs/msg/TFMessage"),
-        ]
+        ] + (
+            [TopicSpec(self.image_timing, "sensor_msgs/msg/TimeReference")]
+            if self.image_timing
+            else []
+        )
 
     def processing_topics(self) -> Dict[str, str]:
         """返回转换器 ``processing.yaml`` 中的 ``topics`` 映射。"""
@@ -162,6 +168,12 @@ class CollectionConfig:
     """在线解码后发布的原始图像话题，仅写入清单供追溯。"""
     image_reliability: str = DEFAULT_IMAGE_RELIABILITY
     image_qos_depth: int = DEFAULT_IMAGE_QOS_DEPTH
+    nominal_source_fps: float = 0.0
+    """确认生效的标称源帧率；0 表示未知（外部相机未声明）。"""
+    nominal_source_fps_source: str = "unknown"
+    """标称源帧率来源：``camera_launch``、``external_declared`` 或 ``unknown``。"""
+    image_timestamp_source: str = "unrecorded"
+    """图像 Header 时间戳来源，写入清单供离线转换区分时间语义。"""
     idempotency_cache_size: int = 256
     default_list_limit: int = 50
     max_list_limit: int = 200
@@ -285,6 +297,8 @@ class QualityAccumulator:
                 "message_age_ms",
                 "pair_arrival_delta_ms",
                 "rate_hz",
+                "source_rate_hz",
+                "receive_rate_hz",
             ):
                 self._timing.setdefault(
                     f"{name}.{metric}", _Running()
@@ -310,7 +324,8 @@ class QualityAccumulator:
             },
             "timing_note": (
                 "pair_arrival_delta_ms 为配对双方到达采集节点的时间差，"
-                "包含传输与排队，不是纯算法耗时。"
+                "包含传输与排队，不是纯算法耗时。source_rate_hz 按源时间戳计算，"
+                "receive_rate_hz 按采集节点接收计数计算，两者分离相机降频与传输积压。"
             ),
         }
 
@@ -430,6 +445,8 @@ class CollectionController:
         self._writer_error: Optional[Tuple[str, str]] = None
         self._tf_static: List[bytes] = []
         self._extra_alarms: Tuple[str, ...] = ()
+        # 相机时钟映射代号；采集中变化表示系统时间跳变或时间基准切换。
+        self._clock_generation = 0
 
     # ------------------------------------------------------------------
     # 数据入口：订阅回调调用。
@@ -484,6 +501,25 @@ class CollectionController:
         with self._health_lock:
             self._health.observe_gripper(stamp_ns, valid, openness)
         self._submit(self._config.topics.gripper_state, data)
+
+    def on_image_timing(self, data: bytes, generation: int) -> None:
+        """记录相机时间诊断；采集中时钟映射代号变化时让当前采集失败。
+
+        映射重建后旧、新时间基准不能混在同一 episode 中，因此不修改已记录的时间戳，
+        而是报告 ``CLOCK_MAPPING_RESET`` 使本次采集进入错误状态，在新映射下重新开始。
+        """
+        with self._lock:
+            previous = self._clock_generation
+            self._clock_generation = int(generation)
+            active = self._state in (CollectionState.STARTING, CollectionState.RECORDING)
+        if active and previous and generation and generation != previous:
+            self._on_writer_error(
+                "CLOCK_MAPPING_RESET",
+                f"相机时钟映射在采集中重建（代号 {previous}→{generation}）：系统时间跳变或"
+                "时间基准切换，当前采集失败；请在新映射下重新开始",
+            )
+        if self._config.topics.image_timing:
+            self._submit(self._config.topics.image_timing, data)
 
     def on_tf_static(self, data: bytes) -> None:
         """缓存静态 TF，并在采集中写入；每条新采集开始时回放缓存。"""
@@ -941,6 +977,13 @@ class CollectionController:
                 "decoded_topic": self._config.decoded_image_topic,
                 "reliability": self._config.image_reliability,
                 "qos_depth": self._config.image_qos_depth,
+                "nominal_source_fps": (
+                    self._config.nominal_source_fps
+                    if self._config.nominal_source_fps > 0.0
+                    else None
+                ),
+                "nominal_source_fps_source": self._config.nominal_source_fps_source,
+                "timestamp_source": self._config.image_timestamp_source,
             },
             "processing_config": {
                 "path": "calibration_snapshot/processing.yaml",

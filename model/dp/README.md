@@ -204,6 +204,8 @@ bash model/dp/train_vr_umi.sh /absolute/path/to/new_run
 
 双卡使用 `CUDA_VISIBLE_DEVICES=0,1 NUM_PROCESSES=2`。可用 `TRAIN_BATCH_SIZE`、`VAL_BATCH_SIZE`、`MIXED_PRECISION`、`NUM_EPOCHS` 覆盖脚本默认值；脚本使用离线 W&B 和离线预训练权重缓存。
 
+**UMI 示教数据（`fastumi-rm75-link7-v1`）**：ROS 包的 `convert_mcap` 把 30 Hz 采集记录同频逐帧转换为该格式（见 `ros2_ws/src/fastumi_data/README.md`），用 `DATASET_PATH` 指向输出目录中的 `dataset.zarr` 即可沿用本脚本和 30 Hz 配置，不需要新的 `CONFIG_NAME`。位姿存储在 episode 起始 `Link7` 系，五键观测与相对动作生成方式不变；名义采样周期 `1/30` s，16 步动作最后一步偏移 0.5 s。workspace 启动时要求该格式 Zarr 的 `frequency` 与 `task.contract.frequency_hz=30` 一致；`UmiDataset` 要求 `normalization_contract=fixed-gripper-0-1-v1`、`gripper_lower=0`、`gripper_upper=1`，夹爪观测与动作固定用 `[0,1]` 输入边界（与 v2 checkpoint 相同缩放），位置统计仍按新数据重新拟合。数据根属性 `time_calibration_status=provisional` 时，训练得到的策略只用于流程验证。
+
 ### 5.3 从 checkpoint 独立微调
 
 从仓库根目录执行，源 checkpoint 与新数据必须采用相同的五键/10D 契约：

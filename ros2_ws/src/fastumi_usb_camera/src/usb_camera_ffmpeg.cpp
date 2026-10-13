@@ -1,6 +1,9 @@
 /**
  * @file usb_camera_ffmpeg.cpp
  * @brief 通过共享 V4L2 核心采集 MJPEG，并用 FFmpeg image transport 发布。
+ *
+ * Header 时间与 raw/JPEG 节点相同，取 V4L2 缓冲区单调时间映射到 ROS 时间；编码包沿用
+ * 该时间，每帧另在 ``<topic>/time_reference`` 发布时间诊断。
  */
 
 #include <atomic>
@@ -8,6 +11,7 @@
 #include <csignal>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -21,6 +25,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
+#include "fastumi_usb_camera/camera_timing.hpp"
 #include "fastumi_usb_camera/configuration.hpp"
 #include "fastumi_usb_camera/image_message.hpp"
 #include "fastumi_usb_camera/jpeg_frame.hpp"
@@ -34,7 +39,7 @@ using SteadyClock = std::chrono::steady_clock;
 
 struct CapturedJpeg
 {
-  builtin_interfaces::msg::Time stamp;
+  StampedFrame timing;
   SteadyClock::time_point queued_at;
   std::vector<uint8_t> data;
 };
@@ -54,7 +59,10 @@ public:
     config_.video_device = declare_parameter<std::string>("video_device", "");
     config_.frame_id = declare_parameter<std::string>("frame_id", config_.frame_id);
     config_.topic = declare_parameter<std::string>("topic", config_.topic);
+    config_.exposure_auto_priority = declare_parameter<std::string>(
+      "exposure_auto_priority", config_.exposure_auto_priority);
     validate_configuration(config_);
+    timing_ = std::make_unique<CameraTiming>(*this, config_.topic + "/time_reference");
 
     encoder_ = loader.createUniqueInstance(
       image_transport::PublisherPlugin::getLookupName("ffmpeg"));
@@ -84,13 +92,22 @@ public:
     worker_ = std::thread(&UsbCameraFfmpeg::process_frames, this);
     try {
       camera_ = std::make_unique<V4l2Camera>(
-        config_, [this](const uint8_t * data, size_t size) {capture_frame(data, size);});
+        config_, [this](const uint8_t * data, size_t size, const FrameMetadata & metadata) {
+          capture_frame(data, size, metadata);
+        });
     } catch (...) {
       frame_buffer_.close();
       worker_.join();
       started_ = false;
       throw;
     }
+    {
+      std::lock_guard<std::mutex> lock(exposure_mutex_);
+      exposure_summary_ = camera_->exposure_priority_status().summary();
+    }
+    RCLCPP_INFO(
+      get_logger(), "V4L2 exposure_auto_priority (%s requested): %s",
+      config_.exposure_auto_priority.c_str(), exposure_summary().c_str());
     RCLCPP_INFO(
       get_logger(),
       "Streaming V4L2 %s MJPEG %ldx%ld@%ld -> %s/ffmpeg",
@@ -130,7 +147,13 @@ private:
       SteadyClock::now().time_since_epoch()).count();
   }
 
-  void capture_frame(const uint8_t * data, size_t size) noexcept
+  std::string exposure_summary() const
+  {
+    std::lock_guard<std::mutex> lock(exposure_mutex_);
+    return exposure_summary_;
+  }
+
+  void capture_frame(const uint8_t * data, size_t size, const FrameMetadata & metadata) noexcept
   {
     if (stopping_ || data == nullptr || size == 0U) {
       invalid_frame_count_.fetch_add(1);
@@ -138,12 +161,14 @@ private:
     }
     try {
       CapturedJpeg captured;
-      captured.stamp = now();
+      captured.timing = timing_->stamp(metadata);
       captured.queued_at = SteadyClock::now();
       captured.data.assign(data, data + size);
       captured_count_.fetch_add(1);
       last_frame_steady_ns_.store(steady_now_ns());
       frame_buffer_.push(std::move(captured));
+    } catch (const std::runtime_error & error) {
+      set_fatal_error(std::string("invalid V4L2 frame timestamp: ") + error.what());
     } catch (...) {
       set_fatal_error("failed to copy a frame from the V4L2 capture thread");
     }
@@ -172,9 +197,10 @@ private:
         }
 
         sensor_msgs::msg::Image image = make_bgr_image_message(
-          bgr, captured->stamp, config_.frame_id);
+          bgr, to_time_msg(captured->timing.ros_ns), config_.frame_id);
 
         encoder_->publish(image);
+        timing_->publish_reference(captured->timing, config_.frame_id, exposure_summary());
         publish_nanoseconds_.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
             SteadyClock::now() - decoded_time).count());
         encoded_count_.fetch_add(1);
@@ -207,12 +233,14 @@ private:
     RCLCPP_INFO(
       get_logger(),
       "frames captured=%lu encoded=%lu overwritten=%lu no_subscriber=%lu invalid=%lu "
-      "decode_failed=%lu rate=%lu fps avg_queue=%.2f ms avg_decode=%.2f ms avg_publish=%.2f ms",
+      "decode_failed=%lu rate=%lu fps avg_queue=%.2f ms avg_decode=%.2f ms avg_publish=%.2f ms "
+      "%s exposure_auto_priority=%s",
       captured, encoded, overwritten, skipped_without_subscriber_count_.load(),
       invalid_frame_count_.load() + (camera_ ? camera_->invalid_count() : 0U),
       decode_failure_count_.load(), interval_encoded,
       interval_queue_ns / divisor / 1.0e6, interval_decode_ns / divisor / 1.0e6,
-      interval_publish_ns / divisor / 1.0e6);
+      interval_publish_ns / divisor / 1.0e6, timing_->diagnostics().c_str(),
+      exposure_summary().c_str());
     previous_encoded_count_ = encoded;
 
     if (started_ && !stopping_) {
@@ -231,6 +259,9 @@ private:
 
   CameraConfiguration config_;
   pluginlib::UniquePtr<image_transport::PublisherPlugin> encoder_;
+  std::unique_ptr<CameraTiming> timing_;
+  mutable std::mutex exposure_mutex_;
+  std::string exposure_summary_{"pending"};
   LatestFrameBuffer<CapturedJpeg> frame_buffer_;
   std::unique_ptr<V4l2Camera> camera_;
   std::thread worker_;

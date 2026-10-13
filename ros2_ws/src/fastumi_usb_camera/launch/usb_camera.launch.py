@@ -23,6 +23,16 @@ def _camera_node(context):
     frame_id = LaunchConfiguration("frame_id").perform(context)
     if frame_id:
         overrides["frame_id"] = frame_id
+    # 时间戳来源与曝光优先控制：留空时使用节点默认值（v4l2_buffer、leave）。
+    for name, choices in (
+        ("timestamp_mode", ("v4l2_buffer", "callback_now")),
+        ("exposure_auto_priority", ("leave", "disable")),
+    ):
+        value = LaunchConfiguration(name).perform(context).strip()
+        if value:
+            if value not in choices:
+                raise ValueError(f"{name} 必须是 {'、'.join(choices)} 之一，当前为 {value!r}")
+            overrides[name] = value
     video_device = LaunchConfiguration("video_device").perform(context)
     if video_device and not is_physical_video_device_path(video_device):
         raise ValueError(
@@ -77,7 +87,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(name, default_value="")
         for name in (
             "width", "height", "fps", "frame_id", "publish_compressed",
-            "video_device",
+            "video_device", "timestamp_mode", "exposure_auto_priority",
         )
     )
     return LaunchDescription(arguments + [OpaqueFunction(function=_camera_node)])

@@ -120,7 +120,7 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
 
 默认相机参数位于 `config/usb_camera.yaml`，其中以 `video_device` 指定设备。
 `config` 指向的 YAML 是基础配置；非空的 launch 参数
-`width`、`height`、`fps`、`frame_id` 会逐项覆盖 YAML；raw/JPEG 模式还支持
+`width`、`height`、`fps`、`frame_id`、`timestamp_mode`、`exposure_auto_priority` 会逐项覆盖 YAML；raw/JPEG 模式还支持
 `publish_compressed`，两种采集节点均仅使用 `video_device` 选择设备。
 如需自动选择首个 USB 相机，应使用 `video_device: ""` 的 YAML。
 相机参数只在启动时读取，模式必须精确匹配
@@ -149,8 +149,23 @@ ros2 launch fastumi_usb_camera usb_camera.launch.py enable_ffmpeg:=true \
 | `/usb_camera/image_raw/compressed` | `sensor_msgs/msg/CompressedImage` | `enable_ffmpeg=false` 且 `publish_compressed=true` 时发布相机原始 JPEG 字节 |
 | `/usb_camera/image_raw/ffmpeg` | `ffmpeg_image_transport_msgs/msg/FFMPEGPacket` | `enable_ffmpeg=true` 时发布 H.264 压缩包 |
 | `/usb_camera/image_decoded` | `sensor_msgs/msg/Image` | FFmpeg 接收节点发布 `bgr8` 解码图像 |
+| `/usb_camera/image_raw/time_reference` | `sensor_msgs/msg/TimeReference` | 每帧时间诊断：`header.stamp` 等于图像 Header，`time_ref` 为原始 V4L2 缓冲区时间，`source` 为键值文本 |
 
-raw/JPEG 两种模式互斥。消息时间戳是发布主机收到相机完整 JPEG 帧时的 ROS 时钟时间，默认坐标系名为`usb_camera_optical_frame`。该节点不发布坐标变换或相机内参。
+raw/JPEG 两种模式互斥。默认坐标系名为`usb_camera_optical_frame`。该节点不发布坐标变换或相机内参。
+
+**消息时间戳**：默认 `timestamp_mode:=v4l2_buffer`，取出队 `v4l2_buffer.timestamp`（须为
+`CLOCK_MONOTONIC`，保留驱动的 SOE/EOF 标志），经成对采样建立的映射 `t_ros = t_mono + offset` 转为 ROS
+时间；raw、JPEG、H.264 发送端共用这一实现，解码和发布不再重新打时间戳。缓冲区时钟未知或时间戳为 0 时节点报错
+退出，不静默回退。`timestamp_mode:=callback_now` 是显式兼容模式，在回调中读取 ROS 时间（包含 USB 接收、出队
+和调度时延）。节点要求 `use_sim_time=false`；`clock_check_period_s`（默认 1 s）周期重采样，误差界超过
+`clock_mapping_max_uncertainty_us`（默认 200）时保持原偏移，偏移变化超过 `clock_mapping_max_step_us`
+（默认 2000）时视为系统时间跳变，重建映射并递增 `time_reference` 中的代号 `gen`。SOE 只是驱动声明，不证明是
+真实曝光开始的硬件时间。实测本机 1080p30 JPEG：映射误差界约 40 ns，回调比缓冲区时间晚均值 33.2 ms。
+
+**曝光优先**：`exposure_auto_priority:=leave`（默认）只读取并记录 `V4L2_CID_EXPOSURE_AUTO_PRIORITY`；
+`disable` 写 0 并读回，只有读回为 0 才记为 `disabled_confirmed`。读取失败（当前设备返回 EIO）记为
+`read_error(value=unknown)`，不会把伪值当作关闭成功。结果写入启动日志、周期诊断和 `time_reference`。
+请求帧率与驱动协商值必须精确一致，否则启动失败。
 
 切换模式后需要停止旧节点并重新启动；仍在运行的旧进程会继续发布旧话题。
 
@@ -224,6 +239,8 @@ ros2 run rqt_image_view rqt_image_view
 * `auto` 在硬件解码器初始化失败时，用**同一个关键帧**改用软件解码器 `h264`；运行中硬件解码失败时，丢弃参考帧，
   在下一个合格关键帧切换到软件解码，并保持到节点重启。`cuda` 不回退，初始化失败时节点报错退出。
 * 解码使用接收端递增的本地 PTS，原始 ROS 时间戳和 `frame_id` 原样传给解码后的图像。
+* `output_every_n_frames`（默认 1）按**解码后**的帧序号每 N 帧发布一帧，三种后端一致；所有压缩包仍送入解码器以
+  维持参考帧，只减少 raw 发布和下游开销。统计日志单独给出“skipped by decimation”，它不是丢帧。
 * `input_reliability`（默认 `best_effort`）和 `input_queue_depth`（默认 20）设置压缩包订阅的 QoS；接收端
   `reliable` 时发布端也必须是 RELIABLE，否则不会匹配。
 * 硬件解码器自带若干帧的流水线延迟，软件解码零延迟；接收统计日志显示当前使用的解码器。

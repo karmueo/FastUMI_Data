@@ -35,6 +35,40 @@ from umi.common.pose_util import mat_to_pose10d, pose_to_mat
 
 register_codecs()
 
+# convert_mcap 输出的示教 Link7 格式及其夹爪归一化契约。
+LINK7_DEMO_FORMAT = "fastumi-rm75-link7-v1"
+LINK7_GRIPPER_CONTRACT = "fixed-gripper-0-1-v1"
+
+
+def uses_fixed_gripper_range(attrs) -> bool:
+    """返回数据集是否对夹爪观测与动作使用固定 [0,1] 输入边界。
+
+    ``rm75-umi-pose-v2`` 沿用 URDF 关节限位契约；``fastumi-rm75-link7-v1`` 必须声明
+    ``normalization_contract=fixed-gripper-0-1-v1`` 且 ``gripper_lower=0``、
+    ``gripper_upper=1``。其他格式使用数据统计边界。
+
+    Raises:
+        ValueError: 格式要求的契约缺失或与固定边界冲突。
+    """
+    format_name = attrs.get("format")
+    if format_name == "rm75-umi-pose-v2":
+        if attrs.get("normalization_contract") != "urdf-joint-limits-v1":
+            raise ValueError("Missing source URDF normalization contract")
+        return True
+    if format_name == LINK7_DEMO_FORMAT:
+        if attrs.get("normalization_contract") != LINK7_GRIPPER_CONTRACT:
+            raise ValueError(
+                f"{LINK7_DEMO_FORMAT} requires normalization_contract={LINK7_GRIPPER_CONTRACT}, "
+                f"got {attrs.get('normalization_contract')!r}")
+        lower, upper = attrs.get("gripper_lower"), attrs.get("gripper_upper")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               for value in (lower, upper)) or (lower, upper) != (0, 1):
+            raise ValueError(
+                f"{LINK7_DEMO_FORMAT} requires gripper_lower=0 and gripper_upper=1, "
+                f"got {lower!r}, {upper!r}")
+        return True
+    return False
+
 
 @contextlib.contextmanager
 def _open_replay_store(dataset_path):
@@ -343,6 +377,9 @@ class UmiDataset(BaseDataset):
             if not self.temporally_independent_normalization:
                 data_cache[key] = data_cache[key].reshape(B * T, D)
 
+        # 夹爪归一化契约在统计前确认，缺失或冲突直接失败。
+        fixed_gripper = uses_fixed_gripper_range(self.dataset_attrs)
+
         # action
         assert data_cache["action"].shape[-1] % self.num_robot == 0
         dim_a = data_cache["action"].shape[-1] // self.num_robot
@@ -358,9 +395,7 @@ class UmiDataset(BaseDataset):
                     array_to_stats(data_cache["action"][..., i * dim_a + 3 : (i + 1) * dim_a - 1])
                 )
             )  # rot
-            if self.dataset_attrs.get("format") == "rm75-umi-pose-v2":
-                if self.dataset_attrs.get("normalization_contract") != "urdf-joint-limits-v1":
-                    raise ValueError("Missing source URDF normalization contract")
+            if fixed_gripper:
                 action_normalizers.append(fixed_range_normalizer([0], [1]))
             else:
                 action_normalizers.append(
@@ -382,8 +417,7 @@ class UmiDataset(BaseDataset):
             elif key.endswith("rot_axis_angle") or "rot_axis_angle_wrt" in key:
                 this_normalizer = get_identity_normalizer_from_stat(stat)
             elif key.endswith("gripper_width"):
-                this_normalizer = (fixed_range_normalizer([0], [1])
-                                   if self.dataset_attrs.get("format") == "rm75-umi-pose-v2"
+                this_normalizer = (fixed_range_normalizer([0], [1]) if fixed_gripper
                                    else get_range_normalizer_from_stat(stat))
             else:
                 raise RuntimeError("unsupported")

@@ -226,3 +226,180 @@ def test_loader_contract_on_small_fixture(tmp_path, monkeypatch):
     assert len(dataset) == validate_dataset(umi_path, "rm75_umi")["windows"]["train"]
     assert set(sample["obs"]) == set(config.task.shape_meta.obs)
     assert sample["action"].shape == (16, 10)
+
+
+# ---------------------------------------------------------------------------
+# convert_mcap 输出的示教 Link7 格式（fastumi-rm75-link7-v1）
+# ---------------------------------------------------------------------------
+
+def make_link7(path, lengths=(20, 20), dropped=None, path_kind="same_rate", fps=30.0):
+    """生成带 JPEG XL 无损图像、追溯数组和逐 episode 元数据的 Link7 Zarr。"""
+    from imagecodecs_numcodecs import JpegXl, register_codecs
+
+    register_codecs(verbose=False)
+    dropped = dropped or {}
+    count = sum(lengths)
+    root = zarr.open_group(str(path), mode="w")
+    root.attrs.update(
+        format="fastumi-rm75-link7-v1", complete=True, frequency=30,
+        timestamp_semantics="nominal_frame_time", state_time_reference="image_timestamp",
+        action_time_reference="image_timestamp", image_size=224, action_layout="pose10",
+        stored_action_layout="xyz_rotvec_gripper", pose_frame="episode_start_link7",
+        deployment_base_frame="base_link", end_frame="Link7", tool_offset=np.eye(4).tolist(),
+        position_unit="m", rotation_unit="rad", gripper_representation="normalized_0_1",
+        normalization_contract="fixed-gripper-0-1-v1", gripper_lower=0.0, gripper_upper=1.0,
+        action_source="demonstration_trajectory", urdf_sha256="b" * 64,
+        time_calibration_status="provisional",
+    )
+    data = root.create_group("data")
+    images = np.random.default_rng(0).integers(0, 255, size=(count, 224, 224, 3), dtype=np.uint8)
+    data.create_dataset("camera0_rgb", data=images, chunks=(1, 224, 224, 3),
+                        compressor=JpegXl(lossless=True, effort=3, numthreads=1))
+    drops, nominal, image_ns, source, metadata = [], [], [], [], []
+    names = []
+    base_source = 0
+    for episode, length in enumerate(lengths):
+        d = np.zeros(length, dtype=np.int32)
+        for frame, value in dropped.get(episode, {}).items():
+            d[frame] = value
+        steps = np.r_[0, np.cumsum(1 + d[1:])]
+        episode_nominal = (steps * 1_000_000_000 + 15) // 30
+        nominal.append(episode_nominal)
+        if path_kind == "same_rate":
+            # 同频路径：丢帧不在 bag 中，源解码序号仍连续；实际速率比标称快 0.2%。
+            image_ns.append(10**18 + np.round(steps * 1e9 / (fps * 1.002)).astype(np.int64))
+            source.append(base_source + np.arange(length))
+        else:
+            # 高帧率路径：选中帧位于 30 Hz 网格附近，源序号按源帧率跳跃递增。
+            jitter = np.random.default_rng(episode).integers(-3_000_000, 3_000_000, size=length)
+            image_ns.append(10**18 + episode_nominal + jitter)
+            source.append(base_source + steps * int(round(fps / 30)))
+        base_source += int(source[-1][-1]) + 100
+        drops.append(d)
+        name = f"task/rec/episode_{episode:04d}"
+        names.append(name)
+        metadata.append({"name": name, "selection_path": path_kind, "nominal_source_fps": fps,
+                         "frame_drop_count": int(d.sum()), "fitted_frame_rate_hz": fps * 1.002,
+                         "time_calibration_status": "provisional"})
+    nominal = np.concatenate(nominal)
+    data.create_dataset("timestamp", data=nominal / 1e9)
+    data.create_dataset("nominal_timestamp_ns", data=nominal)
+    data.create_dataset("image_timestamp_ns", data=np.concatenate(image_ns))
+    data.create_dataset("source_image_index", data=np.concatenate(source).astype("i8"))
+    data.create_dataset("dropped_frames_before", data=np.concatenate(drops))
+    zeros3 = np.zeros((count, 3), dtype="f4")
+    data.create_dataset("robot0_eef_pos", data=zeros3)
+    data.create_dataset("robot0_eef_rot_axis_angle", data=zeros3)
+    data.create_dataset("robot0_gripper_width", data=np.full((count, 1), 0.5, dtype="f4"))
+    data.create_dataset("robot0_demo_start_pose", data=np.zeros((count, 6), dtype="f4"))
+    data.create_dataset("action", data=np.c_[np.zeros((count, 6)), np.full(count, 0.5)].astype("f4"))
+    meta = root.create_group("meta")
+    meta.create_dataset("episode_ends", data=np.cumsum(lengths, dtype="i8"))
+    meta.create_dataset("episode_names", data=np.asarray(names))
+    root.attrs["episode_metadata"] = metadata
+    return root
+
+
+def test_link7_dataset_passes_with_decoded_images(tmp_path):
+    """新格式通过结构、时间、图像解码和窗口检查，并报告抖动摘要。"""
+    make_link7(tmp_path / "link7.zarr")
+    result = validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0)
+    assert result["valid"], result["errors"]
+    assert result["timing"][0]["selection_path"] == "same_rate"
+    assert result["timing"][0]["fitted_frame_rate_hz"] == pytest.approx(30.06, rel=1e-6)
+
+
+def test_link7_frame_drops_follow_nominal_time_and_warn(tmp_path):
+    """丢帧处名义时间按 (1+dropped)/30 跳变，校验通过并给出 FRAME_DROP 提示。"""
+    make_link7(tmp_path / "link7.zarr", dropped={0: {5: 1, 6: 2}})
+    result = validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0)
+    assert result["valid"], result["errors"]
+    assert "FRAME_DROP" in {item["code"] for item in result["warnings"]}
+
+
+@pytest.mark.parametrize("attribute, value, code", [
+    ("format", "fastumi-rm75-link7-v0", "FORMAT_MISMATCH"),
+    ("frequency", 20, "ATTRIBUTE_MISMATCH"),
+    ("pose_frame", "base_link", "ATTRIBUTE_MISMATCH"),
+    ("deployment_base_frame", "world", "ATTRIBUTE_MISMATCH"),
+    ("normalization_contract", "urdf-joint-limits-v1", "ATTRIBUTE_MISMATCH"),
+    ("urdf_sha256", "not-a-hash", "ATTRIBUTE_INVALID"),
+    ("gripper_upper", 2.0, "ATTRIBUTE_MISMATCH"),
+    ("time_calibration_status", "verified", "ATTRIBUTE_MISMATCH"),
+    ("action_time_reference", "nominal_frame_time", "ATTRIBUTE_MISMATCH"),
+])
+def test_link7_invalid_root_attributes_are_rejected(tmp_path, attribute, value, code):
+    """非法格式、频率、坐标系混淆、契约、URDF 摘要与时间状态均被拒绝。"""
+    root = make_link7(tmp_path / "link7.zarr")
+    root.attrs[attribute] = value
+    result = validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0)
+    assert code in codes(result)
+
+
+def test_link7_missing_root_attribute_is_rejected(tmp_path):
+    """缺失根属性被拒绝。"""
+    root = make_link7(tmp_path / "link7.zarr")
+    del root.attrs["timestamp_semantics"]
+    assert "ATTRIBUTE_MISMATCH" in codes(validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0))
+
+
+def test_link7_missing_names_or_time_arrays_are_rejected(tmp_path):
+    """缺少 episode 名称或追溯时间数组被拒绝。"""
+    root = make_link7(tmp_path / "a.zarr")
+    del root["meta/episode_names"]
+    assert "META_READ_FAILED" in codes(validate_dataset(tmp_path / "a.zarr", "rm75_umi", val_ratio=0))
+    root = make_link7(tmp_path / "b.zarr")
+    del root["data/nominal_timestamp_ns"]
+    assert "ARRAY_MISSING" in codes(validate_dataset(tmp_path / "b.zarr", "rm75_umi", val_ratio=0))
+
+
+def test_link7_image_decode_failure_is_rejected(tmp_path):
+    """损坏的 JPEG XL chunk 被实际解码并拒绝。"""
+    make_link7(tmp_path / "link7.zarr")
+    (tmp_path / "link7.zarr" / "data" / "camera0_rgb" / "3.0.0.0").write_bytes(b"broken")
+    assert "CHUNK_READ_FAILED" in codes(validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0))
+
+
+def test_link7_nominal_time_and_report_consistency(tmp_path):
+    """名义时间与丢帧不符、源索引不连续或报告丢帧数不一致都被拒绝。"""
+    root = make_link7(tmp_path / "a.zarr")
+    nominal = root["data/nominal_timestamp_ns"][:]
+    nominal[10:20] += 33_333_333
+    root["data/nominal_timestamp_ns"][:] = nominal
+    root["data/timestamp"][:] = nominal / 1e9
+    assert "TIMESTAMP_INVALID" in codes(validate_dataset(tmp_path / "a.zarr", "rm75_umi", val_ratio=0))
+    root = make_link7(tmp_path / "b.zarr")
+    source = root["data/source_image_index"][:]
+    source[10:20] += 1
+    root["data/source_image_index"][:] = source
+    assert "SOURCE_INDEX_INVALID" in codes(validate_dataset(tmp_path / "b.zarr", "rm75_umi", val_ratio=0))
+    root = make_link7(tmp_path / "c.zarr", dropped={0: {5: 1}})
+    metadata = root.attrs["episode_metadata"]
+    metadata[0]["frame_drop_count"] = 0
+    root.attrs["episode_metadata"] = metadata
+    assert "REPORT_MISMATCH" in codes(validate_dataset(tmp_path / "c.zarr", "rm75_umi", val_ratio=0))
+
+
+def test_link7_actual_interval_outside_tolerance_is_rejected(tmp_path):
+    """同频路径实际相邻间隔偏离整数倍周期超过 8 ms 被拒绝。"""
+    root = make_link7(tmp_path / "link7.zarr")
+    image = root["data/image_timestamp_ns"][:]
+    image[10:20] += 12_000_000
+    root["data/image_timestamp_ns"][:] = image
+    assert "INTERVAL_OUT_OF_TOLERANCE" in codes(validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0))
+
+
+def test_link7_high_rate_path_requires_zero_dropped_frames(tmp_path):
+    """高帧率路径的 dropped_frames_before 必须全为 0。"""
+    make_link7(tmp_path / "ok.zarr", path_kind="high_rate", fps=90.0)
+    result = validate_dataset(tmp_path / "ok.zarr", "rm75_umi", val_ratio=0)
+    assert result["valid"], result["errors"]
+    make_link7(tmp_path / "bad.zarr", path_kind="high_rate", fps=90.0, dropped={0: {5: 1}})
+    assert "DROPPED_FRAMES_INVALID" in codes(validate_dataset(tmp_path / "bad.zarr", "rm75_umi", val_ratio=0))
+
+
+def test_link7_single_episode_needs_zero_validation_ratio(tmp_path):
+    """单条 episode 用 --val-ratio 0 可通过；默认划分报告验证窗口不足。"""
+    make_link7(tmp_path / "one.zarr", lengths=(30,))
+    assert validate_dataset(tmp_path / "one.zarr", "rm75_umi", val_ratio=0)["valid"]
+    assert "NO_VALIDATION_WINDOWS" in codes(validate_dataset(tmp_path / "one.zarr", "rm75_umi"))

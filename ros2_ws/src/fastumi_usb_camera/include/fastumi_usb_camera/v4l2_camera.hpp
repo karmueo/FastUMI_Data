@@ -14,6 +14,8 @@
 #include <string>
 
 #include "fastumi_usb_camera/configuration.hpp"
+#include "fastumi_usb_camera/exposure_priority.hpp"
+#include "fastumi_usb_camera/frame_metadata.hpp"
 
 namespace fastumi_usb_camera
 {
@@ -35,8 +37,8 @@ std::string discover_video_device(
 class V4l2Camera
 {
 public:
-  /** @brief 完整 MJPEG 帧回调类型。 */
-  using FrameCallback = std::function<void(const uint8_t *, size_t)>;
+  /** @brief 完整 MJPEG 帧回调：字节、长度及缓冲区时间戳、序号和标志。 */
+  using FrameCallback = std::function<void(const uint8_t *, size_t, const FrameMetadata &)>;
 
   /**
    * @brief 打开设备、严格协商模式并启动采集线程。
@@ -68,6 +70,9 @@ public:
 
   /** @return 实际打开的 V4L2 设备路径。 */
   const std::string & device_path() const noexcept;
+
+  /** @return 启动时曝光优先控制的读取/关闭结果。 */
+  const ExposurePriorityStatus & exposure_priority_status() const noexcept;
 
 private:
   class Impl;

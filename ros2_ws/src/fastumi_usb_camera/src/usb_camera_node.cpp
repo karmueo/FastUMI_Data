@@ -1,6 +1,9 @@
 /**
  * @file usb_camera_node.cpp
  * @brief 通过共享 V4L2 采集核心发布 USB 相机原始图像或原生 JPEG。
+ *
+ * 图像 Header 默认取 V4L2 缓冲区单调时钟时间并映射到 ROS 时间（见 camera_timing.hpp），
+ * 解码与发布不重新打时间戳；每帧另在 ``image_raw/time_reference`` 发布时间诊断。
  */
 
 #include <atomic>
@@ -9,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -20,6 +24,7 @@
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 
+#include "fastumi_usb_camera/camera_timing.hpp"
 #include "fastumi_usb_camera/configuration.hpp"
 #include "fastumi_usb_camera/image_message.hpp"
 #include "fastumi_usb_camera/jpeg_frame.hpp"
@@ -31,10 +36,10 @@ namespace fastumi_usb_camera
 
 using SteadyClock = std::chrono::steady_clock;
 
-/** @brief 保存一帧原生 JPEG 及其主机接收时间。 */
+/** @brief 保存一帧原生 JPEG 及其时间信息。 */
 struct CapturedJpeg
 {
-  builtin_interfaces::msg::Time stamp;  ///< ROS 时钟下的帧接收时间。
+  StampedFrame timing;  ///< 映射后的 ROS 时间及原始缓冲区时间。
   std::vector<uint8_t> data;  ///< 从 V4L2 缓冲区复制出的完整 JPEG 字节。
 };
 
@@ -53,8 +58,11 @@ public:
       "frame_timeout_seconds", config_.frame_timeout_seconds);
     config_.video_device = declare_parameter<std::string>("video_device", "");
     config_.frame_id = declare_parameter<std::string>("frame_id", config_.frame_id);
+    config_.exposure_auto_priority = declare_parameter<std::string>(
+      "exposure_auto_priority", config_.exposure_auto_priority);
     publish_compressed_ = declare_parameter<bool>("publish_compressed", false);
     validate_configuration(config_);
+    timing_ = std::make_unique<CameraTiming>(*this, "image_raw/time_reference");
 
     rclcpp::QoS qos(rclcpp::KeepLast(5));  ///< 与既有接口一致的传感器 QoS。
     qos.best_effort();
@@ -95,13 +103,22 @@ public:
     worker_ = std::thread(&UsbCameraNode::process_frames, this);
     try {
       camera_ = std::make_unique<V4l2Camera>(
-        config_, [this](const uint8_t * data, size_t size) {capture_frame(data, size);});
+        config_, [this](const uint8_t * data, size_t size, const FrameMetadata & metadata) {
+          capture_frame(data, size, metadata);
+        });
     } catch (...) {
       frame_buffer_.close();
       worker_.join();
       started_ = false;
       throw;
     }
+    {
+      std::lock_guard<std::mutex> lock(exposure_mutex_);
+      exposure_summary_ = camera_->exposure_priority_status().summary();
+    }
+    RCLCPP_INFO(
+      get_logger(), "V4L2 exposure_auto_priority (%s requested): %s",
+      config_.exposure_auto_priority.c_str(), exposure_summary().c_str());
     RCLCPP_INFO(
       get_logger(), "Streaming V4L2 %s MJPEG %ldx%ld@%ld -> %s",
       camera_->device_path().c_str(), config_.width, config_.height, config_.fps,
@@ -138,8 +155,15 @@ private:
       SteadyClock::now().time_since_epoch()).count();
   }
 
-  /** @brief 在 V4L2 线程复制完整 JPEG 并覆盖旧待处理帧。 */
-  void capture_frame(const uint8_t * data, size_t size) noexcept
+  /** @return 曝光优先状态摘要。 */
+  std::string exposure_summary() const
+  {
+    std::lock_guard<std::mutex> lock(exposure_mutex_);
+    return exposure_summary_;
+  }
+
+  /** @brief 在 V4L2 线程生成时间、复制完整 JPEG 并覆盖旧待处理帧。 */
+  void capture_frame(const uint8_t * data, size_t size, const FrameMetadata & metadata) noexcept
   {
     if (stopping_ || data == nullptr || size == 0U) {
       callback_invalid_count_.fetch_add(1);
@@ -147,11 +171,13 @@ private:
     }
     try {
       CapturedJpeg captured;  ///< 即将进入最新帧缓存的 JPEG 数据。
-      captured.stamp = now();
+      captured.timing = timing_->stamp(metadata);
       captured.data.assign(data, data + size);
       captured_count_.fetch_add(1);
       last_frame_steady_ns_.store(steady_now_ns());
       frame_buffer_.push(std::move(captured));
+    } catch (const std::runtime_error & error) {
+      set_fatal_error(std::string("invalid V4L2 frame timestamp: ") + error.what());
     } catch (...) {
       set_fatal_error("failed to copy a frame from the V4L2 capture thread");
     }
@@ -162,12 +188,15 @@ private:
   {
     try {
       while (auto captured = frame_buffer_.wait_and_take()) {
+        const builtin_interfaces::msg::Time stamp =
+          to_time_msg(captured->timing.ros_ns);  ///< 采集时生成的 Header 时间。
         if (publish_compressed_) {
           sensor_msgs::msg::CompressedImage message = make_jpeg_message(
-            std::move(captured->data), captured->stamp,
+            std::move(captured->data), stamp,
             config_.frame_id);  ///< 原生 JPEG ROS 消息。
           compressed_publisher_->publish(std::move(message));
           published_count_.fetch_add(1);
+          timing_->publish_reference(captured->timing, config_.frame_id, exposure_summary());
           continue;
         }
 
@@ -179,9 +208,10 @@ private:
           continue;
         }
         sensor_msgs::msg::Image message = make_bgr_image_message(
-          bgr, captured->stamp, config_.frame_id);  ///< 待发布的 raw 图像消息。
+          bgr, stamp, config_.frame_id);  ///< 待发布的 raw 图像消息。
         image_publisher_->publish(std::move(message));
         published_count_.fetch_add(1);
+        timing_->publish_reference(captured->timing, config_.frame_id, exposure_summary());
       }
     } catch (const std::exception & error) {
       set_fatal_error(std::string("frame processing failed: ") + error.what());
@@ -223,10 +253,11 @@ private:
     const uint64_t camera_invalid = camera_ ? camera_->invalid_count() : 0U;  ///< 驱动坏帧数。
     RCLCPP_INFO(
       get_logger(),
-      "frames captured=%lu published=%lu overwritten=%lu invalid=%lu decode_failed=%lu",
+      "frames captured=%lu published=%lu overwritten=%lu invalid=%lu decode_failed=%lu %s "
+      "exposure_auto_priority=%s",
       captured_count_.load(), published_count_.load(),
       frame_buffer_.overwritten_count(), camera_invalid + callback_invalid_count_.load(),
-      decode_failure_count_.load());
+      decode_failure_count_.load(), timing_->diagnostics().c_str(), exposure_summary().c_str());
   }
 
   CameraConfiguration config_;  ///< 设备选择、采集模式及消息坐标系配置。
@@ -236,6 +267,9 @@ private:
     compressed_publisher_;  ///< 原生 JPEG 发布器。
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
     parameter_callback_;  ///< 拒绝运行时参数修改的回调句柄。
+  std::unique_ptr<CameraTiming> timing_;  ///< Header 时间、时钟映射与时间诊断。
+  mutable std::mutex exposure_mutex_;  ///< 保护曝光优先状态摘要。
+  std::string exposure_summary_{"pending"};  ///< 启动时曝光优先控制结果。
   LatestFrameBuffer<CapturedJpeg> frame_buffer_;  ///< 只保存最新待处理帧的缓存。
   std::unique_ptr<V4l2Camera> camera_;  ///< 唯一 V4L2 设备资源所有者。
   std::thread worker_;  ///< 图像解码和发布线程。
