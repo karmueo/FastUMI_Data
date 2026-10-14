@@ -342,6 +342,9 @@ class CollectionNode(Node):
                 low_rate_persist_s=float(
                     self.get_parameter("low_rate_persist_s").value
                 ),
+                gripper_invalid_persist_s=float(
+                    self.get_parameter("gripper_invalid_persist_s").value
+                ),
             ),
             mono_clock_ns=time.monotonic_ns,
             wall_clock_ns=lambda: self.get_clock().now().nanoseconds,
@@ -413,6 +416,8 @@ class CollectionNode(Node):
             "expected_gripper_rate_hz": 30.0,
             "min_rate_ratio": 0.95,
             "low_rate_persist_s": 2.0,
+            # 有效夹爪样本间隔将超过该值才报 GRIPPER_INVALID，与转换的 max_gripper_gap_s 对齐。
+            "gripper_invalid_persist_s": 0.2,
             # 标称源帧率及来源写入采集快照；0.0 表示未知。
             "nominal_source_fps": 0.0,
             "nominal_source_fps_source": "unknown",

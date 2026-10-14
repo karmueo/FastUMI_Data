@@ -6,8 +6,9 @@
 
     T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7
 
-Tracker 外参的时间偏移单位为秒，符号语义必须由绑定清单（或显式参数）声明，
-不能只凭 ``time_offset`` 字段名推断。部署外参的时间偏移不参与示教同步。
+Tracker 外参的 ``time_offset`` 单位为秒，固定按 ``t_camera = t_tracker + offset`` 解释
+（手眼标定报告的 ``t_eye = t_hand + offset``），即同一时刻相机时间戳比 Tracker 晚 offset，
+Tracker 查询时间为 ``t_image − offset``。部署外参的时间偏移不参与示教同步。
 """
 
 from __future__ import annotations
@@ -21,15 +22,6 @@ import numpy as np
 import yaml
 
 
-# 时间偏移语义 → Tracker 查询时间相对图像时间的符号：t_query = t_image + sign × offset。
-TIME_OFFSET_CONVENTIONS = {
-    # t_camera = t_tracker + offset（原 handeye_result 的 t_eye = t_hand + offset）。
-    "t_camera_eq_t_tracker_plus_offset": -1.0,
-    # t_tracker = t_camera + offset（Kalibr timeshift_cam_imu 一类定义）。
-    "t_tracker_eq_t_camera_plus_offset": 1.0,
-}
-# 时间标定状态：只有新时间戳链路重新标定并验收后才能为 verified。
-TIME_CALIBRATION_STATUSES = ("provisional", "verified")
 # 本次改动前的采集记录未写时间戳来源，它们的图像 Header 均为回调 now()。
 LEGACY_TIMESTAMP_SOURCE = "callback_now"
 # 绑定清单文件名后缀，与外参同目录：T_cam_tracker.yaml → T_cam_tracker.binding.yaml。
@@ -57,12 +49,13 @@ class HandEyeExtrinsic:
     """``cam0.T_cam_hand``，4×4，平移单位米。"""
     time_offset_s: Optional[float]
     inline_tracker_serial: str
-    inline_time_offset_convention: str
+    # 旧外参显式声明的偏移语义，仅用于检查与固定定义是否兼容。
+    inline_time_offset_convention: str = ""
 
 
 @dataclass(frozen=True)
 class TrackerBinding:
-    """Tracker 外参与设备序列号、来源记录和时间偏移语义的绑定清单。"""
+    """Tracker 外参与设备序列号、来源记录和标定时间戳来源的绑定清单。"""
 
     path: str
     sha256: str
@@ -70,8 +63,6 @@ class TrackerBinding:
     tracker_serial: str
     source_collection_uuid: str
     source_status_topic: str
-    time_offset_convention: str
-    time_calibration_status: str
     time_calibration_timestamp_source: str = ""
     """标定数据的图像 Header 时间戳来源；为空表示未声明。"""
     document: Dict[str, Any] = field(default_factory=dict)
@@ -89,10 +80,8 @@ class Link7Calibration:
     tracker_serial: str
     tracker_serial_source: str
     """``binding``、``inline``、``inline+binding`` 或 ``user_declared``。"""
-    time_offset_convention: str
     tracker_time_offset_ms: float
     """Tracker 查询时间 = 图像时间 + 本值（毫秒）。"""
-    time_calibration_status: str
     notes: tuple = ()
 
     def metadata(self) -> Dict[str, Any]:
@@ -113,9 +102,7 @@ class Link7Calibration:
             "T_Cd_Link7": self.end_camera.matrix.tolist(),
             "T_Tracker_Link7": self.tracker_to_link7.tolist(),
             "tracker_time_offset_source_s": self.tracker_camera.time_offset_s,
-            "time_offset_convention": self.time_offset_convention,
             "tracker_time_offset_ms": self.tracker_time_offset_ms,
-            "time_calibration_status": self.time_calibration_status,
             "time_calibration_timestamp_source": (
                 self.binding.time_calibration_timestamp_source if self.binding else ""
             ),
@@ -182,14 +169,15 @@ def load_hand_eye_extrinsic(path: str, label: str) -> HandEyeExtrinsic:
         if not np.isfinite(time_offset):
             raise CalibrationError(f"{label} time_offset 必须为有限数")
     serial = document.get("tracker_serial", "")
-    convention = document.get("time_offset_convention", "")
     return HandEyeExtrinsic(
         path=str(file_path),
         sha256=sha256_bytes(data),
         matrix=matrix,
         time_offset_s=time_offset,
         inline_tracker_serial=str(serial or "").strip(),
-        inline_time_offset_convention=str(convention or "").strip(),
+        inline_time_offset_convention=str(
+            document.get("time_offset_convention") or ""
+        ).strip(),
     )
 
 
@@ -223,16 +211,6 @@ def load_tracker_binding(path: Path, extrinsic: HandEyeExtrinsic) -> TrackerBind
         raise CalibrationError(
             f"绑定清单 {path} 指向 {calibration_file}，与外参文件名不一致"
         )
-    convention = str(document.get("time_offset_convention") or "").strip()
-    if convention and convention not in TIME_OFFSET_CONVENTIONS:
-        raise CalibrationError(
-            f"绑定清单 time_offset_convention 必须是 {sorted(TIME_OFFSET_CONVENTIONS)} 之一"
-        )
-    status = str(document.get("time_calibration_status") or "provisional").strip()
-    if status not in TIME_CALIBRATION_STATUSES:
-        raise CalibrationError(
-            f"绑定清单 time_calibration_status 必须是 {TIME_CALIBRATION_STATUSES} 之一"
-        )
     for key in ("source_collection_uuid", "source_status_topic"):
         if not str(document.get(key) or "").strip():
             raise CalibrationError(f"绑定清单 {path} 缺少 {key}")
@@ -243,8 +221,6 @@ def load_tracker_binding(path: Path, extrinsic: HandEyeExtrinsic) -> TrackerBind
         tracker_serial=serial,
         source_collection_uuid=str(document["source_collection_uuid"]).strip(),
         source_status_topic=str(document["source_status_topic"]).strip(),
-        time_offset_convention=convention,
-        time_calibration_status=status,
         time_calibration_timestamp_source=str(
             document.get("time_calibration_timestamp_source") or ""
         ).strip(),
@@ -261,20 +237,33 @@ def compose_tracker_to_link7(
     return np.linalg.inv(tracker) @ end
 
 
-def tracker_query_offset_ms(time_offset_s: float, convention: str) -> float:
-    """把源时间偏移按语义换算为“Tracker 查询时间 = 图像时间 + 返回值”的毫秒数。"""
-    if convention not in TIME_OFFSET_CONVENTIONS:
-        raise CalibrationError(f"未知时间偏移语义 {convention!r}")
-    return TIME_OFFSET_CONVENTIONS[convention] * float(time_offset_s) * 1000.0
+def tracker_query_offset_ms(time_offset_s: float) -> float:
+    """把 ``t_camera = t_tracker + offset`` 的偏移换算为“Tracker 查询时间 = 图像时间 + 返回值”的毫秒数。"""
+    return -float(time_offset_s) * 1000.0
+
+
+def _check_time_offset_convention(value: str, label: str) -> None:
+    """检查旧偏移声明；缺省或固定定义可用，冲突和未知定义抛出 CalibrationError。"""
+    if not value or value == "t_camera_eq_t_tracker_plus_offset":
+        return
+    if value == "t_tracker_eq_t_camera_plus_offset":
+        raise CalibrationError(
+            f"{label} 的 time_offset_convention={value} 与固定定义冲突；"
+            "请先将 Tracker 外参的 time_offset 取反，并将外参及绑定清单中的声明"
+            "更新为 t_camera_eq_t_tracker_plus_offset；修改外参后须更新绑定摘要"
+        )
+    raise CalibrationError(
+        f"{label} 的 time_offset_convention={value!r} 未知；"
+        "请先将 time_offset 换算为 t_camera_eq_t_tracker_plus_offset 并更新声明及绑定摘要"
+    )
 
 
 def load_link7_calibration(
     tracker_camera_path: str,
     end_camera_path: str,
     declared_tracker_serial: str = "",
-    declared_time_offset_convention: str = "",
 ) -> Link7Calibration:
-    """加载两份外参，解析 Tracker 身份和时间偏移语义并组合 Link7 变换。
+    """加载两份外参，解析 Tracker 身份和时间偏移并组合 Link7 变换。
 
     身份优先级：外参文件内 ``tracker_serial`` 与同目录绑定清单；两者同时存在时
     必须一致。均缺失时必须由 ``declared_tracker_serial`` 声明（记为用户声明）；
@@ -284,10 +273,9 @@ def load_link7_calibration(
         tracker_camera_path: ``T_cam_tracker`` 外参路径。
         end_camera_path: ``T_cam_end`` 外参路径。
         declared_tracker_serial: 命令行 ``--tracker-serial``，可为空。
-        declared_time_offset_convention: 绑定与文件均未声明语义时的显式语义。
 
     Raises:
-        CalibrationError: 任一身份、摘要、语义或矩阵检查失败。
+        CalibrationError: 任一身份、摘要、旧时间偏移声明或矩阵检查失败。
     """
     tracker = load_hand_eye_extrinsic(tracker_camera_path, "Tracker 相机外参")
     end = load_hand_eye_extrinsic(end_camera_path, "末端相机外参")
@@ -295,6 +283,14 @@ def load_link7_calibration(
     binding = (
         load_tracker_binding(binding_file, tracker) if binding_file.is_file() else None
     )
+    _check_time_offset_convention(
+        tracker.inline_time_offset_convention, f"Tracker 外参 {tracker.path}"
+    )
+    if binding is not None:
+        _check_time_offset_convention(
+            str(binding.document.get("time_offset_convention") or "").strip(),
+            f"绑定清单 {binding.path}",
+        )
     notes = []
     serial = ""
     serial_source = ""
@@ -327,35 +323,12 @@ def load_link7_calibration(
             f"也无绑定清单 {binding_file.name}；请用 --tracker-serial 声明标定所用设备"
         )
 
-    convention = (
-        (binding.time_offset_convention if binding else "")
-        or tracker.inline_time_offset_convention
-    )
-    declared_convention = declared_time_offset_convention.strip()
-    if convention and declared_convention and declared_convention != convention:
-        raise CalibrationError(
-            f"显式时间偏移语义 {declared_convention} 与外参声明 {convention} 冲突"
-        )
-    convention = convention or declared_convention
     time_offset_s = tracker.time_offset_s
     if time_offset_s is None:
         time_offset_s = 0.0
         notes.append("Tracker 外参没有 time_offset，按 0 处理")
-        convention = convention or "t_camera_eq_t_tracker_plus_offset"
-    elif not convention:
-        if time_offset_s != 0.0:
-            raise CalibrationError(
-                "Tracker 外参含非零 time_offset，但绑定清单和文件均未声明符号语义；"
-                "请在绑定清单写入 time_offset_convention 或显式提供语义"
-            )
-        convention = "t_camera_eq_t_tracker_plus_offset"
-    if convention not in TIME_OFFSET_CONVENTIONS:
-        raise CalibrationError(
-            f"时间偏移语义必须是 {sorted(TIME_OFFSET_CONVENTIONS)} 之一，当前为 {convention!r}"
-        )
     if end.time_offset_s is not None:
         notes.append("末端相机外参的 time_offset 属于部署标定，不参与示教同步")
-    status = binding.time_calibration_status if binding else "provisional"
     return Link7Calibration(
         tracker_to_link7=compose_tracker_to_link7(tracker.matrix, end.matrix),
         tracker_camera=tracker,
@@ -363,9 +336,7 @@ def load_link7_calibration(
         binding=binding,
         tracker_serial=serial,
         tracker_serial_source=serial_source,
-        time_offset_convention=convention,
-        tracker_time_offset_ms=tracker_query_offset_ms(time_offset_s, convention),
-        time_calibration_status=status,
+        tracker_time_offset_ms=tracker_query_offset_ms(time_offset_s),
         notes=tuple(notes),
     )
 

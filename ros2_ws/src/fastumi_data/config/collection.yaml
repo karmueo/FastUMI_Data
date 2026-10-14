@@ -45,6 +45,10 @@ collection_node:
     expected_gripper_rate_hz: 30.0
     min_rate_ratio: 0.95
     low_rate_persist_s: 2.0
+    # 相邻有效夹爪样本允许的最大源时间间隔（秒）：连续无效到下一帧恢复也会超过该值时
+    # 才报 GRIPPER_INVALID，偶发单帧漏检不报警；与离线转换的 max_gripper_gap_s 对齐，
+    # 0 表示单帧无效即报警。
+    gripper_invalid_persist_s: 0.2
     # 确认生效的标称源帧率及来源，写入 session.yaml 供离线转换选择选帧路径；
     # 0.0 表示未知（外部相机须通过 launch 的 external_camera_fps 声明）。
     nominal_source_fps: 0.0

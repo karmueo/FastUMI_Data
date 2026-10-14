@@ -60,8 +60,6 @@ def calibration(tmp_path: Path) -> dict:
                 "tracker_serial": "LHR-TEST",
                 "source_collection_uuid": "uuid",
                 "source_status_topic": "/vive_tracker/status",
-                "time_offset_convention": "t_camera_eq_t_tracker_plus_offset",
-                "time_calibration_status": "provisional",
             }
         ),
         encoding="utf-8",
@@ -146,7 +144,7 @@ def test_batch_converts_records_to_link7_hdf5_and_zarr(tmp_path: Path, calibrati
     assert attrs["urdf_sha256"] == hashlib.sha256(
         (output / "snapshots/urdf/robot.urdf").read_bytes()
     ).hexdigest()
-    assert attrs["time_calibration_status"] == "provisional"
+    assert "time_calibration_status" not in attrs
     names = [str(name) for name in store["meta/episode_names"][:]]
     assert names == [
         "task_a/20260101T000000Z_a/episode_0000",
@@ -219,7 +217,6 @@ def test_custom_extrinsic_without_binding_requires_tracker_serial(tmp_path, cali
     assert "--tracker-serial" in capsys.readouterr().err
     status = run_batch(arguments(
         data, tmp_path / "out2", calibration, "--tracker-serial", "LHR-TEST",
-        "--tracker-time-offset-convention", "t_camera_eq_t_tracker_plus_offset",
     ))
     assert status == 0
     store = zarr.open_group(str(tmp_path / "out2" / "dataset.zarr"), mode="r")

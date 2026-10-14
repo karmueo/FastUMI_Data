@@ -83,8 +83,8 @@ def test_second_storage_on_same_root_is_rejected_until_released(
     second.release()
 
 
-def test_publish_moves_staging_to_task_uuid_directory(tmp_path: Path) -> None:
-    """验证发布后目录为 <task>/<UTC>_<uuid>，暂存区被清空。"""
+def test_publish_moves_staging_to_task_index_directory(tmp_path: Path) -> None:
+    """验证发布后目录为 <task>/<北京时间>_<id>，暂存区被清空。"""
     storage = _storage(tmp_path)
     identifier = str(uuid.uuid4())
     staged = storage.create_staging(identifier, "pick_place")
@@ -93,12 +93,74 @@ def test_publish_moves_staging_to_task_uuid_directory(tmp_path: Path) -> None:
     destination = storage.publish(staged)
 
     assert destination == (
-        storage.root / "pick_place" / f"20260506T070809Z_{identifier}"
+        storage.root / "pick_place" / "2026-05-06_15-08-09_0"
     )
     assert (destination / "raw").is_dir()
     assert not (destination / OWNER_MARKER).exists()
     assert not staged.root.exists()
     assert list(storage.staging_root.iterdir()) == []
+
+
+def _dir_names(storage: CollectionStorage, task: str) -> list:
+    """返回任务目录下按名称排序的记录目录名。"""
+    return sorted(entry.name for entry in (storage.root / task).iterdir())
+
+
+def _index(dir_name: str) -> int:
+    """取出目录名末尾的递增 id。"""
+    return int(dir_name.rsplit("_", 1)[1])
+
+
+def test_index_increments_per_task(tmp_path: Path) -> None:
+    """验证同一任务 id 从 0 递增，不同任务各自从 0 开始。"""
+    storage = _storage(tmp_path)
+    for _ in range(3):
+        _save(storage, "task_a")
+    _save(storage, "task_b")
+
+    assert [_index(name) for name in _dir_names(storage, "task_a")] == [0, 1, 2]
+    assert [_index(name) for name in _dir_names(storage, "task_b")] == [0]
+
+
+def test_deleted_index_is_not_reused(tmp_path: Path) -> None:
+    """验证删除最新记录后，新记录的 id 仍继续递增。"""
+    storage = _storage(tmp_path)
+    _save(storage, "task_a")
+    latest = _save(storage, "task_a")
+    storage.delete(latest)
+
+    _save(storage, "task_a")
+
+    assert [_index(name) for name in _dir_names(storage, "task_a")] == [0, 2]
+
+
+def test_discarded_staging_does_not_consume_index(tmp_path: Path) -> None:
+    """验证取消的暂存采集不占用 id。"""
+    storage = _storage(tmp_path)
+    storage.discard(storage.create_staging(str(uuid.uuid4()), "task_a"))
+
+    _save(storage, "task_a")
+
+    assert [_index(name) for name in _dir_names(storage, "task_a")] == [0]
+
+
+def test_legacy_dirs_ignored_for_index_but_still_found(tmp_path: Path) -> None:
+    """验证旧 <UTC>_<uuid> 目录不影响 id，但仍可按 UUID 查找和删除。"""
+    storage = _storage(tmp_path)
+    identifier = str(uuid.uuid4())
+    legacy = storage.root / "task_a" / f"20260101T000000Z_{identifier}"
+    legacy.mkdir(parents=True)
+    (legacy / "session.yaml").write_text(
+        yaml.safe_dump({"collection_uuid": identifier, "task_name": "task_a"}),
+        encoding="utf-8",
+    )
+
+    _save(storage, "task_a")
+
+    assert storage.find_saved(identifier) == legacy
+    assert _index(_dir_names(storage, "task_a")[0]) == 0
+    destination = storage.delete(identifier)
+    assert destination.name == f"task_a__{legacy.name}"
 
 
 def test_cleanup_removes_only_owned_staging_and_keeps_saved_records(
@@ -202,7 +264,7 @@ def test_symlinked_task_directory_is_ignored(tmp_path: Path) -> None:
     storage = _storage(tmp_path)
     outside = tmp_path / "outside"
     identifier = str(uuid.uuid4())
-    record = outside / f"20260101T000000Z_{identifier}"
+    record = outside / "2026-01-01_08-00-00_0"
     record.mkdir(parents=True)
     (record / "session.yaml").write_text(
         yaml.safe_dump({"collection_uuid": identifier, "task_name": "x"}),

@@ -5,7 +5,7 @@
     <root>/.fastumi_collection.lock      根目录独占锁
     <root>/.staging/<uuid>/              未保存采集，含归属标记
     <root>/.trash/<task>__<dir_name>/    已删除的正式记录
-    <root>/<task>/<UTC时间>_<uuid>/      已保存的正式记录
+    <root>/<task>/<北京时间>_<id>/       已保存的正式记录，id 按任务从 0 递增
 
 清理只会触及带有效归属标记的暂存目录，因此不会误删已保存记录。
 """
@@ -16,7 +16,7 @@ import fcntl
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import shutil
@@ -38,8 +38,12 @@ OWNER_MARKER = ".fastumi_staging.json"
 _TASK_NAME_PATTERN = re.compile(r"^\w[\w.\-]{0,63}$")
 # 采集名称的最大长度。
 MAX_NAME_LENGTH = 128
-# 正式目录名中的 UTC 时间格式。
-DIR_TIME_FORMAT = "%Y%m%dT%H%M%SZ"
+# 正式目录名中的北京时间格式。
+DIR_TIME_FORMAT = "%Y-%m-%d_%H-%M-%S"
+# 正式目录名使用的固定时区（北京时间，UTC+8）。
+BEIJING_TZ = timezone(timedelta(hours=8))
+# 正式目录名 ``<北京时间>_<id>``，捕获组为任务内递增 id。
+_DIR_NAME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_(\d+)$")
 # 预留的任务目录名，避免与内部目录冲突。
 _RESERVED_NAMES = frozenset({STAGING_NAME, TRASH_NAME})
 
@@ -61,7 +65,7 @@ class StagedCollection:
     uuid: str
     task_name: str
     dir_name: str
-    """发布后的目录名 ``<UTC时间>_<uuid>``。"""
+    """发布后的目录名 ``<北京时间>_<id>``。"""
     root: Path
     """暂存目录 ``<root>/.staging/<uuid>``。"""
 
@@ -167,6 +171,30 @@ def directory_size_bytes(path: Path) -> int:
         if child.is_file() and not child.is_symlink():
             total += child.stat().st_size
     return total
+
+
+def _load_manifest(directory: Path) -> Optional[Mapping[str, Any]]:
+    """读取记录目录的 ``session.yaml``；符号链接、非目录或无法解析时返回 ``None``。"""
+    if directory.is_symlink() or not directory.is_dir():
+        return None
+    try:
+        document = yaml.safe_load(
+            (directory / "session.yaml").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _record_uuid(directory: Path) -> Optional[str]:
+    """返回记录目录清单中的规范化采集 UUID；不是有效记录时返回 ``None``。"""
+    document = _load_manifest(directory)
+    if document is None:
+        return None
+    try:
+        return parse_uuid(str(document["collection_uuid"]))
+    except (KeyError, StorageError):
+        return None
 
 
 class CollectionStorage:
@@ -300,7 +328,8 @@ class CollectionStorage:
         task = validate_task_name(task_name)
         identifier = parse_uuid(collection_uuid)
         started = self._clock()
-        dir_name = f"{started.strftime(DIR_TIME_FORMAT)}_{identifier}"
+        local_time = started.astimezone(BEIJING_TZ).strftime(DIR_TIME_FORMAT)
+        dir_name = f"{local_time}_{self._next_index(task)}"
         root = self.staging_root / identifier
         try:
             root.mkdir()
@@ -323,6 +352,29 @@ class CollectionStorage:
                 "STAGING_FAILED", f"无法创建暂存目录: {error}"
             ) from error
         return StagedCollection(identifier, task, dir_name, root)
+
+    def _next_index(self, task: str) -> int:
+        """返回任务下一个目录 id：已保存与回收区记录的最大 id 加一。
+
+        回收区记录也计入，保证已删除的 id 不被复用；旧格式目录名被忽略。
+        """
+        names: List[str] = []
+        task_dir = self._root / task
+        if task_dir.is_dir() and not task_dir.is_symlink():
+            names.extend(entry.name for entry in task_dir.iterdir())
+        prefix = f"{task}__"
+        if self.trash_root.is_dir():
+            names.extend(
+                entry.name[len(prefix):]
+                for entry in self.trash_root.iterdir()
+                if entry.name.startswith(prefix)
+            )
+        indices = [
+            int(match.group(1))
+            for match in map(_DIR_NAME_PATTERN.match, names)
+            if match is not None
+        ]
+        return max(indices) + 1 if indices else 0
 
     def discard(self, staged: StagedCollection) -> None:
         """删除一条暂存采集；目录不属于本服务时拒绝。"""
@@ -369,12 +421,7 @@ class CollectionStorage:
         identifier = parse_uuid(collection_uuid)
         for task_dir in self._task_dirs():
             for candidate in task_dir.iterdir():
-                if (
-                    candidate.name.endswith(f"_{identifier}")
-                    and candidate.is_dir()
-                    and not candidate.is_symlink()
-                    and (candidate / "session.yaml").is_file()
-                ):
+                if _record_uuid(candidate) == identifier:
                     return self._inside_root(candidate)
         return None
 
@@ -452,13 +499,10 @@ class CollectionStorage:
 
     def _read_record(self, directory: Path) -> Optional[SavedRecord]:
         """从 ``session.yaml`` 读取记录摘要，无法解析的目录被忽略。"""
-        if directory.is_symlink() or not directory.is_dir():
+        document = _load_manifest(directory)
+        if document is None:
             return None
-        manifest_path = directory / "session.yaml"
         try:
-            document = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-            if not isinstance(document, dict):
-                return None
             identifier = parse_uuid(str(document["collection_uuid"]))
             counts = document.get("message_counts") or {}
             quality = document.get("quality") or {}
@@ -478,7 +522,7 @@ class CollectionStorage:
                 calibrated=document.get("calibration_status") == "calibrated",
                 has_alarms=bool(quality.get("has_alarms", False)),
             )
-        except (OSError, KeyError, ValueError, TypeError, StorageError, yaml.YAMLError):
+        except (KeyError, ValueError, TypeError, StorageError):
             return None
 
     def free_disk_bytes(self) -> int:

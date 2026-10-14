@@ -3,18 +3,14 @@
 schema_version: 1
 # 被绑定外参文件名（同目录）及其原始字节 SHA-256。
 calibration_file: T_cam_tracker.yaml
-calibration_sha256: cce6807d8266935d6d5a9429773527707766ae007d7f66f167de4e662947c166
-# 标定数据来源记录中 /vive_tracker/status 全部 3523 条均为该序列号，且连接与跟踪有效。
+calibration_sha256: 1e5f2758fd102b577946124d93e769c8298b60bbcc32648314226b4649118f50
+# 标定数据来源记录中 /vive_tracker/status 全部 3747 条均为该序列号，且连接与跟踪有效。
 tracker_serial: LHR-B77A06A7
-source_collection_uuid: 5359836d-b6db-4ed7-ab6c-19ec4c516de8
+source_collection_uuid: 4c5ce199-66f0-47a0-a9e4-0323373acf2a
 source_status_topic: /vive_tracker/status
-# 原始标定报告：timeOffset (t_eye = t_hand + offset)，即 t_camera = t_tracker + offset，单位秒。
-time_offset_convention: t_camera_eq_t_tracker_plus_offset
-# 旧 now() 时间戳链路的标定，只用于流程验证；新链路重新标定并验收后才可改为 verified。
-time_calibration_status: provisional
 # 标定数据的图像 Header 时间戳来源；convert_mcap 要求与每条记录的时间戳来源一致。
-# 实测新 V4L2 缓冲区时间比回调 now() 早约 33 ms，与本偏移量级相同，因此不能混用。
-time_calibration_timestamp_source: callback_now
+time_calibration_timestamp_source: v4l2_buffer_monotonic_mapped_to_ros
 time_calibration_conditions: >-
-  2026-10-12 tag_jpeg_1 记录，约 30 Hz JPEG，图像 Header 为回调 now()，
-  非 V4L2 SOE→ROS 映射时间戳。
+  2026-10-13 tag_compressed_2 记录（4c5ce199），30 Hz JPEG compressed 模式，
+  图像 Header 为 V4L2 缓冲区 SOE 单调时间映射到 ROS 时间（时钟映射 gen=1 无重置），
+  约 37 s；角速度对齐残差 0.00139，偏移约 1.84 ms。

@@ -85,6 +85,65 @@ inline ButtonGate compute_button_gate(
   return gate;
 }
 
+/** @brief 采集面板识别的全局按键。 */
+enum class CollectionKey
+{
+  /** @brief 非快捷键。 */
+  kOther,
+  /** @brief Space：开始或停止并保存。 */
+  kSpace,
+  /** @brief Esc：停止并取消。 */
+  kEscape,
+  /** @brief 主键盘 Return 或小键盘 Enter：保存待保存采集。 */
+  kEnter,
+};
+
+/** @brief 全局按键需要触发、吞掉或放行的采集操作。 */
+enum class CollectionShortcut
+{
+  /** @brief 不处理，继续交给 RViz/Qt。 */
+  kNone,
+  /** @brief 吞掉按键但不触发操作。 */
+  kSuppress,
+  kStart,
+  kStopAndSave,
+  kStopAndCancel,
+  kSave,
+};
+
+/**
+ * @brief 按当前按钮门控对全局按键分类；按键只在对应按钮可点击时生效。
+ * @param key 已识别的按键。
+ * @param auto_repeat 是否为长按产生的自动重复事件。
+ * @param text_input_focused 文本输入控件是否持有焦点，此时按键留给输入。
+ * @param modal_active 是否有模态对话框（如确认框），此时按键留给对话框。
+ * @param gate 与按钮一致的可用性。
+ */
+inline CollectionShortcut classify_collection_shortcut(
+  CollectionKey key, bool auto_repeat, bool text_input_focused, bool modal_active,
+  const ButtonGate & gate)
+{
+  if (key == CollectionKey::kOther || text_input_focused || modal_active) {
+    return CollectionShortcut::kNone;
+  }
+  if (auto_repeat) {
+    return CollectionShortcut::kSuppress;
+  }
+  switch (key) {
+    case CollectionKey::kSpace:
+      /** @brief Space 全局保留：不可用时也吞掉，避免误按当前持有焦点的按钮。 */
+      if (gate.start) {return CollectionShortcut::kStart;}
+      if (gate.stop_and_save) {return CollectionShortcut::kStopAndSave;}
+      return CollectionShortcut::kSuppress;
+    case CollectionKey::kEscape:
+      return gate.stop_and_cancel ? CollectionShortcut::kStopAndCancel : CollectionShortcut::kNone;
+    case CollectionKey::kEnter:
+      return gate.save ? CollectionShortcut::kSave : CollectionShortcut::kNone;
+    default:
+      return CollectionShortcut::kNone;
+  }
+}
+
 /**
  * @brief 判断收到的状态是否应覆盖当前显示；版本回退的过期状态被丢弃。
  * @param have_status 是否已经应用过状态。

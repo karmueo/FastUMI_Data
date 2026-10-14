@@ -167,10 +167,6 @@ def check_contract(attrs, kind, findings):
             expected = 0.0 if key == "gripper_lower" else 1.0
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value != expected:
                 findings.add("errors", "ATTRIBUTE_MISMATCH", key, expected, value)
-        status = attrs.get("time_calibration_status")
-        if status not in ("provisional", "verified"):
-            findings.add("errors", "ATTRIBUTE_INVALID", "time_calibration_status",
-                         "provisional 或 verified", status)
     elif kind == "rm75_umi":
         for key, expected in (("stored_action_layout", "xyz_rotvec_gripper"),
                               ("base_frame", "base_link"), ("end_frame", "Link7"),
@@ -397,7 +393,6 @@ def _episode_metadata(attrs, names, findings):
         findings.add("errors", "EPISODE_METADATA_INVALID", "episode_metadata",
                      f"{len(names)} 条逐 episode 元数据", type(records).__name__)
         return None
-    statuses = []
     for episode, (record, name) in enumerate(zip(records, names)):
         if not isinstance(record, dict) or record.get("name") != name:
             findings.add("errors", "EPISODE_METADATA_INVALID", "episode_metadata",
@@ -412,15 +407,6 @@ def _episode_metadata(attrs, names, findings):
                          "selection_path 为 same_rate/high_rate，nominal_source_fps 为有限正数",
                          [record.get("selection_path"), fps], episode)
             return None
-        statuses.append(record.get("time_calibration_status"))
-    if any(status not in ("provisional", "verified") for status in statuses):
-        findings.add("errors", "ATTRIBUTE_INVALID", "episode_metadata.time_calibration_status",
-                     "provisional 或 verified", statuses[:MAX_EXAMPLES])
-    expected_root = "verified" if all(status == "verified" for status in statuses) else "provisional"
-    if attrs.get("time_calibration_status") != expected_root:
-        findings.add("errors", "ATTRIBUTE_MISMATCH", "time_calibration_status",
-                     f"{expected_root}（全部来源 verified 时才为 verified）",
-                     attrs.get("time_calibration_status"))
     return records
 
 

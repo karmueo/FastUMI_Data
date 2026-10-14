@@ -13,18 +13,24 @@
 #include <sstream>
 #include <string>
 
-#include <QDateTime>
+#include <QAbstractSpinBox>
+#include <QApplication>
+#include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStringList>
+#include <QTextEdit>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -77,6 +83,36 @@ const char * level_color(StreamLevel level)
   }
 }
 
+/** @brief 当前焦点控件是否在接收文本输入，此时快捷键不拦截按键。 */
+bool text_input_focused()
+{
+  QWidget * focus = QApplication::focusWidget();
+  if (focus == nullptr) {return false;}
+  if (qobject_cast<QLineEdit *>(focus) != nullptr ||
+    qobject_cast<QTextEdit *>(focus) != nullptr ||
+    qobject_cast<QPlainTextEdit *>(focus) != nullptr ||
+    qobject_cast<QAbstractSpinBox *>(focus) != nullptr)
+  {
+    return true;
+  }
+  const auto * combo = qobject_cast<QComboBox *>(focus);
+  return combo != nullptr && combo->isEditable();
+}
+
+/** @brief 把无修饰键的按键映射为采集快捷键；小键盘 Enter 允许带 Keypad 修饰。 */
+CollectionKey collection_key(const QKeyEvent & event)
+{
+  const Qt::KeyboardModifiers modifiers = event.modifiers() & ~Qt::KeypadModifier;
+  if (modifiers != Qt::NoModifier) {return CollectionKey::kOther;}
+  switch (event.key()) {
+    case Qt::Key_Space: return CollectionKey::kSpace;
+    case Qt::Key_Escape: return CollectionKey::kEscape;
+    case Qt::Key_Return:
+    case Qt::Key_Enter: return CollectionKey::kEnter;
+    default: return CollectionKey::kOther;
+  }
+}
+
 }  // namespace
 
 /** @brief 构造控件、布局和定时器。 */
@@ -90,10 +126,10 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   message_label_(new QLabel("", this)),
   task_edit_(new QLineEdit("task", this)),
   name_edit_(new QLineEdit(this)),
-  start_button_(new QPushButton("开始采集", this)),
-  stop_and_save_button_(new QPushButton("停止并保存", this)),
-  stop_and_cancel_button_(new QPushButton("停止并取消", this)),
-  save_button_(new QPushButton("保存", this)),
+  start_button_(new QPushButton("开始采集 (Space)", this)),
+  stop_and_save_button_(new QPushButton("停止并保存 (Space)", this)),
+  stop_and_cancel_button_(new QPushButton("停止并取消 (Esc)", this)),
+  save_button_(new QPushButton("保存 (Enter)", this)),
   cancel_button_(new QPushButton("取消", this)),
   image_label_(new QLabel("--", this)),
   tracker_label_(new QLabel("--", this)),
@@ -117,7 +153,9 @@ CollectionPanel::CollectionPanel(QWidget * parent)
     std::lock_guard<std::mutex> lock(callback_gate_->mutex);
     callback_gate_->panel = this;
   }
-  auto * layout = new QVBoxLayout(this);
+  /** @brief 内容放进滚动区：面板最小高度不再撑大主窗口，否则窗口管理器拒绝最大化。 */
+  auto * content = new QWidget();
+  auto * layout = new QVBoxLayout(content);
 
   auto * overview = new QFormLayout();
   overview->addRow("后端连接", connection_label_);
@@ -168,6 +206,7 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   health_layout->addRow("Tracker", tracker_label_);
   health_layout->addRow("夹爪", gripper_label_);
   health_layout->addRow("夹爪开合", gripper_bar_);
+  counts_label_->setWordWrap(true);
   health_layout->addRow("已写入", counts_label_);
   layout->addWidget(health_box);
   alarms_label_->setWordWrap(true);
@@ -187,7 +226,15 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   records_layout->addLayout(paging);
   records_layout->addWidget(delete_button_);
   layout->addWidget(records_box);
-  setLayout(layout);
+  auto * scroll = new QScrollArea(this);
+  scroll->setWidgetResizable(true);
+  scroll->setFrameShape(QFrame::NoFrame);
+  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll->setWidget(content);
+  auto * outer = new QVBoxLayout(this);
+  outer->setContentsMargins(0, 0, 0, 0);
+  outer->addWidget(scroll);
+  setLayout(outer);
 
   connect(start_button_, &QPushButton::clicked, this, &CollectionPanel::request_start);
   connect(stop_and_save_button_, &QPushButton::clicked, this,
@@ -202,6 +249,14 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   connect(next_button_, &QPushButton::clicked, this, &CollectionPanel::next_page);
   connect(filter_edit_, &QLineEdit::returnPressed, this, &CollectionPanel::apply_task_filter);
   connect(task_edit_, &QLineEdit::textChanged, this, &CollectionPanel::refresh_controls);
+  /** @brief 输入框只在点击时获得焦点，回车后交还焦点，使全局快捷键恢复可用。 */
+  for (QLineEdit * edit : {task_edit_, name_edit_, filter_edit_}) {
+    edit->setFocusPolicy(Qt::ClickFocus);
+    connect(edit, &QLineEdit::returnPressed, edit, [edit]() {
+      /** @brief 保留本次回车传播期间的输入焦点，避免同一按键被全局快捷键再次处理。 */
+      QTimer::singleShot(0, edit, &QWidget::clearFocus);
+    });
+  }
   connect(record_list_, &QListWidget::itemSelectionChanged, this,
     &CollectionPanel::refresh_controls);
 
@@ -210,6 +265,7 @@ CollectionPanel::CollectionPanel(QWidget * parent)
   connection_timer_->setInterval(kConnectionCheckMs);
   connect(connection_timer_, &QTimer::timeout, this, &CollectionPanel::check_connection);
   connection_timer_->start();
+  qApp->installEventFilter(this);
   refresh_controls();
 }
 
@@ -224,6 +280,40 @@ CollectionPanel::~CollectionPanel()
   callback_gate_.reset();
   connection_timer_->stop();
   request_timer_->stop();
+  /** @brief 析构前撤销应用级过滤器，避免 Qt 向已销毁对象投递按键。 */
+  if (qApp != nullptr) {
+    qApp->removeEventFilter(this);
+  }
+}
+
+/** @brief 按当前门控把全局按键分发到与按钮相同的请求处理。 */
+bool CollectionPanel::eventFilter(QObject * watched, QEvent * event)
+{
+  if (event->type() == QEvent::KeyPress) {
+    const auto * key_event = static_cast<QKeyEvent *>(event);
+    const CollectionShortcut action = classify_collection_shortcut(
+      collection_key(*key_event), key_event->isAutoRepeat(), text_input_focused(),
+      QApplication::activeModalWidget() != nullptr, current_gate());
+    switch (action) {
+      case CollectionShortcut::kNone:
+        break;
+      case CollectionShortcut::kSuppress:
+        return true;
+      case CollectionShortcut::kStart:
+        request_start();
+        return true;
+      case CollectionShortcut::kStopAndSave:
+        request_stop_and_save();
+        return true;
+      case CollectionShortcut::kStopAndCancel:
+        request_stop_and_cancel();
+        return true;
+      case CollectionShortcut::kSave:
+        request_save();
+        return true;
+    }
+  }
+  return rviz_common::Panel::eventFilter(watched, event);
 }
 
 /** @brief 创建状态订阅和服务客户端。 */
@@ -509,8 +599,8 @@ void CollectionPanel::show_message(const std::string & text, bool error)
   message_label_->setText(QString::fromStdString(text));
 }
 
-/** @brief 根据后端可用性、连接和在途请求刷新按钮。 */
-void CollectionPanel::refresh_controls()
+/** @brief 计算与按钮一致的门控，供刷新按钮和快捷键共用。 */
+ButtonGate CollectionPanel::current_gate() const
 {
   BackendFlags flags;
   flags.can_start = status_.can_start;
@@ -521,8 +611,16 @@ void CollectionPanel::refresh_controls()
   flags.can_stop_and_cancel = status_.can_stop_and_cancel;
   const bool connected = status_is_fresh(have_status_, steady_now_ms(), last_status_ms_);
   const bool pending = !pending_request_id_.empty();
-  const ButtonGate gate = compute_button_gate(
+  return compute_button_gate(
     flags, connected, pending, task_name_acceptable(task_edit_->text().toStdString()));
+}
+
+/** @brief 根据后端可用性、连接和在途请求刷新按钮。 */
+void CollectionPanel::refresh_controls()
+{
+  const ButtonGate gate = current_gate();
+  const bool connected = status_is_fresh(have_status_, steady_now_ms(), last_status_ms_);
+  const bool pending = !pending_request_id_.empty();
   start_button_->setEnabled(gate.start);
   stop_and_save_button_->setEnabled(gate.stop_and_save);
   stop_and_cancel_button_->setEnabled(gate.stop_and_cancel);
@@ -707,10 +805,9 @@ void CollectionPanel::apply_list(
   record_list_->clear();
   record_uuids_.clear();
   for (const auto & record : records) {
-    const QDateTime created = QDateTime::fromSecsSinceEpoch(
-      static_cast<qint64>(record.created_at), Qt::UTC);
+    /** @brief 行首直接用目录名 <北京时间>_<id>，与磁盘一致，不再自行换算时间。 */
     QString line = QString("%1　%2%3　%4 帧　%5　%6")
-      .arg(created.toString("yyyy-MM-dd HH:mm:ss'Z'"))
+      .arg(QString::fromStdString(record.dir_name))
       .arg(QString::fromStdString(record.task_name))
       .arg(record.name.empty() ? QString() : "／" + QString::fromStdString(record.name))
       .arg(record.image_messages)

@@ -41,7 +41,7 @@ ZARR_FORMAT = "fastumi-rm75-link7-v1"
 IMAGE_SIZE = 224
 # 图像逐批写入及回读校验的帧数。
 _IMAGE_BATCH = 64
-# 根属性固定契约；urdf_sha256、complete 与 time_calibration_status 运行时写入。
+# 根属性固定契约；urdf_sha256 与 complete 运行时写入。
 ROOT_CONTRACT: Dict[str, Any] = {
     "format": ZARR_FORMAT,
     "frequency": 30,
@@ -157,11 +157,6 @@ def to_jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=default))
 
 
-def time_calibration_summary(statuses: Sequence[str]) -> str:
-    """全部来源 verified 时为 verified，否则为 provisional。"""
-    return "verified" if statuses and all(item == "verified" for item in statuses) else "provisional"
-
-
 def export_link7_zarr(
     episodes: Sequence[ZarrEpisodeSource],
     output_path: Path,
@@ -255,13 +250,11 @@ def export_link7_zarr(
         for key in NUMERIC_ARRAYS:
             if not np.array_equal(numeric[key][record["start"]:record["end"]], expected[key]):
                 raise ValueError(f"{episode.name} 的 {key} 回读不一致")
-    statuses = [str(item.get("time_calibration_status", "provisional")) for item in episode_metadata]
     attributes = dict(ROOT_CONTRACT)
     attributes.update(to_jsonable(extra_attributes or {}))
     attributes.update(
         {
             "urdf_sha256": urdf_sha256.lower(),
-            "time_calibration_status": time_calibration_summary(statuses),
             "episode_count": len(ends),
             "frame_count": total,
             "episode_metadata": episode_metadata,
@@ -275,7 +268,6 @@ def export_link7_zarr(
         "path": str(output),
         "frames": total,
         "episodes": len(ends),
-        "time_calibration_status": attributes["time_calibration_status"],
     }
 
 

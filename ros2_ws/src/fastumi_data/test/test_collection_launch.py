@@ -94,15 +94,15 @@ def test_default_launch_only_starts_collection_node_and_rviz() -> None:
 
 
 def test_rviz_loads_collection_layout_with_default_fixed_frame() -> None:
-    """验证 RViz2 默认加载采集布局，固定坐标系为 steamvr_tracking 且可覆盖。"""
+    """验证 RViz2 默认加载采集布局，固定坐标系为 vive_tracker_odom 且可覆盖。"""
     _, nodes, _, _ = _expand()
     arguments = nodes[1]["arguments"]
 
     assert arguments[0] == "-d" and arguments[2] == "-f"
     assert arguments[1].endswith("/share/fastumi_data/config/collection.rviz")
-    assert arguments[3] == "steamvr_tracking"
-    _, nodes, _, _ = _expand(fixed_frame="vive_tracker_odom")
-    assert nodes[1]["arguments"][3] == "vive_tracker_odom"
+    assert arguments[3] == "vive_tracker_odom"
+    _, nodes, _, _ = _expand(fixed_frame="steamvr_tracking")
+    assert nodes[1]["arguments"][3] == "steamvr_tracking"
 
 
 def test_rviz_stays_enabled_when_tracker_sublaunch_disables_its_own() -> None:

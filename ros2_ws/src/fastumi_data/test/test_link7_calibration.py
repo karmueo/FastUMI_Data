@@ -17,7 +17,7 @@ from fastumi_data.link7_calibration import (
 
 
 REPOSITORY_CALIBRATION = Path(__file__).resolve().parents[4] / "config" / "calibration"
-DEFAULT_TRACKER_SHA = "cce6807d8266935d6d5a9429773527707766ae007d7f66f167de4e662947c166"
+DEFAULT_TRACKER_SHA = "1e5f2758fd102b577946124d93e769c8298b60bbcc32648314226b4649118f50"
 
 
 def transform(rotvec, translation) -> np.ndarray:
@@ -46,8 +46,6 @@ def write_binding(extrinsic: Path, serial: str, **overrides) -> Path:
         "tracker_serial": serial,
         "source_collection_uuid": "uuid",
         "source_status_topic": "/vive_tracker/status",
-        "time_offset_convention": "t_camera_eq_t_tracker_plus_offset",
-        "time_calibration_status": "provisional",
     }
     document.update(overrides)
     path = extrinsic.with_name(extrinsic.stem + ".binding.yaml")
@@ -56,7 +54,7 @@ def write_binding(extrinsic: Path, serial: str, **overrides) -> Path:
 
 
 def test_default_extrinsic_binding_matches_source_tracker() -> None:
-    """默认外参与绑定摘要一致，绑定设备为 LHR-B77A06A7，偏移按旧标定换算为 −32.364 ms。"""
+    """默认外参与绑定摘要一致，绑定设备为 LHR-B77A06A7，偏移按 V4L2 链路重新标定换算为 −1.841 ms。"""
     calibration = load_link7_calibration(
         str(REPOSITORY_CALIBRATION / "T_cam_tracker.yaml"),
         str(REPOSITORY_CALIBRATION / "T_cam_end.yaml"),
@@ -66,13 +64,13 @@ def test_default_extrinsic_binding_matches_source_tracker() -> None:
     assert calibration.binding.calibration_sha256 == DEFAULT_TRACKER_SHA
     assert calibration.tracker_serial == "LHR-B77A06A7"
     assert calibration.tracker_serial_source == "binding"
-    assert calibration.tracker_time_offset_ms == pytest.approx(-32.364095977515536)
-    assert calibration.time_calibration_status == "provisional"
+    assert calibration.tracker_time_offset_ms == pytest.approx(-1.8407007545651248)
     metadata = calibration.metadata()
     assert metadata["expected_tracker_serial"] == "LHR-B77A06A7"
     assert metadata["tracker_camera_extrinsic_sha256"] == DEFAULT_TRACKER_SHA
-    assert metadata["time_calibration_timestamp_source"] == "callback_now"
-    assert "tag_jpeg_1" in metadata["time_calibration_conditions"]
+    assert metadata["time_calibration_timestamp_source"] == "v4l2_buffer_monotonic_mapped_to_ros"
+    assert "tag_compressed_2" in metadata["time_calibration_conditions"]
+    assert calibration.binding.source_collection_uuid == "4c5ce199-66f0-47a0-a9e4-0323373acf2a"
 
 
 def test_composition_direction_and_camera_round_trip() -> None:
@@ -91,12 +89,10 @@ def test_composition_direction_and_camera_round_trip() -> None:
     assert not np.allclose(wrong, world_from_link7)
 
 
-def test_time_offset_sign_follows_declared_convention() -> None:
-    """t_camera = t_tracker + offset 时查询时间为图像时间减 offset。"""
-    assert tracker_query_offset_ms(0.032364, "t_camera_eq_t_tracker_plus_offset") == pytest.approx(-32.364)
-    assert tracker_query_offset_ms(0.032364, "t_tracker_eq_t_camera_plus_offset") == pytest.approx(32.364)
-    with pytest.raises(CalibrationError):
-        tracker_query_offset_ms(0.03, "time_offset")
+def test_time_offset_means_camera_later_than_tracker() -> None:
+    """固定按 t_camera = t_tracker + offset：查询时间为图像时间减 offset。"""
+    assert tracker_query_offset_ms(0.032364) == pytest.approx(-32.364)
+    assert tracker_query_offset_ms(-0.002) == pytest.approx(2.0)
 
 
 def make_pair(tmp_path: Path, **tracker_extra):
@@ -116,7 +112,6 @@ def test_custom_extrinsic_without_identity_requires_declared_serial(tmp_path: Pa
     calibration = load_link7_calibration(str(tracker), str(end), "LHR-CUSTOM")
     assert calibration.tracker_serial == "LHR-CUSTOM"
     assert calibration.tracker_serial_source == "user_declared"
-    assert calibration.time_calibration_status == "provisional"
 
 
 def test_declared_serial_cannot_override_existing_binding(tmp_path: Path) -> None:
@@ -148,15 +143,45 @@ def test_binding_digest_change_is_hard_error(tmp_path: Path) -> None:
         load_link7_calibration(str(tracker), str(end))
 
 
-def test_nonzero_offset_without_convention_is_rejected(tmp_path: Path) -> None:
-    """非零 time_offset 未声明符号语义时报错，显式提供语义后可用。"""
+def test_inline_time_offset_needs_no_declared_convention(tmp_path: Path) -> None:
+    """外参内非零 time_offset 无需声明语义，直接按 t_camera = t_tracker + offset 换算。"""
     tracker, end = make_pair(tmp_path, time_offset=0.02)
-    with pytest.raises(CalibrationError, match="语义"):
-        load_link7_calibration(str(tracker), str(end), "LHR-X")
-    calibration = load_link7_calibration(
-        str(tracker), str(end), "LHR-X", "t_tracker_eq_t_camera_plus_offset"
-    )
-    assert calibration.tracker_time_offset_ms == pytest.approx(20.0)
+    calibration = load_link7_calibration(str(tracker), str(end), "LHR-X")
+    assert calibration.tracker_time_offset_ms == pytest.approx(-20.0)
+    assert "time_offset_convention" not in calibration.metadata()
+
+
+@pytest.mark.parametrize("location", ["inline", "binding"])
+@pytest.mark.parametrize("convention", [
+    "t_camera_eq_t_tracker_plus_offset",
+    "t_tracker_eq_t_camera_plus_offset",
+    "unknown_convention",
+])
+def test_legacy_time_offset_declaration_is_checked(
+    tmp_path: Path, location: str, convention: str
+) -> None:
+    """旧外参与绑定的同向声明保持兼容，相反或未知声明在同步前报错。"""
+    # 按声明位置生成外参或配套绑定，确保摘要检查正常通过。
+    extra = {"time_offset_convention": convention} if location == "inline" else {}
+    tracker, end = make_pair(tmp_path, time_offset=0.02, **extra)
+    if location == "binding":
+        write_binding(tracker, "LHR-X", time_offset_convention=convention)
+
+    if convention == "t_camera_eq_t_tracker_plus_offset":
+        calibration = load_link7_calibration(str(tracker), str(end), "LHR-X")
+        assert calibration.tracker_time_offset_ms == pytest.approx(-20.0)
+    else:
+        message = "取反" if convention == "t_tracker_eq_t_camera_plus_offset" else "未知"
+        with pytest.raises(CalibrationError, match=message):
+            load_link7_calibration(str(tracker), str(end), "LHR-X")
+
+
+def test_missing_time_offset_defaults_to_zero(tmp_path: Path) -> None:
+    """外参没有 time_offset 时按 0 处理并记录提示。"""
+    tracker, end = make_pair(tmp_path)
+    calibration = load_link7_calibration(str(tracker), str(end), "LHR-X")
+    assert calibration.tracker_time_offset_ms == 0.0
+    assert any("按 0 处理" in note for note in calibration.notes)
 
 
 def test_non_rigid_matrix_is_rejected(tmp_path: Path) -> None:
@@ -167,16 +192,6 @@ def test_non_rigid_matrix_is_rejected(tmp_path: Path) -> None:
     write_extrinsic(end, matrix)
     with pytest.raises(CalibrationError, match="正交"):
         load_link7_calibration(str(tracker), str(end), "LHR-X")
-
-
-def test_binding_status_values_are_validated(tmp_path: Path) -> None:
-    """绑定清单的时间标定状态只能为 provisional 或 verified。"""
-    tracker, end = make_pair(tmp_path)
-    write_binding(tracker, "LHR-BOUND", time_calibration_status="done")
-    with pytest.raises(CalibrationError):
-        load_link7_calibration(str(tracker), str(end))
-    write_binding(tracker, "LHR-BOUND", time_calibration_status="verified")
-    assert load_link7_calibration(str(tracker), str(end)).time_calibration_status == "verified"
 
 
 def test_default_files_are_consumed_byte_for_byte(tmp_path: Path) -> None:
@@ -190,19 +205,18 @@ def test_default_files_are_consumed_byte_for_byte(tmp_path: Path) -> None:
 
 
 def test_timestamp_source_must_match_calibration_chain(tmp_path: Path) -> None:
-    """默认标定来自回调 now() 链路：旧记录（未记录来源）可用，V4L2 映射链路的记录被拒绝。"""
+    """默认标定来自 V4L2 映射链路：同链路记录可用，旧回调 now() 记录（含未记录来源）被拒绝。"""
     from fastumi_data.link7_calibration import check_timestamp_source
 
     calibration = load_link7_calibration(
         str(REPOSITORY_CALIBRATION / "T_cam_tracker.yaml"),
         str(REPOSITORY_CALIBRATION / "T_cam_end.yaml"),
     )
-    assert calibration.binding.time_calibration_timestamp_source == "callback_now"
-    assert check_timestamp_source(calibration, None) == ""
-    assert check_timestamp_source(calibration, "unrecorded") == ""
-    assert check_timestamp_source(calibration, "callback_now") == ""
-    with pytest.raises(CalibrationError, match="重新标定"):
-        check_timestamp_source(calibration, "v4l2_buffer_monotonic_mapped_to_ros")
+    assert calibration.binding.time_calibration_timestamp_source == "v4l2_buffer_monotonic_mapped_to_ros"
+    assert check_timestamp_source(calibration, "v4l2_buffer_monotonic_mapped_to_ros") == ""
+    for legacy in (None, "unrecorded", "callback_now"):
+        with pytest.raises(CalibrationError, match="重新标定"):
+            check_timestamp_source(calibration, legacy)
     tracker, end = make_pair(tmp_path)
     write_binding(tracker, "LHR-BOUND")
     custom = load_link7_calibration(str(tracker), str(end))

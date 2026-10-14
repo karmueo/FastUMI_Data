@@ -22,6 +22,9 @@ Tracker 到 TCP 标定，以及 MCAP→30 Hz Link7 HDF5→合并 Zarr 的离线�
 `/fastumi/collection` 服务完成，RViz2 面板是它的图形前端。默认连接已在运行的设备，
 相机话题为 `/umi_camera/image_raw`。
 
+面板支持键盘操作：Space 在空闲时开始采集、录制中停止并保存；Esc 停止并取消（需确认）；
+Enter 保存待保存的采集。光标在输入框内时这些键照常输入，回车后即恢复快捷键。
+
 ```bash
 # 设备已由其他终端启动：只启动采集后端和面板
 ros2 launch fastumi_data fastumi_collection.launch.py dataset_root:=dataset
@@ -55,7 +58,7 @@ ros2 launch fastumi_data fastumi_collection.launch.py \
 | `start_camera` / `start_tracker` / `start_gripper` | `false` | 分别按需启动 USB 相机、VIVE Tracker（不含其自带 RViz2）、夹爪估计。 |
 | `video_device` | 空 | 可为空：留空时自动选择编号最小的 USB 相机（多相机时端口不稳定）；显式给出须是 `/dev/v4l/by-path/*-video-index0`。 |
 | `camera_calibration_path` / `gripper_calibration_path` | 空 | 可选覆盖夹爪估计的内参和夹爪标定；留空沿用其默认解析，并把实际文件写入快照。 |
-| `use_rviz` / `rviz_config` / `fixed_frame` | `true` / 内置布局 / `steamvr_tracking` | RViz2 开关、配置和固定坐标系。 |
+| `use_rviz` / `rviz_config` / `fixed_frame` | `true` / 内置布局 / `vive_tracker_odom` | RViz2 开关、配置和固定坐标系。 |
 | `fastdds_profile` | `config/fastdds_large_images.xml` | Fast DDS 配置，见下文“1080p 图像传输”；留空禁用，已设置 `FASTRTPS_DEFAULT_PROFILES_FILE` 时不覆盖。 |
 
 旧的 `record_mcap:=true` 已移除：launch 不再随设备自动连续录包，传入时会报迁移提示。
@@ -167,7 +170,8 @@ V4L2 时间，`source` 为 `mode;clock;tsrc;seq;recv_ns;pub_ns;gen;offset_ns;unc
 在目标光照下完成帧率预检和持续监控。
 
 **旧记录**：本次改动前的录制图像 Header 都是回调 `now()`，`session.yaml` 没有 `timestamp_source`，
-转换时视为 `callback_now`。旧 MCAP 无法恢复未记录的 V4L2 时间戳。
+转换时视为 `callback_now`。旧 MCAP 无法恢复未记录的 V4L2 时间戳。默认外参已在 V4L2 链路下重新标定，
+旧记录须配合回调 `now()` 链路标定的外参（如 git 历史中的旧版 `T_cam_tracker.yaml` 及其绑定）才能转换。
 
 ### 生命周期与服务
 
@@ -219,7 +223,8 @@ dataset/
 ├── .fastumi_collection.lock          根目录独占锁，同一目录只允许一个采集服务
 ├── .staging/<uuid>/                  未保存采集（带归属标记，退出和下次启动时清理）
 ├── .trash/<task>__<dir_name>/        已删除记录
-└── <task>/<UTC时间>_<uuid>/          已保存记录，保存通过同文件系统重命名发布
+└── <task>/<北京时间>_<id>/           已保存记录，保存通过同文件系统重命名发布；
+                                      id 按任务从 0 递增，已删除记录的 id 不复用
     ├── raw/bag/                      rosbag2 MCAP
     ├── session.yaml                  清单：uuid、话题、标定状态、消息计数、大小
     ├── quality.yaml                  报警统计、时间指标和平均频率
@@ -306,20 +311,27 @@ ros2 run fastumi_data convert_mcap <输入目录> \
   ≥60 Hz 走高帧率抽帧路径，其他值在转换前报错。
 - **外参与设备身份**：缺省使用安装到包 share 的 `T_cam_tracker.yaml`、`T_cam_end.yaml`（源文件在仓库
   `config/calibration/`）。Tracker 外参必须有身份：文件内 `tracker_serial` 和/或同目录
-  `<名>.binding.yaml`（保存 `tracker_serial`、原始外参字节 `calibration_sha256`、来源记录 UUID、状态话题、
-  时间偏移语义、时间标定状态与标定时间戳来源）。默认绑定为 **`LHR-B77A06A7`**。缺少身份时须用
+  `<名>.binding.yaml`（保存 `tracker_serial`、原始外参字节 `calibration_sha256`、来源记录 UUID、状态话题
+  与标定时间戳来源）。默认绑定为 **`LHR-B77A06A7`**。缺少身份时须用
   `--tracker-serial` 声明（记为用户声明），该参数不能覆盖既有绑定。图像解码前，预检所有来源记录选定状态话题：
   非空、序列号非空、唯一且等于绑定，否则整批中止，不能靠关闭状态检查绕过。
 - **时间戳来源一致性**：绑定的 `time_calibration_timestamp_source` 必须与记录的图像时间戳来源一致，否则在输出前
-  报错。默认外参的偏移来自回调 `now()` 链路（旧记录视为 `callback_now`）；**新 V4L2 缓冲区时间戳链路的记录必须
-  先在该链路下重新标定时间偏移**。实测回调时刻比 V4L2 缓冲区时间平均晚约 33.2 ms，与旧偏移 32.364 ms 量级相同，
-  混用会引入约一帧的系统误差。
+  报错。默认外参已在 V4L2 缓冲区时间戳链路下重新标定（`tag_compressed_2` 记录 `4c5ce199`），只接受
+  `v4l2_buffer_monotonic_mapped_to_ros` 记录；旧记录视为 `callback_now` 并被拒绝。实测回调时刻比 V4L2 缓冲区时间
+  平均晚约 33.2 ms，旧 `now()` 链路的偏移 32.364 ms 基本就是这段延迟，混用会引入约一帧的系统误差。
 
 ### 几何与同步
 
 `T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7`，两份外参的 `cam0.T_cam_hand`
-分别为 `T_Cu_Tracker`、`T_Cd_Link7`，再以裁剪后首帧归一化为 episode 起始 Link7 相对位姿。默认外参记录
-`t_camera = t_tracker + offset`（+32.364 ms），Tracker 查询时间为 `t_image − 32.364 ms`，标记 `provisional`。
+分别为 `T_Cu_Tracker`、`T_Cd_Link7`，再以裁剪后首帧归一化为 episode 起始 Link7 相对位姿。Tracker 外参的
+`time_offset`（秒）固定按 `t_camera = t_tracker + offset` 解释（手眼标定报告的 `t_eye = t_hand + offset`），
+即同一时刻相机时间戳比 Tracker 晚 offset；默认外参为 +1.841 ms（V4L2 链路重新标定），Tracker 查询时间为
+`t_image − 1.841 ms`。改用其他标定工具时，须先把偏移换算成这一定义再写入。
+旧外参或绑定若包含 `time_offset_convention`，仅接受缺省或
+`t_camera_eq_t_tracker_plus_offset`；相反或未知声明会报错。
+从 `t_tracker_eq_t_camera_plus_offset` 迁移时，将 Tracker 外参的 `time_offset` 取反，
+把外参与绑定中的声明更新为 `t_camera_eq_t_tracker_plus_offset`，并重新计算绑定的 `calibration_sha256`。
+标定是否已验收由使用者人工判断，转换不记录验收状态。
 
 - **同频逐帧**：裁剪后的每张图像依次输出，源索引连续，不用固定 `1/30` 网格匹配（相机实际约 30.06 Hz，固定网格
   7–8 s 后就会误跳帧）。相邻间隔 `m = round(Δt·f)`：`m=1` 且偏差 ≤8 ms 为正常；`m≥2` 且在容差内记 `FRAME_DROP`
@@ -348,15 +360,14 @@ ros2 run fastumi_data convert_mcap <输入目录> \
 
 - **HDF5**：原分辨率 RGB、`qpos`/`action`（`[xyz, quaternion_xyzw, gripper]`，同一示教轨迹在图像时刻的值）、
   名义时间、实际图像时间、源索引、`dropped_frames_before`、质量数组（高帧率路径另有匹配误差与复用标记），
-  根属性含选帧路径、标称/实测/拟合帧率、外参与绑定摘要、期望与实测 Tracker 序列号、时间偏移及来源、
-  `time_calibration_status` 和 URDF 摘要。
+  根属性含选帧路径、标称/实测/拟合帧率、外参与绑定摘要、期望与实测 Tracker 序列号、时间偏移及来源和 URDF 摘要。
 - **Zarr**：224×224 letterbox RGB（与部署 `letterbox_rgb` 相同，JPEG XL `lossless=True, effort=3,
   numthreads=1`，逐帧回读确认无损）、末端位置、旋转向量、夹爪、起始位姿、7D 动作、`meta/episode_names`
   （`<任务>/<记录>/episode_XXXX`）、`data/timestamp`、`source_image_index`、`dropped_frames_before`、
   `image_timestamp_ns`、`nominal_timestamp_ns`；根属性写入计划第 4 节契约（`frequency: 30`、
   `pose_frame: episode_start_link7`、`normalization_contract: fixed-gripper-0-1-v1`、`urdf_sha256` 等），
-  `episode_metadata` 逐条保留来源、帧率、身份、外参摘要和时间标定状态；根 `time_calibration_status`
-  仅在全部来源 verified 时为 verified，`complete=true` 不表示时间标定已验证。
+  `episode_metadata` 逐条保留来源、帧率、身份、外参摘要和时间偏移；`complete=true` 只表示导出完整，
+  不表示时间标定已验证。
 - **失败行为**：质量拒绝跳过并写报告；损坏文件、标定或身份错误、导出异常中止并返回非零，保留诊断产物；
   零条有效 episode 返回失败；只有一条时成功但提示当前训练默认验证划分至少需要两条。转换按 episode 把解码帧
   暂存到磁盘，内存不随 episode 长度增长。
@@ -389,8 +400,7 @@ checkpoint 写入 30 Hz 契约和真实 URDF 摘要。
   比 Header 晚均值 33.9 ms；时间戳来源 `v4l2_buffer_monotonic_soe_mapped_to_ros`。H.264 路径同样使用缓冲区
   时间，接收器 `output_every_n_frames=2` 时全部 30 包/s 解码、按源时间发布 15 帧/s。
 
-**仍未完成或不能据此宣称**：新时间戳链路下的时间偏移重新标定与真实运动验收（当前数据与由其训练的模型均为
-`provisional`，只用于流程验证）；含 Tracker、夹爪和预览的 5 分钟 30 Hz 完整采集资源验收（CPU、内存、写盘、
+**仍未完成或不能据此宣称**：新时间戳链路下重新标定的时间偏移尚未用真实运动数据验收；含 Tracker、夹爪和预览的 5 分钟 30 Hz 完整采集资源验收（CPU、内存、写盘、
 排空时间）；图像—Tracker 残差；曝光优先关闭写入及光照变化测试；两台相机成像差异比较；部署 dry-run（历史
 目标 `1/30` s、15 ms 容差下的放弃比例等）作为独立任务。
 

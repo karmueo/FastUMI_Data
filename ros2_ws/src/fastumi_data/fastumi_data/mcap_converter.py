@@ -53,7 +53,6 @@ from fastumi_data.frame_selection import selection_path_for
 from fastumi_data.image_modes import MODE_RAW, validate_image_mode
 from fastumi_data.link7_calibration import (
     CalibrationError,
-    TIME_OFFSET_CONVENTIONS,
     check_timestamp_source,
     load_link7_calibration,
     normalize_timestamp_source,
@@ -454,7 +453,7 @@ _ZARR_EPISODE_KEYS = (
     "image_timestamp_source", "expected_tracker_serial", "observed_tracker_serial",
     "tracker_serial_source", "tracker_binding_sha256", "tracker_camera_extrinsic_sha256",
     "end_camera_extrinsic_sha256", "tracker_time_offset_ms", "tracker_time_offset_source_s",
-    "time_offset_convention", "time_calibration_status", "time_calibration_timestamp_source",
+    "time_calibration_timestamp_source",
     "time_calibration_conditions",
 )
 
@@ -622,11 +621,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="自定义外参缺少设备绑定时声明标定所用 Tracker 序列号；不能覆盖既有绑定",
     )
     parser.add_argument(
-        "--tracker-time-offset-convention", default="",
-        choices=["", *sorted(TIME_OFFSET_CONVENTIONS)],
-        help="外参与绑定均未声明 time_offset 语义时显式指定",
-    )
-    parser.add_argument(
         "--source-camera-fps", type=float, default=None,
         help="标称源帧率覆盖值（如 30、29.97、90）；缺省读取各记录快照",
     )
@@ -668,7 +662,6 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
             str(tracker_extrinsic),
             str(end_extrinsic),
             arguments.tracker_serial,
-            arguments.tracker_time_offset_convention,
         )
         sources = discover_sources(Path(arguments.input))
         if not sources:
@@ -844,7 +837,6 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
                 "rejected_episodes": rejected,
                 "frames": manifest["zarr"]["frames"],
                 "dataset": manifest["zarr"]["path"],
-                "time_calibration_status": manifest["zarr"]["time_calibration_status"],
             },
             ensure_ascii=False,
             indent=2,

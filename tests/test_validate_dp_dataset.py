@@ -249,7 +249,6 @@ def make_link7(path, lengths=(20, 20), dropped=None, path_kind="same_rate", fps=
         position_unit="m", rotation_unit="rad", gripper_representation="normalized_0_1",
         normalization_contract="fixed-gripper-0-1-v1", gripper_lower=0.0, gripper_upper=1.0,
         action_source="demonstration_trajectory", urdf_sha256="b" * 64,
-        time_calibration_status="provisional",
     )
     data = root.create_group("data")
     images = np.random.default_rng(0).integers(0, 255, size=(count, 224, 224, 3), dtype=np.uint8)
@@ -279,8 +278,7 @@ def make_link7(path, lengths=(20, 20), dropped=None, path_kind="same_rate", fps=
         name = f"task/rec/episode_{episode:04d}"
         names.append(name)
         metadata.append({"name": name, "selection_path": path_kind, "nominal_source_fps": fps,
-                         "frame_drop_count": int(d.sum()), "fitted_frame_rate_hz": fps * 1.002,
-                         "time_calibration_status": "provisional"})
+                         "frame_drop_count": int(d.sum()), "fitted_frame_rate_hz": fps * 1.002})
     nominal = np.concatenate(nominal)
     data.create_dataset("timestamp", data=nominal / 1e9)
     data.create_dataset("nominal_timestamp_ns", data=nominal)
@@ -325,11 +323,10 @@ def test_link7_frame_drops_follow_nominal_time_and_warn(tmp_path):
     ("normalization_contract", "urdf-joint-limits-v1", "ATTRIBUTE_MISMATCH"),
     ("urdf_sha256", "not-a-hash", "ATTRIBUTE_INVALID"),
     ("gripper_upper", 2.0, "ATTRIBUTE_MISMATCH"),
-    ("time_calibration_status", "verified", "ATTRIBUTE_MISMATCH"),
     ("action_time_reference", "nominal_frame_time", "ATTRIBUTE_MISMATCH"),
 ])
 def test_link7_invalid_root_attributes_are_rejected(tmp_path, attribute, value, code):
-    """非法格式、频率、坐标系混淆、契约、URDF 摘要与时间状态均被拒绝。"""
+    """非法格式、频率、坐标系混淆、契约与 URDF 摘要均被拒绝。"""
     root = make_link7(tmp_path / "link7.zarr")
     root.attrs[attribute] = value
     result = validate_dataset(tmp_path / "link7.zarr", "rm75_umi", val_ratio=0)

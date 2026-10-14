@@ -1,5 +1,6 @@
 """验证采集生命周期状态机：独立与组合操作、幂等、冲突和故障。"""
 
+import re
 import threading
 import uuid
 
@@ -76,12 +77,13 @@ def test_start_stop_save_publishes_record_with_ordered_mcap(tmp_path) -> None:
     destination = harness.storage.find_saved(identifier)
     assert destination is not None
     assert destination.parent.name == "pick_place"
-    assert destination.name.endswith(f"_{identifier}")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_0", destination.name)
     manifest = yaml.safe_load((destination / "session.yaml").read_text("utf-8"))
     assert manifest["schema_version"] == 3
     assert manifest["collection_uuid"] == manifest["session_id"] == identifier
     assert manifest["episode_index"] == 0
     assert manifest["name"] == "第一次"
+    assert manifest["dir_name"] == destination.name
     assert manifest["bag_uri"] == "raw/bag"
     assert manifest["calibration_status"] == "uncalibrated"
     assert manifest["tracker_to_tcp"] is None

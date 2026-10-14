@@ -195,3 +195,37 @@ TEST(CollectionPanelState, VideoTypeTextNamesThePublishedMode)
   EXPECT_EQ(fp::video_type_text("", ""), "--");
   EXPECT_EQ(fp::video_type_text("mjpeg", "x"), "--");
 }
+
+/** @brief 快捷键只在对应按钮可用时触发，输入框焦点、模态框和自动重复不触发操作。 */
+TEST(CollectionPanelState, ShortcutClassification)
+{
+  using Key = fp::CollectionKey;
+  using Action = fp::CollectionShortcut;
+  fp::ButtonGate idle;
+  idle.start = true;
+  fp::ButtonGate recording;
+  recording.stop_and_save = recording.stop_and_cancel = true;
+  fp::ButtonGate pending_save;
+  pending_save.save = pending_save.cancel = true;
+  const fp::ButtonGate closed;
+
+  EXPECT_EQ(fp::classify_collection_shortcut(Key::kSpace, false, false, false, idle), Action::kStart);
+  EXPECT_EQ(
+    fp::classify_collection_shortcut(Key::kSpace, false, false, false, recording),
+    Action::kStopAndSave);
+  EXPECT_EQ(
+    fp::classify_collection_shortcut(Key::kSpace, false, false, false, closed), Action::kSuppress);
+  EXPECT_EQ(
+    fp::classify_collection_shortcut(Key::kEscape, false, false, false, recording),
+    Action::kStopAndCancel);
+  EXPECT_EQ(fp::classify_collection_shortcut(Key::kEscape, false, false, false, idle), Action::kNone);
+  EXPECT_EQ(
+    fp::classify_collection_shortcut(Key::kEnter, false, false, false, pending_save), Action::kSave);
+  EXPECT_EQ(
+    fp::classify_collection_shortcut(Key::kEnter, false, false, false, recording), Action::kNone);
+  EXPECT_EQ(
+    fp::classify_collection_shortcut(Key::kSpace, true, false, false, idle), Action::kSuppress);
+  EXPECT_EQ(fp::classify_collection_shortcut(Key::kSpace, false, true, false, idle), Action::kNone);
+  EXPECT_EQ(fp::classify_collection_shortcut(Key::kSpace, false, false, true, idle), Action::kNone);
+  EXPECT_EQ(fp::classify_collection_shortcut(Key::kOther, false, false, false, idle), Action::kNone);
+}

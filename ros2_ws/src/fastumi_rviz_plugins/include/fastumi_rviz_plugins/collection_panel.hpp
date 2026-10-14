@@ -29,6 +29,7 @@
 #include <fastumi_interfaces/srv/collection_stop_and_save.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+class QEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -58,6 +59,10 @@ public:
 
   /** @brief 获得 RViz 的 ROS 节点后创建订阅、客户端和定时器。 */
   void onInitialize() override;
+
+protected:
+  /** @brief 把全局 Space/Esc/Enter 分发到开始、停止并保存、停止并取消和保存。 */
+  bool eventFilter(QObject * watched, QEvent * event) override;
 
 private Q_SLOTS:
   /** @brief 点击“开始”：校验任务名后提交 start 请求。 */
@@ -101,6 +106,8 @@ private:
   /** @brief 修改类请求的统一结果回调类型。 */
   using ResultMessage = fastumi_interfaces::msg::CollectionResult;
 
+  /** @brief 按连接、在途请求、后端可用性和任务名计算按钮门控。 */
+  ButtonGate current_gate() const;
   /** @brief 在 GUI 线程应用一条权威状态。 */
   void apply_status(const fastumi_interfaces::msg::CollectionStatus & status);
   /** @brief 刷新单路输入的显示。 */

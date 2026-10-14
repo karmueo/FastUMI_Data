@@ -6,7 +6,9 @@ Tracker 仍然健康。图像和有效夹爪状态另按完整的 ``rate_window_
 不足或未达标时阻止开始；录制中连续低于门限 ``low_rate_persist_s`` 时报警
 ``IMAGE_LOW_RATE``/``GRIPPER_LOW_RATE``，连续达标同样时长后清除。图像与夹爪按完全相同的源时间戳配对，Tracker 按最近源
 时间戳在窗口内配对。到达时间差反映消息先后到达采集节点的间隔，包含传输
-与排队，不应被解释为纯算法耗时。
+与排队，不应被解释为纯算法耗时。夹爪偶发单帧无效（如漏检一枚标签）不立即判为无效：
+只有即使下一帧恢复有效、相邻有效样本的源时间间隔也将超过 ``gripper_invalid_persist_s``
+时才报 ``GRIPPER_INVALID``，与离线转换的 ``max_gripper_gap_s`` 插值门限一致。
 """
 
 from __future__ import annotations
@@ -66,6 +68,8 @@ class HealthConfig:
     """源时间戳速率与接收速率相对期望频率的下限比例。"""
     low_rate_persist_s: float = 2.0
     """低频报警的触发与清除都要求条件连续保持的秒数。"""
+    gripper_invalid_persist_s: float = 0.2
+    """相邻有效夹爪样本允许的最大源时间间隔，超过才判为无效；0 表示单帧即无效。"""
 
     def expected_rate_hz(self, stream: str) -> float:
         """返回需检查绝对速率的输入的期望频率，其余为 0。"""
@@ -171,12 +175,16 @@ class _StreamState:
     intervals: Deque[int] = field(default_factory=lambda: deque(maxlen=GAP_HISTORY))
     valid: bool = False
     detail: str = "尚未收到数据"
+    # 最近一条有效样本的源时间戳，不随匹配历史淘汰。
+    last_valid_source_ns: Optional[int] = None
 
     def observe(self, source_ns: int, recv_ns: int, valid: bool = True) -> None:
         """记录一条消息并检测源时间戳回退。"""
         if self.samples and source_ns < self.samples[-1].source_ns:
             self.out_of_order += 1
             self.last_out_of_order_ns = recv_ns
+            # 回退前的有效时间戳不能作为新时间序列的插值基准。
+            self.last_valid_source_ns = None
         elif self.samples:
             interval = source_ns - self.samples[-1].source_ns
             if interval > 0:
@@ -190,6 +198,8 @@ class _StreamState:
                 if interval > 0:
                     self.intervals.append(interval)
         self.samples.append(_Sample(source_ns, recv_ns, bool(valid)))
+        if valid:
+            self.last_valid_source_ns = source_ns
         if self.first_receive_ns is None:
             self.first_receive_ns = recv_ns
         # 当前消息对应的频率窗口起点；匹配所需的最小历史仍保留。
@@ -391,12 +401,31 @@ class CollectionHealthMonitor:
             tracker=tracker,
             gripper=gripper,
             gripper_percent=self._gripper_percent if gripper.fresh else math.nan,
-            gripper_valid=gripper.fresh and gripper.valid,
+            # 开合度与有效标志只反映最新一帧，不受无效持续时间容忍影响。
+            gripper_valid=gripper.fresh and self._streams[GRIPPER].valid,
             tracker_tracking_ok=tracking_ok,
             tracker_tracking_state=self._tracker_state,
             gripper_lag_ms=lag_ms,
             alarms=tuple(sorted(alarms)),
         )
+
+    def _gripper_invalid_tolerated(self, state: _StreamState) -> bool:
+        """最新夹爪样本无效，但下一帧若恢复有效，有效样本间隔仍不超过门限。
+
+        预计间隔为最近有效样本到最新样本的源时间跨度，加上最近一个帧间隔。
+        """
+        samples = state.samples
+        if (
+            self._config.gripper_invalid_persist_s <= 0.0
+            or state.last_valid_source_ns is None
+            or len(samples) < 2
+        ):
+            return False
+        span_ns = samples[-1].source_ns - state.last_valid_source_ns
+        if span_ns < 0:
+            return False
+        frame_ns = max(0, samples[-1].source_ns - samples[-2].source_ns)
+        return span_ns + frame_ns <= self._config.gripper_invalid_persist_s * 1e9
 
     def _fresh(self, name: str, now_mono: int) -> bool:
         """最近一次接收距现在不超过该路超时。"""
@@ -526,6 +555,8 @@ class CollectionHealthMonitor:
                 valid, detail = False, "Tracker 状态消息已过期或尚未收到"
             elif valid and not self._tracker_status_ok:
                 valid, detail = False, self._tracker_status_detail
+        elif name == GRIPPER and not valid and self._gripper_invalid_tolerated(state):
+            valid, detail = True, ""
         age_s = (
             (now_mono - state.samples[-1].recv_ns) / 1e9 if state.samples else -1.0
         )

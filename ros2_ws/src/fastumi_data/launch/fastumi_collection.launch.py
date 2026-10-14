@@ -84,8 +84,8 @@ EXPOSURE_PRIORITY_CHOICES = ("leave", "disable")
 DECODER_BACKENDS = ("transport", "cuda", "auto")
 # 包内 collection.rviz 中 UMI 视频显示默认订阅的话题。
 RVIZ_DEFAULT_IMAGE_TOPIC = DEFAULT_IMAGE_TOPIC
-# 采集 RViz2 默认固定坐标系，即 vive_tracker 发布位姿所在的 OpenVR 原点。
-DEFAULT_FIXED_FRAME = "steamvr_tracking"
+# 采集 RViz2 默认固定坐标系，即 vive_tracker 里程计话题发布位姿所在的坐标系。
+DEFAULT_FIXED_FRAME = "vive_tracker_odom"
 # Fast DDS 默认参与者配置的环境变量名。
 FASTDDS_PROFILE_ENV = "FASTRTPS_DEFAULT_PROFILES_FILE"
 # 旧 record_mcap 参数的迁移提示。

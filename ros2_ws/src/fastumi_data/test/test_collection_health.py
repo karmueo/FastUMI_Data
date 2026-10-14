@@ -211,6 +211,51 @@ def test_nan_gripper_is_invalid_and_percent_unavailable() -> None:
     assert not monitor.snapshot(ALL_FOUND).gripper.valid
 
 
+def test_single_invalid_gripper_frame_does_not_alarm_or_block_start() -> None:
+    """验证偶发单帧夹爪无效不报警、不阻止开始，但开合度仍只反映最新一帧。"""
+    clock = _Clock()
+    config = HealthConfig()
+    monitor = _monitor(clock)
+    _feed(monitor, clock, 30)
+    _feed(monitor, clock, 1, openness=math.nan)
+
+    snapshot = monitor.snapshot(ALL_FOUND)
+
+    assert snapshot.gripper.valid
+    assert "GRIPPER_INVALID" not in snapshot.alarms
+    assert "GRIPPER_INVALID" not in _issue_codes(monitor, config)
+    assert not snapshot.gripper_valid and math.isnan(snapshot.gripper_percent)
+
+
+def test_gripper_invalid_alarms_once_valid_gap_would_exceed_persist() -> None:
+    """验证连续无效到有效样本间隔将超过门限时报警，恢复有效后立即清除。"""
+    clock = _Clock()
+    monitor = _monitor(clock, gripper_invalid_persist_s=0.2)
+    _feed(monitor, clock, 30)
+
+    # 33 ms 帧间隔：5 帧无效后若恢复，有效间隔 198 ms，仍可插值。
+    _feed(monitor, clock, 5, gripper_valid=False)
+    assert "GRIPPER_INVALID" not in monitor.snapshot(ALL_FOUND).alarms
+
+    # 第 6 帧无效后，有效间隔至少 231 ms，超过 0.2 s。
+    _feed(monitor, clock, 1, gripper_valid=False)
+    snapshot = monitor.snapshot(ALL_FOUND)
+    assert not snapshot.gripper.valid and "GRIPPER_INVALID" in snapshot.alarms
+
+    _feed(monitor, clock, 1)
+    assert "GRIPPER_INVALID" not in monitor.snapshot(ALL_FOUND).alarms
+
+
+def test_zero_gripper_invalid_persist_alarms_on_single_frame() -> None:
+    """验证门限为 0 时恢复单帧无效即报警的旧行为。"""
+    clock = _Clock()
+    monitor = _monitor(clock, gripper_invalid_persist_s=0.0)
+    _feed(monitor, clock, 30)
+    _feed(monitor, clock, 1, gripper_valid=False)
+
+    assert "GRIPPER_INVALID" in monitor.snapshot(ALL_FOUND).alarms
+
+
 def test_out_of_order_stamps_alarm_then_clear() -> None:
     """验证源时间戳回退触发乱序报警并在保持期后清除。"""
     clock = _Clock()
@@ -223,6 +268,46 @@ def test_out_of_order_stamps_alarm_then_clear() -> None:
 
     _feed(monitor, clock, 100)
     assert "IMAGE_OUT_OF_ORDER" not in monitor.snapshot(ALL_FOUND).alarms
+
+
+def test_gripper_invalid_after_timestamp_rollback_is_not_tolerated() -> None:
+    """时间戳回退后的无效帧立即报警；新有效帧到达后恢复正常容忍。"""
+    clock = _Clock()
+    monitor = _monitor(clock)
+    _feed(monitor, clock, 30)
+    # 模拟异常未来时间戳，随后恢复正常源时间。
+    monitor.observe_gripper(clock.wall + 60_000 * MS, True, 0.5)
+    _feed(monitor, clock, 1, gripper_valid=False)
+
+    snapshot = monitor.snapshot(ALL_FOUND)
+    assert not snapshot.gripper.valid
+    assert "GRIPPER_INVALID" in snapshot.alarms
+
+    _feed(monitor, clock, 1)
+    _feed(monitor, clock, 1, gripper_valid=False)
+    assert "GRIPPER_INVALID" not in monitor.snapshot(ALL_FOUND).alarms
+
+
+def test_gripper_valid_after_rollback_restarts_invalid_gap_budget() -> None:
+    """回退后的有效帧建立新基准，连续无效超过门限仍需报警。"""
+    clock = _Clock()
+    monitor = _monitor(clock)
+    _feed(monitor, clock, 30)
+    monitor.observe_gripper(clock.wall + 60_000 * MS, True, 0.5)
+    _feed(monitor, clock, 1)
+    _feed(monitor, clock, 6, gripper_valid=False)
+
+    assert "GRIPPER_INVALID" in monitor.snapshot(ALL_FOUND).alarms
+
+
+def test_zero_gripper_invalid_persist_rejects_duplicate_timestamp() -> None:
+    """单帧报警模式下，即使无效帧重复有效帧的时间戳也不得容忍。"""
+    clock = _Clock()
+    monitor = _monitor(clock, gripper_invalid_persist_s=0.0)
+    monitor.observe_gripper(clock.wall, True, 0.5)
+    monitor.observe_gripper(clock.wall, False, 0.5)
+
+    assert "GRIPPER_INVALID" in monitor.snapshot(ALL_FOUND).alarms
 
 
 def test_gripper_without_matching_image_stamp_is_unmatched() -> None:
