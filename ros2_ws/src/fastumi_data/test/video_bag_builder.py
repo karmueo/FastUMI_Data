@@ -10,6 +10,7 @@ from fastumi_interfaces.msg import EpisodeEvent, GripperState, TrackerStatus
 from geometry_msgs.msg import PoseStamped
 from rclpy.serialization import serialize_message
 import rosbag2_py
+from sensor_msgs.msg import TimeReference
 import yaml
 
 from fastumi_data.image_modes import IMAGE_MESSAGE_TYPES
@@ -30,6 +31,10 @@ TOPICS = {
     "gripper_state": "/gripper/state",
     "episode_event": "/fastumi/episode/events",
 }
+
+
+# 可选的相机时间诊断话题。
+TIMING_TOPIC = IMAGE_TOPIC + "/time_reference"
 
 
 def _time(timestamp_ns: int) -> Time:
@@ -76,6 +81,9 @@ def write_session_bag(
     unclosed_tail: bool = False,
     serial_of: Optional[Callable[[int], str]] = None,
     image_delay_ns: int = 0,
+    sensor_override: Optional[Callable[[str, int, object], object]] = None,
+    max_bagfile_size: int = 0,
+    clock_generation_of: Optional[Callable[[int], int]] = None,
 ) -> Dict[str, str]:
     """写出连续 30 Hz 会话。
 
@@ -90,6 +98,10 @@ def write_session_bag(
         unclosed_tail: 最后一个 START 之后不写 STOP。
         serial_of: 可按帧号返回 Tracker 状态序列号，缺省为 ``LHR-TEST``。
         image_delay_ns: 图像的 bag 接收时间延迟（纳秒），保留原始 Header 时间。
+        sensor_override: 可替换某帧的位姿、状态或夹爪消息，参数为
+            ``(话题键, 帧号, 消息)``，用于注入无效位姿、跟踪丢失或夹爪失效。
+        max_bagfile_size: 大于 0 时按该字节数分包写出 MCAP。
+        clock_generation_of: 给出时额外录制相机时间诊断话题，按帧号返回时钟映射代号。
 
     Returns:
         话题映射。
@@ -97,7 +109,9 @@ def write_session_bag(
     path.parent.mkdir(parents=True, exist_ok=True)
     writer = rosbag2_py.SequentialWriter()
     writer.open(
-        rosbag2_py.StorageOptions(uri=str(path), storage_id="mcap"),
+        rosbag2_py.StorageOptions(
+            uri=str(path), storage_id="mcap", max_bagfile_size=max_bagfile_size
+        ),
         rosbag2_py.ConverterOptions("", ""),
     )
     types = {
@@ -107,6 +121,8 @@ def write_session_bag(
         TOPICS["gripper_state"]: "fastumi_interfaces/msg/GripperState",
         TOPICS["episode_event"]: "fastumi_interfaces/msg/EpisodeEvent",
     }
+    if clock_generation_of is not None:
+        types[TIMING_TOPIC] = "sensor_msgs/msg/TimeReference"
     for topic_id, (name, message_type) in enumerate(types.items()):
         writer.create_topic(
             rosbag2_py.TopicMetadata(
@@ -129,11 +145,18 @@ def write_session_bag(
             if image_override is not None:
                 message = image_override(index, message)
             records.append((stamp_ns + image_delay_ns, TOPICS["image"], message))
+        if clock_generation_of is not None:
+            timing = TimeReference()
+            timing.header.stamp = _time(stamp_ns)
+            timing.source = f"mode=v4l2_buffer;seq={index};gen={clock_generation_of(index)};offset_ns=1000"
+            records.append((stamp_ns, TIMING_TOPIC, timing))
         pose = PoseStamped()
         pose.header.stamp = _time(stamp_ns)
         pose.header.frame_id = "steamvr_tracking_ros"
         pose.pose.position.x = index / 300.0
         pose.pose.orientation.w = 1.0
+        if sensor_override is not None:
+            pose = sensor_override("tracker_pose", index, pose)
         records.append((stamp_ns, TOPICS["tracker_pose"], pose))
         status = TrackerStatus()
         status.header.stamp = _time(stamp_ns)
@@ -141,12 +164,16 @@ def write_session_bag(
         status.device_connected = True
         status.pose_valid = True
         status.tracking_state = TrackerStatus.TRACKING_RUNNING_OK
+        if sensor_override is not None:
+            status = sensor_override("tracker_status", index, status)
         records.append((stamp_ns, TOPICS["tracker_status"], status))
         gripper = GripperState()
         gripper.header.stamp = _time(stamp_ns)
         gripper.raw_openness = gripper.filtered_openness = index / frames
         gripper.detected_marker_count = 2
         gripper.valid = True
+        if sensor_override is not None:
+            gripper = sensor_override("gripper_state", index, gripper)
         records.append((stamp_ns, TOPICS["gripper_state"], gripper))
     # 同一时刻先写事件和传感器，再写图像，与采集服务的写入顺序一致。
     order = {TOPICS["episode_event"]: 0}

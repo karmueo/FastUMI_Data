@@ -74,6 +74,75 @@ See the complete Chinese runbook:
 The ROS1/T265 workflow below remains available for historical datasets. New
 VIVE-based recordings should use the ROS2 packages under `ros2_ws/src`.
 
+### 采集质量分析
+
+`analyze_collection_quality.py` 只读分析已保存的 ROS2 采集记录（单条记录、任务目录或数据集根目录），
+覆盖 raw、compressed、H.264 三种图像模式，输出质量报告而不修改原始数据。它递归发现含
+`session.yaml` 的目录，跳过 `.staging`、`.trash`、`_analysis` 和目录符号链接；不启动 ROS 节点，
+不连接硬件，也不导出 HDF5/Zarr。
+
+**环境**：在已加载 ROS2 Jazzy、工作空间和 NumPy 1 环境的终端运行；脚本从仓库
+`ros2_ws/src/fastumi_data` 源码加载解码器、配置解析、标定核对和 Link7 同步函数，因此选帧、插值和门限
+与 `convert_mcap` 一致。ROS、解码、绘图依赖在分析开始时才加载，`--help` 不需要 ROS。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/.venv-numpy1/bin/activate
+source ros2_ws/install/setup.bash
+python analyze_collection_quality.py --input ros2_ws/dataset/umi_jingbao
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--input` | 必填：单条记录、任务目录或数据集根目录 |
+| `--output-dir` | 可选：尚不存在的输出目录；已存在时拒绝覆盖 |
+| `--decode-mode full\|sample` | 默认 `full` 解码全部图像；`sample` 每秒检查一帧并检查异常片段代表帧，报告标注解码覆盖率和“仅抽样验证” |
+| `--plots issues\|all\|none` | 默认 `issues`：异常记录及最新记录；`none` 同时不生成代表帧 |
+| `--config` | 可选：覆盖处理配置，规则同 `convert_mcap` |
+| `--source-camera-fps` | 可选：覆盖标称源帧率；不会从实测速率推断 |
+| `--tracker-camera-extrinsic` / `--end-camera-extrinsic` | 默认使用仓库 `config/calibration` 下的 Tracker–相机、末端–相机外参 |
+| `--tracker-serial` | 外参缺少设备绑定时声明标定所用 Tracker 序列号，规则同 `convert_mcap` |
+| `--jobs N` | 并行进程数。默认 `0` 按 CPU 数和记录数自动选择（最多 8）；`1` 在当前进程串行。每条记录仍在单个进程内顺序处理（H.264 解码状态不能拆分），报告内容、记录顺序和退出码与串行一致 |
+
+**速度**：记录之间互相独立，默认按记录并行。`umi_jingbao` 的 67 条记录在 32 核机器上从约 108 s 降到约 17 s；
+分析进程异常退出（如解码库崩溃）时，只把导致退出的那条记录标为分析失败，其余记录照常完成。
+
+**输出**：缺省写入输入路径上最近的 `dataset/` 目录下的 `_analysis/<输入名称>_<本地时间>_<微秒>/`
+（输入不在 `dataset/` 下时用仓库根的 `dataset/`）。目录完整生成后才以最终名称出现，
+中断时只留下 `*.partial`。
+
+- `report.md`：中文批次结论，通过／质量拒绝／预检未完成／分析失败名单，异常原因、警告汇总和图表链接。
+- `report.json`：严格 JSON，含生效配置、外参摘要、检查覆盖率及逐记录、逐 episode 指标；不可计算或非有限统计量写为
+  `null`，并在同级 `reasons` 或顶层 `null_paths` 说明。
+- `summary.csv`：每条 episode 一行（无法分析的记录单独一行）。
+- `plots/`、`previews/`：质量曲线；每条最多 12 张代表帧，优先覆盖夹爪等严重失效段及其前后，标注时间、
+  夹爪有效性和已检测标签数，不重新运行标签检测，也不判断遮挡或反光原因。
+
+**判定**：基础检查（话题与类型、消息数、图像解码与尺寸、时间间隔与重复/倒序、接收延迟、Tracker 状态与位姿数值、
+夹爪有效率与失效区间、START/STOP/ABORT 与身份、时钟映射代号、快照摘要和附带计数）不依赖外参。
+通过基础检查的 episode 再按 30 Hz 选帧和同步规则做同步预检（位姿间隔上限 0.1 s、夹爪 0.2 s、最终至少 16 帧，
+实际值以报告中的生效配置为准）。
+
+- 质量拒绝：损坏图像、关键流缺失或为空、无效位姿、事件缺陷、时钟映射变化，以及同步区间内部的 Tracker 或夹爪缺口等；
+  首尾缺少插值支撑按现有规则裁剪，偶发夹爪漏检由插值门限决定。
+- 警告（不影响退出码）：缺少 `quality.yaml`、`session.yaml` 或 bag `metadata.yaml` 的附带计数与实际不一致、
+  快照缺失或摘要不一致、图像等时间戳重复/倒序（位于 episode 内时由同步预检拒绝）等。当前 rosbag2 写出的
+  `metadata.yaml` 中 `files[].message_count` 为实际消息数的两倍，会作为 `BAG_METADATA_INCONSISTENT` 警告出现。
+- 预检未完成：外参不可用、Tracker 序列号或时间戳来源与外参绑定不匹配、配置无效、缺少标称帧率等环境、配置或标定问题。
+  已发现数据缺陷的 episode 仍判质量拒绝。身份与时间链路匹配**不代表物理标定精度已验收**。
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 无质量拒绝、分析失败或未完成预检（允许警告） |
+| `1` | 存在质量拒绝，分析已完成 |
+| `2` | 参数、依赖、读取或报告生成错误，或存在预检未完成的记录 |
+
+逐记录隔离错误：一条记录无法读取只会标记为“分析失败”，其余记录继续分析。离线测试：
+
+```bash
+cd ros2_ws/src/fastumi_data && python -m pytest test/test_analyze_collection_quality.py -q
+```
+
 
 ## 1. 🏠 Environment and GoPro Setup
 
