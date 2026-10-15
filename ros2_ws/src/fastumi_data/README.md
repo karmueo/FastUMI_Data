@@ -287,8 +287,7 @@ SIGINT/SIGKILL 重启清理）。
 ## MCAP→Link7 训练数据（convert_mcap）
 
 `convert_mcap` 手动执行，完成 MCAP→`fastumi_ros2_link7_v1` HDF5→合并
-`fastumi-rm75-link7-v1` Zarr。实施约定与资源评估见
-[`convert_mcap_rm75_plan.md`](convert_mcap_rm75_plan.md)。
+`fastumi-rm75-link7-v1` Zarr。
 
 ```bash
 ros2 run fastumi_data convert_mcap <输入目录> \
