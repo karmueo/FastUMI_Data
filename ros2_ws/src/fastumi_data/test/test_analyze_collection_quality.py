@@ -725,3 +725,117 @@ def test_output_is_published_atomically_and_plot_policy(tmp_path, calibration) -
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert {item["record_id"] for item in report["records"] if item.get("plot")} == {"task/b_second", "task/c_bad"}
     assert record_of(report, "b_second")["is_latest"] is True
+
+
+# ------------------------------------------------------------------ 回收质量拒绝记录
+def make_rejection_batch(data: Path) -> None:
+    """一条通过、一条图像损坏被拒绝的记录，均带合法 UUID 以便回收区定位。"""
+    import uuid
+
+    for name, override in (("a_good", None), ("b_bad", corrupt_compressed)):
+        record = make_record(data, "task", name, mode="compressed", image_override=override)
+        manifest = record / "session.yaml"
+        session = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        session["collection_uuid"] = str(uuid.uuid4())
+        manifest.write_text(yaml.safe_dump(session, allow_unicode=True), encoding="utf-8")
+
+
+def test_delete_rejected_yes_moves_only_rejected_to_trash(tmp_path, calibration) -> None:
+    """--delete-rejected yes 只把质量拒绝的记录移入回收区，并写 deletions.json；退出码不变。"""
+    data = tmp_path / "data"
+    make_rejection_batch(data)
+    code, report = analyze(data, tmp_path / "out", calibration, "--delete-rejected", "yes")
+    assert code == 1 and record_of(report, "b_bad")["status"] == "rejected"
+    assert (data / "task" / "a_good").is_dir()
+    assert not (data / "task" / "b_bad").exists()
+    assert (data / ".trash" / "task__b_bad" / "session.yaml").is_file()
+    log = json.loads((tmp_path / "out" / "deletions.json").read_text(encoding="utf-8"))
+    assert [(item["record_id"], item["status"]) for item in log["results"]] == [("task/b_bad", "trashed")]
+
+
+@pytest.mark.parametrize("extra", [(), ("--delete-rejected", "no")])
+def test_delete_rejected_default_and_no_leave_data(tmp_path, calibration, extra) -> None:
+    """默认 ask 在非交互终端（pytest）不询问；no 不处理；均不移动记录。"""
+    data = tmp_path / "data"
+    make_rejection_batch(data)
+    code, _ = analyze(data, tmp_path / "out", calibration, *extra)
+    assert code == 1 and (data / "task" / "b_bad").is_dir()
+    assert not (tmp_path / "out" / "deletions.json").exists()
+
+
+def fake_rejected(record_dir: Path, collection_uuid) -> dict:
+    """offer/trash 只用到的记录报告字段。"""
+    return {"record_id": f"task/{record_dir.name}", "record_dir": str(record_dir), "status": "rejected",
+            "session": {"collection_uuid": collection_uuid}, "rejections": [], "episodes": []}
+
+
+def write_saved(root: Path, name: str, collection_uuid) -> Path:
+    """写一个只有 session.yaml 的已保存记录目录。"""
+    record = root / "task" / name
+    record.mkdir(parents=True)
+    (record / "session.yaml").write_text(yaml.safe_dump({"collection_uuid": collection_uuid}), encoding="utf-8")
+    return record
+
+
+@pytest.mark.parametrize("answer, moved", [("y", True), ("YES", True), ("n", False), ("", False)])
+def test_offer_rejected_deletion_follows_answer(tmp_path, answer, moved) -> None:
+    """ask 模式只有 y/yes 才移动；其余回答不动数据也不写 deletions.json。"""
+    import uuid
+
+    identifier = str(uuid.uuid4())
+    record = write_saved(tmp_path / "root", "r", identifier)
+    output = tmp_path / "out"
+    output.mkdir()
+    results = aq.offer_rejected_deletion([fake_rejected(record, identifier)], "ask", output,
+                                         prompt=lambda _: answer, interactive=True)
+    assert record.exists() is not moved
+    assert (results is not None) is moved
+    assert (output / "deletions.json").exists() is moved
+
+
+def test_offer_rejected_deletion_treats_eof_as_no(tmp_path) -> None:
+    """读取回答时 EOF 视为否。"""
+    import uuid
+
+    record = write_saved(tmp_path / "root", "r", str(uuid.uuid4()))
+
+    def eof(_):
+        raise EOFError
+
+    assert aq.offer_rejected_deletion([fake_rejected(record, "x")], "ask", tmp_path, prompt=eof,
+                                      interactive=True) is None
+    assert record.is_dir()
+
+
+def test_trash_records_refuses_when_collection_service_holds_lock(tmp_path) -> None:
+    """采集服务占用根目录锁时整组跳过，不移动记录。"""
+    import uuid
+
+    from fastumi_data.collection_storage import CollectionStorage
+
+    identifier = str(uuid.uuid4())
+    root = tmp_path / "root"
+    record = write_saved(root, "r", identifier)
+    service = CollectionStorage(root)
+    service.acquire()
+    try:
+        results = aq.trash_records([fake_rejected(record, identifier)])
+    finally:
+        service.release()
+    assert results[0]["status"] == "skipped" and "停止采集服务" in results[0]["message"]
+    assert record.is_dir()
+
+
+@pytest.mark.parametrize("collection_uuid", [None, "not-a-uuid", "other"])
+def test_trash_records_skips_unlocatable_records(tmp_path, collection_uuid) -> None:
+    """缺 UUID、UUID 非法或 UUID 指向别的目录时跳过，不移动任何记录。"""
+    import uuid
+
+    root = tmp_path / "root"
+    record = write_saved(root, "r", str(uuid.uuid4()))
+    other = write_saved(root, "other", str(uuid.uuid4()))
+    if collection_uuid == "other":
+        collection_uuid = yaml.safe_load((other / "session.yaml").read_text())["collection_uuid"]
+    results = aq.trash_records([fake_rejected(record, collection_uuid)])
+    assert results[0]["status"] == "skipped" and results[0]["destination"] is None
+    assert record.is_dir() and other.is_dir()

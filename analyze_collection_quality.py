@@ -3,7 +3,12 @@
 
 输入可以是单条记录（含 ``session.yaml``）、任务目录或数据集根目录；递归发现记录时
 跳过 ``.staging``、``.trash``、``_analysis`` 和目录符号链接。支持 raw、compressed、H.264
-三种图像模式，不启动 ROS 节点，不连接硬件，不修改原始数据。
+三种图像模式，不启动 ROS 节点，不连接硬件，分析过程不修改原始数据。
+
+分析结束后若有质量拒绝的记录，``--delete-rejected ask``（默认，仅交互终端）会列出这些记录
+并询问是否移入数据集根目录的 ``.trash`` 回收区；``yes`` 不询问直接移入，``no`` 不处理。
+回收复用采集服务的 ``CollectionStorage``：采集服务运行中（根目录已加锁）时拒绝移动，
+结果写入输出目录的 ``deletions.json``。预检未完成和分析失败的记录不在候选之列。
 
 必须在已加载 ROS2 Jazzy、工作空间和 NumPy 1 环境的终端运行::
 
@@ -42,7 +47,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:
     import numpy as np
@@ -2003,6 +2008,116 @@ def render_markdown(report: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------- 回收质量拒绝记录
+def trash_records(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把记录移入各自数据集根目录（记录目录的上两级）的 ``.trash`` 回收区。
+
+    复用 ``CollectionStorage``：根目录被采集服务锁定时整组跳过；缺少 ``collection_uuid``
+    或按 UUID 定位到的目录与报告中的 ``record_dir`` 不一致时跳过该条，不移动任何文件。
+
+    Returns:
+        每条记录一项：``record_id``、``source``、``destination``、``status``
+        （``trashed`` / ``skipped`` / ``error``）和 ``message``。
+    """
+    from fastumi_data.collection_storage import CollectionStorage, StorageError
+
+    groups: Dict[Path, List[Dict[str, Any]]] = {}
+    for record in candidates:
+        groups.setdefault(Path(record["record_dir"]).parent.parent, []).append(record)
+    results: List[Dict[str, Any]] = []
+
+    def outcome(record: Dict[str, Any], status: str, message: str, destination: Any = None) -> None:
+        results.append({"record_id": record["record_id"], "source": record["record_dir"],
+                        "destination": None if destination is None else str(destination),
+                        "status": status, "message": message})
+
+    for root, records in groups.items():
+        storage = CollectionStorage(root)
+        try:
+            storage.acquire()
+        except StorageError as error:
+            hint = "；请先停止采集服务再删除" if error.code == "ROOT_LOCKED" else ""
+            for record in records:
+                outcome(record, "skipped", f"{error}{hint}")
+            continue
+        try:
+            for record in records:
+                identifier = str((record.get("session") or {}).get("collection_uuid") or "")
+                source = Path(record["record_dir"])
+                try:
+                    located = storage.find_saved(identifier) if identifier else None
+                except StorageError as error:
+                    outcome(record, "skipped", str(error))
+                    continue
+                if located is None or located.resolve() != source.resolve():
+                    outcome(record, "skipped", "按 collection_uuid 无法定位到该记录目录，未移动")
+                    continue
+                try:
+                    outcome(record, "trashed", "已移入回收区", storage.delete(identifier))
+                except StorageError as error:
+                    outcome(record, "error", str(error))
+        finally:
+            storage.release()
+    return results
+
+
+def offer_rejected_deletion(
+    records: Sequence[Dict[str, Any]],
+    mode: str,
+    output_dir: Path,
+    prompt: Callable[[str], str] = input,
+    interactive: Optional[bool] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """列出质量拒绝的记录，按 ``mode`` 询问或直接移入回收区。
+
+    Args:
+        records: 报告中的全部记录。
+        mode: ``ask`` / ``yes`` / ``no``。
+        output_dir: 已完成的报告目录，移动结果写入其中的 ``deletions.json``。
+        prompt: 读取用户回答的函数，测试中可替换。
+        interactive: 是否可交互；``None`` 时按标准输入是否为终端判断。
+
+    Returns:
+        实际执行移动时返回每条结果，否则为 ``None``。
+    """
+    candidates = [r for r in records if r["status"] == STATUS_REJECTED]
+    if not candidates or mode == "no":
+        return None
+    from fastumi_data.collection_storage import directory_size_bytes
+
+    if interactive is None:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    if mode == "ask" and not interactive:
+        print(f"有 {len(candidates)} 条质量拒绝记录；非交互终端不询问删除，"
+              "可加 --delete-rejected yes 移入回收区")
+        return None
+    print(f"\n质量拒绝的记录（{len(candidates)} 条）：")
+    for record in candidates:
+        path = Path(record["record_dir"])
+        size = directory_size_bytes(path) if path.is_dir() else 0
+        print(f"  - {record['record_id']}  ({size / 1e6:.1f} MB)  {path}")
+        for reason in reasons_of(record)[:2]:
+            print(f"      {reason}")
+    if mode == "ask":
+        try:
+            answer = prompt(f"将以上 {len(candidates)} 条记录移入回收区 .trash？[y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("未删除任何记录")
+            return None
+    results = trash_records(candidates)
+    for item in results:
+        target = f" -> {item['destination']}" if item["destination"] else ""
+        print(f"  [{item['status']}] {item['record_id']}{target}  {item['message']}")
+    counts = Counter(item["status"] for item in results)
+    print(f"回收完成：移入 {counts['trashed']}，跳过 {counts['skipped']}，失败 {counts['error']}")
+    text, _ = dumps_strict({"generated_at": datetime.now().astimezone().isoformat(), "results": results})
+    atomic_write(output_dir / "deletions.json", text)
+    return results
+
+
 # ---------------------------------------------------------------- 命令行
 def build_parser() -> argparse.ArgumentParser:
     """命令行参数。"""
@@ -2028,6 +2143,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jobs", type=int, default=0,
                         help=f"并行分析的进程数；0（默认）按 CPU 数和记录数自动选择，上限 {MAX_AUTO_JOBS}；"
                              "1 在当前进程串行。每条记录仍在单个进程内顺序处理")
+    parser.add_argument("--delete-rejected", choices=("ask", "yes", "no"), default="ask",
+                        help="分析后处理质量拒绝的记录：ask 在交互终端询问是否移入回收区（默认，"
+                             "非交互终端跳过）；yes 直接移入；no 不处理")
     return parser
 
 
@@ -2313,6 +2431,10 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         f"完成：通过 {totals['passed']}，质量拒绝 {totals['rejected']}，预检未完成 {totals['incomplete']}，"
         f"分析失败 {totals['failed']}；报告 {output_dir / 'report.md'}"
     )
+    try:
+        offer_rejected_deletion(records, args.delete_rejected, output_dir)
+    except Exception as error:
+        print(f"回收质量拒绝记录时出错：{type(error).__name__}: {error}", file=sys.stderr)
     return code
 
 
