@@ -590,6 +590,11 @@ ros2 run fastumi_data convert_mcap \
 
 ## 5. MCAP 转 FastUMI HDF5
 
+> **已移除**：本节和第 6 节描述的旧 TCP 流程（`McapEpisodeConverter`、`--extrinsic`、
+> `sample_rate_hz` 等同步参数、`fastumi_ros2_v2` HDF5）已不再提供，仅供追溯旧数据。
+> 当前 `convert_mcap` 直接输出 30 Hz Link7 HDF5 与合并 Zarr，用法见
+> `ros2_ws/src/fastumi_data/README.md` 的“MCAP→Link7 训练数据”。
+
 ### 5.1 调用入口与实现
 
 本步骤通过 ROS 2 包安装的命令行可执行程序调用：

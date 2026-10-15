@@ -3,447 +3,63 @@
 命令行入口执行 MCAP→``fastumi_ros2_link7_v1`` HDF5→``fastumi-rm75-link7-v1`` Zarr：
 负责来源发现、配置与标称源帧率解析、外参设备身份预检、逐记录转换编排、
 清单和发布。单条记录的读取与同步见 :mod:`fastumi_data.link7_record`。
-
-``McapEpisodeConverter`` 保留旧 ``fastumi_ros2_v2``（TCP、按处理配置采样率）库接口，
-供连续录制等旧路径和测试使用，其行为不变；命令行不再提供旧 ``--extrinsic`` 用法。
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
-import json
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
 import sys
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional, Sequence, TextIO
 
 from ament_index_python.packages import (
     PackageNotFoundError,
     get_package_share_directory,
 )
-from fastumi_interfaces.msg import EpisodeEvent, TrackerStatus
-from geometry_msgs.msg import PoseStamped
-import numpy as np
-from rclpy.serialization import deserialize_message
-import rosbag2_py
-from rosidl_runtime_py.utilities import get_message
 import yaml
 
-from fastumi_data.bag_images import BagImageDecoder, check_bag_image_topic
-from fastumi_data.extrinsic import load_tracker_tcp_extrinsic
-from fastumi_data.hdf5_writer import (
-    build_quality_report,
-    write_episode_hdf5,
-    write_json_report,
-)
-from fastumi_data.models import (
-    EpisodeBuffer,
-    EpisodeEventRecord,
-    GripperSample,
-    ImageSample,
-    PoseSample,
-    ProcessingConfig,
-    TrackerStatusSample,
-)
 from fastumi_data.frame_selection import selection_path_for
-from fastumi_data.image_modes import MODE_RAW, validate_image_mode
+from fastumi_data.gripper_source import (
+    GRIPPER_SOURCE_CHOICES,
+    GripperSource,
+    SOURCE_AUTO,
+    resolve_gripper_source,
+)
+from fastumi_data.json_report import write_json_report
 from fastumi_data.link7_calibration import (
     CalibrationError,
+    Link7Calibration,
     check_timestamp_source,
     load_link7_calibration,
     normalize_timestamp_source,
 )
-from fastumi_data.link7_config import ConfigError, resolve_processing, resolve_source_fps
+from fastumi_data.link7_config import (
+    ConfigError,
+    ResolvedProcessing,
+    resolve_processing,
+    resolve_source_fps,
+)
 from fastumi_data.link7_hdf5 import LINK7_SCHEMA_VERSION
 from fastumi_data.link7_record import Link7RecordConverter, precheck_tracker_identity
 from fastumi_data.link7_zarr import ZARR_FORMAT, ZarrEpisodeSource, export_link7_zarr
-from fastumi_data.synchronizer import synchronize_episode
-from fastumi_data.video_decoding import COLOR_RGB, VideoDecodeError
 
-
-def _stamp_to_ns(stamp) -> int:
-    """把 builtin_interfaces/Time 转换为 Unix 纳秒整数。"""
-    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
-
-
-def _load_processing_document(path: str) -> tuple[ProcessingConfig, Dict]:
-    """加载同步参数、话题映射和图像模式（缺省为 raw）。"""
-    try:
-        document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as error:
-        raise ValueError(f"无法读取处理配置 {path}: {error}") from error
-    if not isinstance(document, dict):
-        raise ValueError("处理配置必须是 YAML 映射")
-    topics = document.get("topics")
-    if not isinstance(topics, dict):
-        raise ValueError("处理配置缺少 topics 映射")
-    required_topics = ("image", "tracker_pose", "gripper_state", "episode_event")
-    missing = [name for name in required_topics if not topics.get(name)]
-    if missing:
-        raise ValueError(f"处理配置缺少话题: {', '.join(missing)}")
-    config = ProcessingConfig(
-        sample_rate_hz=float(document.get("sample_rate_hz", 20.0)),
-        max_image_delta_s=float(document.get("max_image_delta_s", 0.03)),
-        max_pose_gap_s=float(document.get("max_pose_gap_s", 0.1)),
-        max_gripper_gap_s=float(document.get("max_gripper_gap_s", 0.2)),
-        minimum_samples=int(document.get("minimum_samples", 10)),
-        require_tracker_status=bool(
-            document.get("require_tracker_status", True)
-        ),
-        image_mode=validate_image_mode(document.get("image_mode", MODE_RAW)),
-    )
-    if config.sample_rate_hz <= 0.0 or config.minimum_samples <= 0:
-        raise ValueError("采样率和最小样本数必须为正数")
-    if config.require_tracker_status and not topics.get("tracker_status"):
-        raise ValueError(
-            "require_tracker_status=true 时必须配置 tracker_status 话题"
-        )
-    return config, topics
-
-
-class McapEpisodeConverter:
-    """单遍读取 MCAP，并在 STOP 事件到达时处理当前 episode。"""
-
-    def __init__(
-        self,
-        bag_uri: str,
-        output_dir: str,
-        processing_config: ProcessingConfig,
-        topics: Dict,
-        extrinsic_path: str,
-        force: bool,
-    ) -> None:
-        """保存转换配置并初始化消息解码器。"""
-        self._bag_uri = str(Path(bag_uri).resolve())
-        self._output_dir = Path(output_dir).resolve()
-        self._config = processing_config
-        self._topics = topics
-        self._extrinsic = load_tracker_tcp_extrinsic(extrinsic_path)
-        self._force = force
-        self._active: Optional[EpisodeBuffer] = None
-        self._converted_count = 0
-        self._rejected_count = 0
-
-    def _write_rejection(
-        self,
-        event: EpisodeEventRecord,
-        reasons: list[str],
-        warnings: Optional[list[str]] = None,
-    ) -> None:
-        """写入被拒绝或主动放弃 episode 的报告。"""
-        report_path = (
-            self._output_dir
-            / "reports"
-            / f"episode_{event.episode_index:04d}.json"
-        )
-        report = {
-            "accepted": False,
-            "task_name": event.task_name,
-            "session_id": event.session_id,
-            "episode_index": event.episode_index,
-            "rejection_reasons": reasons,
-            "warnings": warnings or [],
-            "calibration_sha256": self._extrinsic.calibration_hash,
-            "tracker_time_offset_ms": self._extrinsic.time_offset_ms,
-            "source_calibration_sha256": (
-                self._extrinsic.source_calibration_sha256
-            ),
-            "calibration_method": self._extrinsic.calibration_method,
-            "aruco_config_sha256": self._extrinsic.aruco_config_sha256,
-        }
-        write_json_report(str(report_path), report)
-        self._rejected_count += 1
-
-    def _finish_episode(self, stop_event: EpisodeEventRecord) -> None:
-        """同步、检查并写入当前 episode。"""
-        if self._active is None:
-            self._write_rejection(
-                stop_event, ["收到 STOP，但此前没有 START"]
-            )
-            return
-        start_event = self._active.start_event
-        if (
-            start_event.episode_index != stop_event.episode_index
-            or start_event.session_id != stop_event.session_id
-        ):
-            self._write_rejection(
-                start_event, ["START 与 STOP 的 session 或 episode 编号不一致"]
-            )
-            self._active = None
-            return
-        tracker_time_offset_ns = int(
-            round(self._extrinsic.time_offset_ms * 1.0e6)
-        )
-        result = synchronize_episode(
-            self._active,
-            stop_event.timestamp_ns,
-            self._extrinsic.matrix,
-            self._config,
-            tracker_time_offset_ns=tracker_time_offset_ns,
-        )
-        if result.episode is None:
-            self._write_rejection(
-                start_event, result.rejection_reasons, result.warnings
-            )
-            self._active = None
-            return
-        episode_path = (
-            self._output_dir
-            / "episodes"
-            / f"episode_{start_event.episode_index:04d}.hdf5"
-        )
-        if episode_path.exists() and not self._force:
-            raise FileExistsError(
-                f"{episode_path} 已存在；使用 --force 明确覆盖"
-            )
-        write_episode_hdf5(
-            str(episode_path),
-            result.episode,
-            task_name=start_event.task_name,
-            session_id=start_event.session_id,
-            episode_index=start_event.episode_index,
-            sample_rate_hz=self._config.sample_rate_hz,
-            calibration_hash=self._extrinsic.calibration_hash,
-            tracker_time_offset_ms=self._extrinsic.time_offset_ms,
-            source_calibration_sha256=(
-                self._extrinsic.source_calibration_sha256
-            ),
-            calibration_method=self._extrinsic.calibration_method,
-            aruco_config_sha256=self._extrinsic.aruco_config_sha256,
-        )
-        report = build_quality_report(
-            result.episode,
-            result.warnings,
-            self._extrinsic.calibration_hash,
-            tracker_time_offset_ms=self._extrinsic.time_offset_ms,
-            source_calibration_sha256=(
-                self._extrinsic.source_calibration_sha256
-            ),
-            calibration_method=self._extrinsic.calibration_method,
-            aruco_config_sha256=self._extrinsic.aruco_config_sha256,
-        )
-        report.update(
-            {
-                "task_name": start_event.task_name,
-                "session_id": start_event.session_id,
-                "episode_index": start_event.episode_index,
-            }
-        )
-        write_json_report(
-            str(
-                self._output_dir
-                / "reports"
-                / f"episode_{start_event.episode_index:04d}.json"
-            ),
-            report,
-        )
-        self._converted_count += 1
-        self._active = None
-
-    def _handle_event(self, message: EpisodeEvent) -> None:
-        """更新 episode 状态机并处理边界冲突。"""
-        event = EpisodeEventRecord(
-            timestamp_ns=_stamp_to_ns(message.header.stamp),
-            session_id=message.session_id,
-            task_name=message.task_name,
-            episode_index=int(message.episode_index),
-            event_type=int(message.event_type),
-        )
-        if event.event_type == EpisodeEvent.START:
-            if self._active is not None:
-                self._write_rejection(
-                    self._active.start_event, ["在活动 episode 内再次收到 START"]
-                )
-            self._active = EpisodeBuffer(start_event=event)
-        elif event.event_type == EpisodeEvent.STOP:
-            self._finish_episode(event)
-        elif event.event_type == EpisodeEvent.ABORT:
-            if self._active is None:
-                self._write_rejection(event, ["收到 ABORT，但此前没有 START"])
-            else:
-                self._write_rejection(
-                    self._active.start_event, ["操作员主动放弃 episode"]
-                )
-                self._active = None
-
-    def convert(self) -> Dict[str, int]:
-        """读取全部消息并返回接收、转换和拒绝计数。"""
-        reader = rosbag2_py.SequentialReader()
-        reader.open(
-            rosbag2_py.StorageOptions(
-                uri=self._bag_uri, storage_id="mcap"
-            ),
-            rosbag2_py.ConverterOptions("", ""),
-        )
-        topic_types = {
-            item.name: item.type for item in reader.get_all_topics_and_types()
-        }
-        message_types = {
-            topic: get_message(type_name)
-            for topic, type_name in topic_types.items()
-        }
-        image_topic = self._topics["image"]
-        if image_topic in topic_types:
-            check_bag_image_topic(
-                topic_types, image_topic, self._config.image_mode
-            )
-        image_decoder = BagImageDecoder(self._config.image_mode, COLOR_RGB)
-        message_count = 0
-        while reader.has_next():
-            topic, serialized, bag_timestamp_ns = reader.read_next()
-            if topic not in message_types:
-                continue
-            if topic == image_topic:
-                message_count += 1
-                self._handle_image(image_decoder, serialized, bag_timestamp_ns)
-                continue
-            message = deserialize_message(serialized, message_types[topic])
-            message_count += 1
-            if topic == self._topics["episode_event"]:
-                self._handle_event(message)
-                continue
-            if topic == self._topics.get("tracker_status"):
-                status: TrackerStatus = message
-                if (
-                    status.serial_number
-                    and status.serial_number
-                    != self._extrinsic.tracker_serial
-                ):
-                    raise ValueError(
-                        "MCAP Tracker 序列号与外参不一致: "
-                        f"{status.serial_number} != "
-                        f"{self._extrinsic.tracker_serial}"
-                    )
-                if self._active is not None:
-                    self._active.tracker_statuses.append(
-                        TrackerStatusSample(
-                            _stamp_to_ns(status.header.stamp),
-                            bool(status.device_connected),
-                            bool(status.pose_valid),
-                            int(status.tracking_state),
-                        )
-                    )
-                continue
-            if self._active is None:
-                continue
-            if topic == self._topics["tracker_pose"]:
-                pose_message: PoseStamped = message
-                pose = pose_message.pose
-                self._active.poses.append(
-                    PoseSample(
-                        _stamp_to_ns(pose_message.header.stamp),
-                        np.asarray(
-                            [
-                                pose.position.x,
-                                pose.position.y,
-                                pose.position.z,
-                            ],
-                            dtype=np.float64,
-                        ),
-                        np.asarray(
-                            [
-                                pose.orientation.x,
-                                pose.orientation.y,
-                                pose.orientation.z,
-                                pose.orientation.w,
-                            ],
-                            dtype=np.float64,
-                        ),
-                    )
-                )
-            elif topic == self._topics["gripper_state"]:
-                self._active.grippers.append(
-                    GripperSample(
-                        _stamp_to_ns(message.header.stamp),
-                        float(message.raw_openness),
-                        float(message.filtered_openness),
-                        int(message.detected_marker_count),
-                        bool(message.valid),
-                    )
-                )
-        try:
-            self._append_frames(image_decoder.drain())
-        except VideoDecodeError as error:
-            raise VideoDecodeError(
-                f"图像话题 {image_topic} 在文件结束排空解码器时失败: {error}"
-            ) from error
-        if self._active is not None:
-            self._write_rejection(
-                self._active.start_event, ["MCAP 结束时 episode 尚未 STOP"]
-            )
-            self._active = None
-        summary = {
-            "messages": message_count,
-            "converted": self._converted_count,
-            "rejected": self._rejected_count,
-        }
-        if self._config.image_mode != MODE_RAW:
-            stats = image_decoder.stats
-            summary.update(
-                {
-                    "image_mode": self._config.image_mode,
-                    "image_frames_decoded": stats.frames,
-                    "image_packets_skipped_before_keyframe": (
-                        stats.skipped_before_keyframe
-                    ),
-                }
-            )
-        return summary
-
-    def _append_frames(self, frames) -> None:
-        """把解码帧按源时间加入活动 episode；episode 之外的帧只用于维持参考。"""
-        if self._active is None:
-            return
-        for frame in frames:
-            self._active.images.append(
-                ImageSample(frame.stamp_ns, frame.image)
-            )
-
-    def _handle_image(
-        self, decoder: BagImageDecoder, serialized: bytes, bag_timestamp_ns: int
-    ) -> None:
-        """解码一条图像消息并归属到活动 episode。
-
-        压缩视频的解码状态跨越 episode：参考包持续输入，帧在解码后才按
-        episode 筛选。episode 内出现无法解码的包（例如关键帧之前的前缀）
-        会明确失败，而不是悄悄缺帧。
-        """
-        if decoder.mode == MODE_RAW and self._active is None:
-            return
-        skipped_before = decoder.stats.skipped_before_keyframe
-        try:
-            frames = decoder.feed(serialized, bag_timestamp_ns)
-        except VideoDecodeError as error:
-            raise VideoDecodeError(
-                f"图像话题 {self._topics['image']} 解码失败"
-                f"（bag 时间 {bag_timestamp_ns} ns）: {error}"
-            ) from error
-        if (
-            self._active is not None
-            and decoder.stats.skipped_before_keyframe != skipped_before
-        ):
-            raise VideoDecodeError(
-                f"episode {self._active.start_event.episode_index} 内的图像包"
-                f"（bag 时间 {bag_timestamp_ns} ns）发生在首个 H.264 关键帧之前，"
-                "无法解码"
-            )
-        self._append_frames(frames)
-
-
-# --------------------------------------------------------------------------
-# Link7 批量转换（convert_mcap 命令行入口）
-# --------------------------------------------------------------------------
 
 # 输出目录中的固定文件名。
 OUTPUT_ZARR_NAME = "dataset.zarr"
 MANIFEST_NAME = "manifest.json"
+# 缺省 --urdf 时使用的包内部署 URDF（与 dp_infer 默认 expected_urdf_sha256 一致）。
+DEFAULT_URDF_NAME = "rm_75.urdf"
 EXTRINSIC_MIGRATION = (
     "--extrinsic 已移除：convert_mcap 现在输出 Link7 数据，请使用 --tracker-camera-extrinsic "
-    "与 --end-camera-extrinsic（缺省为包内已绑定的默认外参），并提供 --urdf 与 --output-dir"
+    "与 --end-camera-extrinsic（缺省为包内已绑定的默认外参），并提供 --output-dir"
 )
 # 逐 episode 写入 Zarr 根属性的元数据键。
 _ZARR_EPISODE_KEYS = (
@@ -455,7 +71,12 @@ _ZARR_EPISODE_KEYS = (
     "end_camera_extrinsic_sha256", "tracker_time_offset_ms", "tracker_time_offset_source_s",
     "time_calibration_timestamp_source",
     "time_calibration_conditions",
+    "gripper_source",
 )
+# --jobs 为 0 时自动选择的进程数上限；各进程独立解码，内存与磁盘暂存随进程数线性增长。
+MAX_AUTO_JOBS = 8
+# 并行时限制每个工作进程的数值库线程数，避免进程数 × 线程数超订 CPU。
+_SINGLE_THREAD_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
 
 
 @dataclass(frozen=True)
@@ -497,6 +118,13 @@ def default_calibration_path(name: str) -> Path:
     candidates = _package_paths("config", "calibration", name)
     candidates.append(Path(__file__).resolve().parents[4] / "config" / "calibration" / name)
     return _first_existing(candidates, f"默认外参 {name}")
+
+
+def default_urdf_path() -> Path:
+    """包内安装的默认部署 URDF；源码树回退到仓库 ``assets/rm_75.urdf``。"""
+    candidates = _package_paths("assets", DEFAULT_URDF_NAME)
+    candidates.append(Path(__file__).resolve().parents[4] / "assets" / DEFAULT_URDF_NAME)
+    return _first_existing(candidates, f"默认 URDF {DEFAULT_URDF_NAME}")
 
 
 def _is_bag_dir(path: Path) -> bool:
@@ -607,7 +235,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", help="单个 bag、单条已保存记录或任务目录")
     parser.add_argument("--output-dir", required=True, help="新输出目录，必须尚不存在")
-    parser.add_argument("--urdf", required=True, help="实际部署使用的 URDF")
+    parser.add_argument(
+        "--urdf", default="",
+        help=f"实际部署使用的 URDF；缺省为包内 {DEFAULT_URDF_NAME}（仅记录摘要与快照，不参与计算）",
+    )
     parser.add_argument(
         "--tracker-camera-extrinsic", default="",
         help="T_cam_tracker 外参；缺省为包内已绑定的默认外参",
@@ -625,12 +256,219 @@ def _build_parser() -> argparse.ArgumentParser:
         help="标称源帧率覆盖值（如 30、29.97、90）；缺省读取各记录快照",
     )
     parser.add_argument("--config", default="", help="可选处理配置；缺省用记录快照或包默认配置")
+    parser.add_argument(
+        "--gripper-source", choices=GRIPPER_SOURCE_CHOICES, default=SOURCE_AUTO,
+        help=(
+            "夹爪开度来源：auto（默认，记录含 binarization.yaml 时用 binary，否则用 filtered）、"
+            "binary（二值化结果，最近邻取值）、filtered（采集时平滑开度）、raw（未平滑开度）"
+        ),
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=1,
+        help=(
+            "并行转换记录的进程数；1（默认）在当前进程串行；0 按 CPU 数和记录数自动选择，"
+            f"上限 {MAX_AUTO_JOBS}。每条记录仍在单个进程内顺序处理，Zarr 在全部记录完成后统一合并"
+        ),
+    )
     return parser
 
 
 def _episode_zarr_metadata(metadata: Dict) -> Dict:
     """挑选写入 Zarr 逐 episode 元数据的字段。"""
     return {key: metadata.get(key) for key in _ZARR_EPISODE_KEYS}
+
+
+class _Progress:
+    """向 stderr 绘制阶段进度条；仅在交互终端绘制，管道和日志里保持静默。
+
+    阶段依次为“转换记录”（按记录数）、“写入图像”（按帧）、“校验数值”（按 episode）。
+    ``write`` 打印异常行：先擦掉进度条再输出，随后重绘，因此异常行不会被覆盖。
+    """
+
+    _WIDTH = 24
+
+    def __init__(self, total: int, stream: Optional[TextIO] = None) -> None:
+        """``total`` 为待转换记录数；``stream`` 缺省为 stderr。"""
+        self._label = "转换记录"
+        self._total = total
+        self._stream = stream if stream is not None else sys.stderr
+        self._done = 0
+        self._visible = False
+        try:
+            self._enabled = bool(self._stream.isatty())
+        except (AttributeError, ValueError):
+            self._enabled = False
+        self._draw()
+
+    def _draw(self) -> None:
+        """原地重绘进度条。"""
+        if not self._enabled:
+            return
+        filled = self._WIDTH * self._done // max(self._total, 1)
+        bar = "#" * filled + "-" * (self._WIDTH - filled)
+        self._stream.write(f"\r{self._label} [{bar}] {self._done}/{self._total}")
+        self._stream.flush()
+        self._visible = True
+
+    def _erase(self) -> None:
+        """擦掉当前进度条行。"""
+        if self._visible:
+            self._stream.write("\r\033[K")
+            self._visible = False
+
+    def advance(self) -> None:
+        """完成数加一并重绘。"""
+        self._done += 1
+        self._draw()
+
+    def report(self, label: str, done: int, total: int) -> None:
+        """切换到（或更新）某个阶段：``done``/``total`` 为该阶段的进度。"""
+        self._label, self._done, self._total = label, done, total
+        self._draw()
+
+    def write(self, line: str) -> None:
+        """打印一行异常信息，进度条保持在其下方。"""
+        self._erase()
+        self._stream.write(line + "\n")
+        self._draw()
+        self._stream.flush()
+
+    def close(self) -> None:
+        """擦掉进度条，使后续输出从行首开始。"""
+        self._erase()
+        self._stream.flush()
+
+
+@dataclass(frozen=True)
+class _RecordTask:
+    """一条记录的转换任务：只含可跨进程传递的不可变输入。"""
+
+    record: SourceRecord
+    processing: ResolvedProcessing
+    fps: float
+    fps_source: str
+    gripper: GripperSource
+    identity: Dict
+    calibration: Link7Calibration
+    output_dir: Path
+    urdf_name: str
+    urdf_sha256: str
+
+
+@dataclass(frozen=True)
+class _RecordResult:
+    """一条记录的转换结果；``log`` 为需要打印的异常行（episode 被拒绝），由主进程按完成顺序输出。"""
+
+    report: Dict
+    accepted: List[ZarrEpisodeSource]
+    log: List[str]
+
+
+class _WorkerFailure(Exception):
+    """工作进程内的转换异常；消息已含记录标识和原异常类型。"""
+
+
+def resolve_jobs(requested: int, record_count: int) -> int:
+    """0 表示按 CPU 数和记录数自动选择（不超过 ``MAX_AUTO_JOBS``）；显式值只受记录数限制。"""
+    if requested == 0:
+        return max(1, min(os.cpu_count() or 1, record_count, MAX_AUTO_JOBS))
+    return max(1, min(requested, record_count))
+
+
+def _convert_record(task: _RecordTask) -> _RecordResult:
+    """转换一条记录，写 HDF5、报告与 ``record_report.json``；输出只落在该记录自己的目录。
+
+    正常过程不输出；被拒绝的 episode 行收集在结果的 ``log`` 中。
+    """
+    rejected_lines: List[str] = []
+    record, processing, gripper = task.record, task.processing, task.gripper
+    record_dir = task.output_dir / "records" / record.record_id
+    work_dir = task.output_dir / ".work" / record.record_id
+    session_image = (record.session or {}).get("image") or {}
+    base_metadata = dict(task.calibration.metadata())
+    base_metadata.update(task.identity)
+    base_metadata.update(
+        {
+            "record_id": record.record_id,
+            "source_bag": str(record.bag_uri),
+            "source_record_dir": str(record.record_dir or ""),
+            "collection_uuid": str((record.session or {}).get("collection_uuid", "")),
+            "nominal_source_fps": task.fps,
+            "nominal_source_fps_source": task.fps_source,
+            "selection_path": selection_path_for(task.fps),
+            "image_timestamp_source": str(session_image.get("timestamp_source") or "unrecorded"),
+            "image_timestamp_source_normalized": normalize_timestamp_source(
+                session_image.get("timestamp_source")
+            ),
+            "tracker_status_topic": processing.topics["tracker_status"],
+            "processing": processing.report(),
+            "urdf_sha256": task.urdf_sha256,
+            "urdf_file": task.urdf_name,
+            "gripper_source": gripper.report(),
+        }
+    )
+    summary = Link7RecordConverter(
+        record.record_id, record.bag_uri, record_dir, work_dir,
+        processing, task.calibration, task.fps, base_metadata,
+        log=lambda _line: None, gripper_source=gripper, reject_log=rejected_lines.append,
+    ).convert()
+    record_report = {
+        "record_id": record.record_id,
+        "source_bag": str(record.bag_uri),
+        "nominal_source_fps": task.fps,
+        "nominal_source_fps_source": task.fps_source,
+        "processing": processing.report(),
+        "gripper_source": gripper.report(),
+        "identity": task.identity,
+        "decode": summary.stats,
+        "accepted": [
+            {key: item[key] for key in ("name", "hdf5", "report", "frames")}
+            for item in summary.accepted
+        ],
+        "rejected": summary.rejected,
+    }
+    write_json_report(str(record_dir / "record_report.json"), record_report)
+    accepted = [
+        ZarrEpisodeSource(item["name"], Path(item["hdf5"]), _episode_zarr_metadata(item["metadata"]))
+        for item in summary.accepted
+    ]
+    return _RecordResult(record_report, accepted, rejected_lines)
+
+
+def _convert_in_worker(task: _RecordTask) -> _RecordResult:
+    """工作进程入口：异常转为带记录标识的 ``_WorkerFailure``。"""
+    try:
+        return _convert_record(task)
+    except Exception as error:
+        raise _WorkerFailure(
+            f"{task.record.record_id}: {type(error).__name__}: {error}"
+        ) from None
+
+
+def _convert_parallel(
+    tasks: Sequence[_RecordTask], workers: int, finish: Callable[[int, _RecordResult], None],
+) -> None:
+    """在 spawn 进程池中并行转换，每条完成即交给 ``finish``。
+
+    首个失败会取消尚未开始的记录并抛出；已在运行的记录会先跑完再退出。
+    """
+    for name in _SINGLE_THREAD_ENV:
+        os.environ.setdefault(name, "1")
+    pool = ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+    )
+    try:
+        futures = {pool.submit(_convert_in_worker, task): index for index, task in enumerate(tasks)}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except BrokenProcessPool as error:
+                raise _WorkerFailure(
+                    f"工作进程异常退出（可能被系统终止，如内存不足）：{error}"
+                ) from None
+            finish(futures[future], result)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def run_batch(argv: Optional[list[str]] = None) -> int:
@@ -640,12 +478,20 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
     if any(item == "--extrinsic" or item.startswith("--extrinsic=") for item in arguments_list):
         parser.error(EXTRINSIC_MIGRATION)
     arguments = parser.parse_args(arguments_list)
+    if arguments.jobs < 0:
+        parser.error("--jobs 不能为负数")
     output_dir = Path(arguments.output_dir).expanduser().resolve()
     if output_dir.exists():
         parser.error(f"--output-dir {output_dir} 已存在；请指定新的输出目录")
-    urdf_path = Path(arguments.urdf).expanduser().resolve()
-    if not urdf_path.is_file():
-        parser.error(f"--urdf {urdf_path} 不存在")
+    if arguments.urdf:
+        urdf_path = Path(arguments.urdf).expanduser().resolve()
+        if not urdf_path.is_file():
+            parser.error(f"--urdf {urdf_path} 不存在")
+    else:
+        try:
+            urdf_path = default_urdf_path().resolve()
+        except FileNotFoundError as error:
+            parser.error(str(error))
     urdf_sha256 = _sha256_file(urdf_path)
     try:
         tracker_extrinsic = (
@@ -669,6 +515,7 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
         explicit = Path(arguments.config).expanduser() if arguments.config else None
         default_config = default_processing_path()
         plans = []
+        notes: list[str] = []
         for record in sources:
             processing = resolve_processing(explicit, _snapshot_processing(record), default_config)
             fps, fps_source = resolve_source_fps(
@@ -680,11 +527,19 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
             except CalibrationError as error:
                 raise CalibrationError(f"{record.record_id}: {error}") from error
             if note:
-                print(f"提示：{record.record_id} {note}")
-            plans.append((record, processing, fps, fps_source))
-        print(f"发现 {len(plans)} 条来源记录；预检 Tracker 设备身份 {calibration.tracker_serial}")
+                notes.append(f"{record.record_id} {note}")
+            try:
+                gripper = resolve_gripper_source(
+                    arguments.gripper_source, record.record_dir,
+                    processing.topics["gripper_state"],
+                )
+            except ConfigError as error:
+                raise ConfigError(f"{record.record_id}: {error}") from error
+            plans.append((record, processing, fps, fps_source, gripper))
+        workers = resolve_jobs(arguments.jobs, len(plans))
+        zarr_workers = resolve_jobs(arguments.jobs, 1 << 30)
         identities = {}
-        for record, processing, _, _ in plans:
+        for record, processing, *_ in plans:
             identities[record.record_id] = precheck_tracker_identity(
                 record.bag_uri, processing.topics["tracker_status"], calibration.tracker_serial
             )
@@ -701,11 +556,12 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
         "input": str(Path(arguments.input).expanduser().resolve()),
         "output_dir": str(output_dir),
         "arguments": arguments_list,
+        "jobs": workers,
         "calibration": calibration.metadata(),
         "urdf": {"path": str(urdf_path), "sha256": urdf_sha256},
         "sources": [],
         "zarr": None,
-        "warnings": [],
+        "warnings": notes,
     }
     manifest_path = output_dir / MANIFEST_NAME
 
@@ -713,6 +569,7 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
         write_json_report(str(manifest_path), manifest)
 
     accepted_sources: list[ZarrEpisodeSource] = []
+    progress = _Progress(len(plans))
     try:
         snapshots = output_dir / "snapshots"
         manifest["calibration"]["snapshots"] = {
@@ -734,73 +591,36 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
             urdf_path, snapshots / "urdf", urdf_sha256
         )
         save_manifest()
-        for record, processing, fps, fps_source in plans:
-            record_dir = output_dir / "records" / record.record_id
-            work_dir = output_dir / ".work" / record.record_id
-            session_image = (record.session or {}).get("image") or {}
-            base_metadata = dict(calibration.metadata())
-            base_metadata.update(identities[record.record_id])
-            base_metadata.update(
-                {
-                    "record_id": record.record_id,
-                    "source_bag": str(record.bag_uri),
-                    "source_record_dir": str(record.record_dir or ""),
-                    "collection_uuid": str((record.session or {}).get("collection_uuid", "")),
-                    "nominal_source_fps": fps,
-                    "nominal_source_fps_source": fps_source,
-                    "selection_path": selection_path_for(fps),
-                    "image_timestamp_source": str(
-                        session_image.get("timestamp_source") or "unrecorded"
-                    ),
-                    "image_timestamp_source_normalized": normalize_timestamp_source(
-                        session_image.get("timestamp_source")
-                    ),
-                    "tracker_status_topic": processing.topics["tracker_status"],
-                    "processing": processing.report(),
-                    "urdf_sha256": urdf_sha256,
-                    "urdf_file": urdf_path.name,
-                }
+        tasks = [
+            _RecordTask(
+                record, processing, fps, fps_source, gripper, identities[record.record_id],
+                calibration, output_dir, urdf_path.name, urdf_sha256,
             )
-            print(
-                f"转换 {record.record_id}（标称 {fps:g} Hz，{fps_source}，"
-                f"{selection_path_for(fps)}，配置 {processing.source}）"
-            )
-            for item in processing.adjustments:
-                if item["original"] is not None:
-                    print(f"  配置调整 {item['field']}: {item['original']} → {item['effective']}（{item['reason']}）")
-            summary = Link7RecordConverter(
-                record.record_id, record.bag_uri, record_dir, work_dir,
-                processing, calibration, fps, base_metadata,
-            ).convert()
-            record_report = {
-                "record_id": record.record_id,
-                "source_bag": str(record.bag_uri),
-                "nominal_source_fps": fps,
-                "nominal_source_fps_source": fps_source,
-                "processing": processing.report(),
-                "identity": identities[record.record_id],
-                "decode": summary.stats,
-                "accepted": [
-                    {key: item[key] for key in ("name", "hdf5", "report", "frames")}
-                    for item in summary.accepted
-                ],
-                "rejected": summary.rejected,
-            }
-            write_json_report(str(record_dir / "record_report.json"), record_report)
-            manifest["sources"].append(record_report)
-            for item in summary.accepted:
-                accepted_sources.append(
-                    ZarrEpisodeSource(
-                        item["name"], Path(item["hdf5"]),
-                        _episode_zarr_metadata(item["metadata"]),
-                    )
-                )
+            for record, processing, fps, fps_source, gripper in plans
+        ]
+        results: list[Optional[_RecordResult]] = [None] * len(tasks)
+
+        def finish(index: int, result: _RecordResult) -> None:
+            """登记一条记录的结果；清单中的来源始终按发现顺序排列。"""
+            results[index] = result
+            progress.advance()
+            for line in result.log:
+                progress.write(line)
+            manifest["sources"] = [item.report for item in results if item is not None]
             save_manifest()
+
+        if workers <= 1:
+            for index, task in enumerate(tasks):
+                finish(index, _convert_record(task))
+        else:
+            _convert_parallel(tasks, workers, finish)
+        accepted_sources = [source for item in results for source in item.accepted]
         shutil.rmtree(output_dir / ".work", ignore_errors=True)
         if not accepted_sources:
             manifest["status"] = "failed"
             manifest["error"] = "没有任何有效 episode"
             save_manifest()
+            progress.close()
             print("转换失败：没有任何有效 episode", file=sys.stderr)
             return 1
         manifest["zarr"] = export_link7_zarr(
@@ -815,32 +635,28 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
                 "tracker_camera_extrinsic_sha256": calibration.tracker_camera.sha256,
                 "end_camera_extrinsic_sha256": calibration.end_camera.sha256,
             },
+            jobs=zarr_workers,
+            on_progress=progress.report,
         )
     except Exception as error:  # 硬错误：中止批次并保留诊断产物。
         manifest["status"] = "failed"
-        manifest["error"] = f"{type(error).__name__}: {error}"
+        manifest["error"] = (
+            str(error) if isinstance(error, _WorkerFailure) else f"{type(error).__name__}: {error}"
+        )
         save_manifest()
+        progress.close()
         print(f"转换中止：{manifest['error']}", file=sys.stderr)
         return 1
+    progress.close()
     if len(accepted_sources) < 2:
         message = "只有 1 条有效 episode：当前训练默认验证划分至少需要两条有效 episode"
         manifest["warnings"].append(message)
-        print(f"提示：{message}")
     manifest["status"] = "succeeded"
     save_manifest()
     rejected = sum(len(item["rejected"]) for item in manifest["sources"])
     print(
-        json.dumps(
-            {
-                "output_dir": str(output_dir),
-                "accepted_episodes": len(accepted_sources),
-                "rejected_episodes": rejected,
-                "frames": manifest["zarr"]["frames"],
-                "dataset": manifest["zarr"]["path"],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        f"完成：有效 {len(accepted_sources)} / 拒绝 {rejected} episode，"
+        f"{manifest['zarr']['frames']} 帧 → {manifest['zarr']['path']}"
     )
     return 0
 

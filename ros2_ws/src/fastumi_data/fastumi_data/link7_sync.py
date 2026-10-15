@@ -15,8 +15,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -29,11 +30,10 @@ from fastumi_data.frame_selection import (
     windows_crossing_drops,
 )
 from fastumi_data.models import GripperSample, PoseSample, TrackerStatusSample
-from fastumi_data.pose_math import pose_to_matrix, transform_series_to_episode_frame
-from fastumi_data.synchronizer import (
-    _interpolate_gripper_sample,
-    _interpolate_pose_sample,
-    _tracker_status_at,
+from fastumi_data.pose_math import (
+    interpolate_pose,
+    pose_to_matrix,
+    transform_series_to_episode_frame,
 )
 
 
@@ -56,7 +56,6 @@ class Link7SyncConfig:
 
     max_pose_gap_s: float = 0.10
     max_gripper_gap_s: float = 0.20
-    minimum_samples: int = MINIMUM_LINK7_FRAMES
     selection: FrameSelectionConfig = field(default_factory=FrameSelectionConfig)
 
 
@@ -89,6 +88,122 @@ class Link7SyncResult:
     stats: Dict
 
 
+def _nearest_index(timestamps: Sequence[int], target: int) -> int:
+    """返回有序时间戳中距离目标最近的索引。"""
+    insertion = bisect_left(timestamps, target)
+    if insertion <= 0:
+        return 0
+    if insertion >= len(timestamps):
+        return len(timestamps) - 1
+    before = insertion - 1
+    if target - timestamps[before] <= timestamps[insertion] - target:
+        return before
+    return insertion
+
+
+def _interpolate_pose_sample(
+    samples: Sequence[PoseSample],
+    timestamps: Sequence[int],
+    target_ns: int,
+    maximum_gap_ns: int,
+) -> Optional[Tuple[np.ndarray, np.ndarray, float]]:
+    """在目标时间插值位姿并返回插值跨度毫秒数。"""
+    insertion = bisect_left(timestamps, target_ns)
+    if insertion < len(timestamps) and timestamps[insertion] == target_ns:
+        sample = samples[insertion]
+        return sample.position_m, sample.quaternion_xyzw, 0.0
+    if insertion == 0 or insertion >= len(samples):
+        return None
+    first = samples[insertion - 1]
+    second = samples[insertion]
+    gap_ns = second.timestamp_ns - first.timestamp_ns
+    if gap_ns <= 0 or gap_ns > maximum_gap_ns:
+        return None
+    ratio = (target_ns - first.timestamp_ns) / gap_ns
+    position, quaternion = interpolate_pose(
+        first.position_m,
+        first.quaternion_xyzw,
+        second.position_m,
+        second.quaternion_xyzw,
+        ratio,
+    )
+    return position, quaternion, gap_ns / 1.0e6
+
+
+def _interpolate_gripper_sample(
+    samples: Sequence[GripperSample],
+    timestamps: Sequence[int],
+    target_ns: int,
+    maximum_gap_ns: int,
+    field_name: str = "filtered_openness",
+    interpolation: str = "linear",
+) -> Optional[Tuple[float, bool, float]]:
+    """在有效夹爪估计之间取开度并标记是否为原图直接观测。
+
+    ``field_name`` 为 ``GripperSample`` 中的开度字段名。``interpolation="linear"`` 按时间线性插值；
+    ``"nearest"`` 取前后有效样本中时间更近者（等距取较早），用于二值开度，不产生中间值。
+    两种方式都要求目标两侧都有有效样本且间隔不超过 ``maximum_gap_ns``。
+    """
+    if interpolation not in ("linear", "nearest"):
+        raise ValueError(f"未知的夹爪插值方式 {interpolation!r}")
+    if not samples:
+        return None
+    nearest = _nearest_index(timestamps, target_ns)
+    direct_tolerance_ns = 1_000_000
+    if abs(timestamps[nearest] - target_ns) <= direct_tolerance_ns:
+        sample = samples[nearest]
+        value = getattr(sample, field_name)
+        if sample.valid and np.isfinite(value):
+            return float(value), True, 0.0
+
+    valid_samples = [
+        sample
+        for sample in samples
+        if sample.valid and np.isfinite(getattr(sample, field_name))
+    ]
+    if not valid_samples:
+        return None
+    valid_timestamps = [sample.timestamp_ns for sample in valid_samples]
+    insertion = bisect_left(valid_timestamps, target_ns)
+    if insertion == 0 or insertion >= len(valid_samples):
+        return None
+    first = valid_samples[insertion - 1]
+    second = valid_samples[insertion]
+    gap_ns = second.timestamp_ns - first.timestamp_ns
+    if gap_ns <= 0 or gap_ns > maximum_gap_ns:
+        return None
+    if interpolation == "nearest":
+        closer = first if target_ns - first.timestamp_ns <= second.timestamp_ns - target_ns else second
+        return float(getattr(closer, field_name)), False, gap_ns / 1.0e6
+    ratio = (target_ns - first.timestamp_ns) / gap_ns
+    openness = (
+        (1.0 - ratio) * getattr(first, field_name)
+        + ratio * getattr(second, field_name)
+    )
+    return float(np.clip(openness, 0.0, 1.0)), False, gap_ns / 1.0e6
+
+
+def _tracker_status_at(
+    samples: Sequence[TrackerStatusSample],
+    timestamps: Sequence[int],
+    target_ns: int,
+    maximum_delta_ns: int,
+) -> Optional[bool]:
+    """返回目标时刻最近 Tracker 状态是否可用于 6DoF 训练。"""
+    if not samples:
+        return None
+    nearest = _nearest_index(timestamps, target_ns)
+    if abs(timestamps[nearest] - target_ns) > maximum_delta_ns:
+        return None
+    sample = samples[nearest]
+    # TrackerStatus.TRACKING_RUNNING_OK 的接口常量值为 3。
+    return (
+        sample.device_connected
+        and sample.pose_valid
+        and sample.tracking_state == 3
+    )
+
+
 def synchronize_link7_episode(
     image_timestamps_ns: Sequence[int],
     poses: Sequence[PoseSample],
@@ -98,6 +213,8 @@ def synchronize_link7_episode(
     nominal_source_fps: float,
     config: Link7SyncConfig = Link7SyncConfig(),
     tracker_time_offset_ns: int = 0,
+    gripper_field: str = "filtered_openness",
+    gripper_interpolation: str = "linear",
 ) -> Link7SyncResult:
     """同步一条 episode 并转换到起始 Link7 相对坐标系。
 
@@ -110,6 +227,8 @@ def synchronize_link7_episode(
         nominal_source_fps: 标称源帧率，决定选帧路径。
         config: 同步与质量门限。
         tracker_time_offset_ns: Tracker 查询时间相对图像时间的偏移。
+        gripper_field: ``GripperSample`` 中的开度字段名。
+        gripper_interpolation: ``linear`` 线性插值，``nearest`` 最近邻（二值开度）。
     """
     poses = sorted(poses, key=lambda sample: sample.timestamp_ns)
     grippers = sorted(grippers, key=lambda sample: sample.timestamp_ns)
@@ -145,7 +264,8 @@ def synchronize_link7_episode(
         query_ns = int(image_ns) + int(tracker_time_offset_ns)
         pose = _interpolate_pose_sample(poses, pose_times, query_ns, maximum_pose_gap_ns)
         gripper = _interpolate_gripper_sample(
-            grippers, gripper_times, int(image_ns), maximum_gripper_gap_ns
+            grippers, gripper_times, int(image_ns), maximum_gripper_gap_ns,
+            gripper_field, gripper_interpolation,
         )
         tracking = _tracker_status_at(statuses, status_times, query_ns, maximum_pose_gap_ns)
         records.append((pose, gripper, tracking))
@@ -198,11 +318,10 @@ def synchronize_link7_episode(
         )
     kept = selection.subset(first, last + 1)
     kept_records = records[first:last + 1]
-    minimum = max(int(config.minimum_samples), MINIMUM_LINK7_FRAMES)
-    if len(kept) < minimum:
+    if len(kept) < MINIMUM_LINK7_FRAMES:
         return Link7SyncResult(
             None,
-            [issue(TOO_FEW_FRAMES, f"有效帧数 {len(kept)} 少于 {minimum}")],
+            [issue(TOO_FEW_FRAMES, f"有效帧数 {len(kept)} 少于 {MINIMUM_LINK7_FRAMES}")],
             warnings,
             stats,
         )

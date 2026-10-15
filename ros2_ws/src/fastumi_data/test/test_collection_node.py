@@ -1,4 +1,4 @@
-"""用合成三路消息验证采集节点：真实服务、真实 MCAP 和现有转换器。"""
+"""用合成三路消息验证采集节点：真实服务、真实 MCAP 和 Link7 转换入口。"""
 
 import os
 from pathlib import Path
@@ -10,7 +10,6 @@ import threading
 import time
 from typing import Callable, Optional
 
-import h5py
 import pytest
 import yaml
 
@@ -35,10 +34,15 @@ from rclpy.serialization import deserialize_message  # noqa: E402
 from sensor_msgs.msg import Image  # noqa: E402
 import rosbag2_py  # noqa: E402
 
+from fastumi_data.bag_images import BagImageDecoder  # noqa: E402
+from fastumi_data.link7_config import SOURCE_SNAPSHOT, resolve_processing  # noqa: E402
+from fastumi_data.link7_record import precheck_tracker_identity  # noqa: E402
 from fastumi_data.mcap_converter import (  # noqa: E402
-    McapEpisodeConverter,
-    _load_processing_document,
+    _snapshot_processing,
+    default_processing_path,
+    discover_sources,
 )
+from fastumi_data.video_decoding import COLOR_RGB  # noqa: E402
 
 
 from synthetic_publisher import HEIGHT, TRACKER_SERIAL, WIDTH  # noqa: E402
@@ -273,10 +277,10 @@ def _read_bag(bag_uri: Path):
     return types, messages
 
 
-def test_full_flow_writes_closed_mcap_that_existing_converter_accepts(
+def test_full_flow_writes_closed_mcap_that_link7_converter_can_read(
     rig, tmp_path
 ) -> None:
-    """验证真实服务流程产生完整 MCAP，并可被现有转换器转成 HDF5。"""
+    """验证真实服务流程产生完整 MCAP，其来源、快照配置和 Tracker 身份可被 Link7 转换读取。"""
     status = rig.status()
     assert status.state == "idle" and status.can_start
     assert status.image.fresh and status.tracker.fresh and status.gripper.fresh
@@ -351,29 +355,19 @@ def test_full_flow_writes_closed_mcap_that_existing_converter_accepts(
     )
     assert (first_image.width, first_image.height) == (WIDTH, HEIGHT)
 
-    # 现有转换器直接消费快照中的处理配置和外参。
-    processing, topics = _load_processing_document(
-        str(record_dir / "calibration_snapshot" / "processing.yaml")
+    # Link7 转换直接发现该记录，消费快照中的处理配置，并预检 Tracker 设备身份。
+    [source] = discover_sources(record_dir)
+    assert source.record_dir == record_dir.resolve()
+    assert source.bag_uri == (record_dir / "raw" / "bag").resolve()
+    processing = resolve_processing(
+        None, _snapshot_processing(source), default_processing_path()
     )
-    summary = McapEpisodeConverter(
-        str(record_dir / "raw" / "bag"),
-        str(record_dir),
-        processing,
-        topics,
-        str(record_dir / "calibration_snapshot" / "tracker_to_tcp.yaml"),
-        force=False,
-    ).convert()
-    report = record_dir / "reports" / "episode_0000.json"
-    assert summary["converted"] == 1 and summary["rejected"] == 0, (
-        summary,
-        report.read_text("utf-8") if report.exists() else "无报告",
+    assert processing.source == SOURCE_SNAPSHOT and processing.image_mode == "raw"
+    identity = precheck_tracker_identity(
+        source.bag_uri, processing.topics["tracker_status"], TRACKER_SERIAL
     )
-    with h5py.File(record_dir / "episodes" / "episode_0000.hdf5", "r") as episode:
-        assert episode.attrs["session_id"] == uuid
-        assert episode.attrs["task_name"] == "demo"
-        assert episode["observations/images/front"].shape[0] > 20
-        assert episode["observations/images/front"].shape[1:] == (HEIGHT, WIDTH, 3)
-        assert episode["observations/qpos"].shape[0] == episode["action"].shape[0]
+    assert identity["observed_tracker_serial"] == TRACKER_SERIAL
+    assert identity["status_messages"] > 100
 
 
 def test_cancel_and_delete_flow_over_real_services(rig, tmp_path) -> None:
@@ -494,10 +488,10 @@ def test_second_node_on_same_root_exits_with_lock_error(rig) -> None:
 
 
 @pytest.mark.parametrize("image_mode", ["compressed", "h264"])
-def test_encoded_image_flow_records_messages_and_converts_to_rgb(
+def test_encoded_image_flow_records_messages_and_decodes_to_rgb(
     tmp_path, image_mode
 ) -> None:
-    """JPEG 与 H.264 经真实节点采集：原样记录，H.264 从关键帧开始，现有转换器可转换。"""
+    """JPEG 与 H.264 经真实节点采集：原样记录，H.264 从关键帧开始，可解码为 RGB 帧。"""
     from fastumi_data.cdr_header import read_ffmpeg_packet_summary
     from fastumi_data.image_modes import IMAGE_MESSAGE_TYPES
     from synthetic_publisher import IMAGE_TOPICS, VIDEO_HEIGHT, VIDEO_WIDTH
@@ -537,23 +531,21 @@ def test_encoded_image_flow_records_messages_and_converts_to_rgb(
             + start_event.header.stamp.nanosec
         )
         assert first.keyframe and first.stamp_ns == start_ns
-    processing, topics = _load_processing_document(
-        str(record_dir / "calibration_snapshot" / "processing.yaml")
+    [source] = discover_sources(record_dir)
+    processing = resolve_processing(
+        None, _snapshot_processing(source), default_processing_path()
     )
-    assert processing.image_mode == image_mode and topics["image"] == topic
-    summary = McapEpisodeConverter(
-        str(record_dir / "raw" / "bag"), str(record_dir), processing, topics,
-        str(record_dir / "calibration_snapshot" / "tracker_to_tcp.yaml"),
-        force=False,
-    ).convert()
-    assert summary["converted"] == 1 and summary["rejected"] == 0, summary
+    assert processing.source == SOURCE_SNAPSHOT
+    assert processing.image_mode == image_mode and processing.topics["image"] == topic
+    decoder = BagImageDecoder(image_mode, COLOR_RGB)
+    frames = []
+    for data, stamp in images:
+        frames.extend(decoder.feed(bytes(data), stamp))
+    frames.extend(decoder.drain())
+    assert len(frames) > 30
+    assert frames[0].image.shape == (VIDEO_HEIGHT, VIDEO_WIDTH, 3)
     if image_mode == "h264":
-        assert summary["image_packets_skipped_before_keyframe"] == 0
-    with h5py.File(record_dir / "episodes" / "episode_0000.hdf5", "r") as episode:
-        assert episode["observations/images/front"].shape[0] > 20
-        assert episode["observations/images/front"].shape[1:] == (
-            VIDEO_HEIGHT, VIDEO_WIDTH, 3
-        )
+        assert decoder.stats.skipped_before_keyframe == 0
 
 
 @pytest.mark.parametrize(

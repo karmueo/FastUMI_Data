@@ -11,7 +11,6 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.serialization import serialize_message
 import rosbag2_py
 from sensor_msgs.msg import TimeReference
-import yaml
 
 from fastumi_data.image_modes import IMAGE_MESSAGE_TYPES
 from video_fixtures import (
@@ -183,28 +182,3 @@ def write_session_bag(
         writer.write(topic, serialize_message(message), stamp_ns)
     del writer
     return dict(TOPICS)
-
-
-def write_extrinsic(path: Path) -> Path:
-    """写出通过验收的 Tracker 到 TCP 外参。"""
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 2,
-                "tracker_serial": "LHR-TEST",
-                "translation_rmse_mm": 0.0,
-                "rotation_rmse_deg": 0.0,
-                "accepted": True,
-                "method": "dual_aruco_bootstrap",
-                "aruco_config_sha256": "aruco-hash",
-                "time_offset_ms": 0.0,
-                "source_calibration": {"sha256": "source-hash"},
-                "tracker_to_tcp": {
-                    "translation_m": [0.0, 0.0, 0.0],
-                    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path

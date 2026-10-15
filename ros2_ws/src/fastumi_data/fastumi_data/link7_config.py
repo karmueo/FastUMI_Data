@@ -1,12 +1,8 @@
 """解析 Link7 转换的处理配置与标称源帧率，强制固定 30 Hz 输出契约。
 
 配置来源按“显式 ``--config``、记录 processing 快照、包默认配置”选择首个适用文档。
-``sample_rate_hz`` 规则：
-
-* 显式配置给出 30 接受、给出其他值报错；未给出时用契约默认值 30。
-* 记录快照或包默认配置给出其他合法值（如旧 20 Hz）时覆盖为 30 并记录原因；
-  缺少字段时默认 30。
-* 任一来源给出非数值、非有限值或非正值均报错。
+输出频率固定 30 Hz、最终至少保留 ``MINIMUM_LINK7_FRAMES`` 帧，均由格式契约决定；
+文档中遗留的 ``sample_rate_hz``、``minimum_samples``、``max_image_delta_s`` 字段被忽略。
 
 ``require_tracker_status``：显式 false 报错；快照/包默认的 false 升级为 true 并记录。
 所有调整（字段、原值、生效值、原因）写入报告。
@@ -27,7 +23,7 @@ from fastumi_data.frame_selection import (
     selection_path_for,
 )
 from fastumi_data.image_modes import validate_image_mode
-from fastumi_data.link7_sync import Link7SyncConfig, MINIMUM_LINK7_FRAMES
+from fastumi_data.link7_sync import Link7SyncConfig
 
 
 SOURCE_EXPLICIT = "explicit_config"
@@ -62,10 +58,8 @@ class ResolvedProcessing:
         return {
             "source": self.source,
             "path": self.source_path,
-            "sample_rate_hz": TARGET_FREQUENCY_HZ,
             "max_pose_gap_s": self.sync.max_pose_gap_s,
             "max_gripper_gap_s": self.sync.max_gripper_gap_s,
-            "minimum_samples": self.sync.minimum_samples,
             "require_tracker_status": True,
             "interval_tolerance_s": selection.interval_tolerance_s,
             "max_rate_deviation_ratio": selection.max_rate_deviation_ratio,
@@ -121,33 +115,6 @@ def resolve_processing(
     label = f"{source}（{path}）"
     adjustments: List[Dict[str, Any]] = []
 
-    if "sample_rate_hz" in document and document["sample_rate_hz"] is not None:
-        rate = _number(document, "sample_rate_hz", TARGET_FREQUENCY_HZ, label)
-        if rate != TARGET_FREQUENCY_HZ:
-            if source == SOURCE_EXPLICIT:
-                raise ConfigError(
-                    f"{label} 指定 sample_rate_hz={document['sample_rate_hz']!r}；"
-                    f"Link7 新格式固定为 {TARGET_FREQUENCY_HZ} Hz，不得静默覆盖"
-                )
-            adjustments.append(
-                {
-                    "field": "sample_rate_hz",
-                    "original": document["sample_rate_hz"],
-                    "effective": TARGET_FREQUENCY_HZ,
-                    "reason": "旧处理配置的采样率；新格式输出固定 30 Hz，"
-                    "源图像能力由标称源帧率和质量检查决定",
-                }
-            )
-    else:
-        adjustments.append(
-            {
-                "field": "sample_rate_hz",
-                "original": None,
-                "effective": TARGET_FREQUENCY_HZ,
-                "reason": "字段缺省，采用格式契约默认值",
-            }
-        )
-
     if "require_tracker_status" in document:
         value = document["require_tracker_status"]
         if not isinstance(value, bool):
@@ -171,19 +138,6 @@ def resolve_processing(
     if max_gripper_gap_s <= 1.0 / TARGET_FREQUENCY_HZ:
         raise ConfigError(
             f"{label} 的 max_gripper_gap_s={max_gripper_gap_s:g} 必须大于 30 Hz 夹爪周期"
-        )
-    minimum_value = document.get("minimum_samples", MINIMUM_LINK7_FRAMES)
-    if isinstance(minimum_value, bool) or not isinstance(minimum_value, int) or minimum_value <= 0:
-        raise ConfigError(f"{label} 的 minimum_samples 必须为正整数，当前为 {minimum_value!r}")
-    minimum = max(int(minimum_value), MINIMUM_LINK7_FRAMES)
-    if minimum != minimum_value:
-        adjustments.append(
-            {
-                "field": "minimum_samples",
-                "original": minimum_value,
-                "effective": minimum,
-                "reason": f"新格式最终至少保留 {MINIMUM_LINK7_FRAMES} 帧",
-            }
         )
     defaults = FrameSelectionConfig()
     try:
@@ -220,7 +174,6 @@ def resolve_processing(
         sync=Link7SyncConfig(
             max_pose_gap_s=max_pose_gap_s,
             max_gripper_gap_s=max_gripper_gap_s,
-            minimum_samples=minimum,
             selection=selection,
         ),
         topics={name: str(value) for name, value in topics.items() if value},

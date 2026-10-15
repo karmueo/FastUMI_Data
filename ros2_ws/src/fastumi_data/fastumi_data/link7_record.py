@@ -7,6 +7,8 @@
   内继续收集支撑样本和 Header 时间仍在该 episode 内的迟到图像，再处理。下一条
   START 不提前结束上一条的后滚动。
 * Tracker 状态序列号与外参绑定不一致属于硬错误；图像解码失败同样中止。
+* 夹爪开度字段与取值方式由 :class:`~fastumi_data.gripper_source.GripperSource` 决定；
+  二值化记录的夹爪消息总数须与 ``binarization.yaml`` 一致，否则中止。
 """
 
 from __future__ import annotations
@@ -24,8 +26,9 @@ from rosidl_runtime_py.utilities import get_message
 
 from fastumi_data.bag_images import BagImageDecoder, check_bag_image_topic
 from fastumi_data.frame_spool import FrameSpool
-from fastumi_data.hdf5_writer import write_json_report
+from fastumi_data.gripper_source import DEFAULT_GRIPPER_SOURCE, GripperSource
 from fastumi_data.image_modes import MODE_H264, MODE_RAW, mode_for_message_type
+from fastumi_data.json_report import write_json_report
 from fastumi_data.link7_calibration import CalibrationError, Link7Calibration
 from fastumi_data.link7_config import ResolvedProcessing
 from fastumi_data.link7_hdf5 import write_link7_episode_hdf5
@@ -145,8 +148,13 @@ class Link7RecordConverter:
         nominal_source_fps: float,
         base_metadata: Dict[str, Any],
         log: Callable[[str], None] = print,
+        gripper_source: GripperSource = DEFAULT_GRIPPER_SOURCE,
+        reject_log: Optional[Callable[[str], None]] = None,
     ) -> None:
-        """保存转换参数；``output_dir`` 下写 ``episodes/`` 与 ``reports/``。"""
+        """保存转换参数；``output_dir`` 下写 ``episodes/`` 与 ``reports/``。
+
+        ``log`` 接收过程行；``reject_log`` 单独接收 episode 被拒绝的行，缺省沿用 ``log``。
+        """
         self._record_id = record_id
         self._bag_uri = Path(bag_uri)
         self._output_dir = Path(output_dir)
@@ -157,6 +165,9 @@ class Link7RecordConverter:
         self._fps = float(nominal_source_fps)
         self._base_metadata = dict(base_metadata)
         self._log = log
+        self._reject_log = reject_log or log
+        self._gripper_source = gripper_source
+        self._gripper_count = 0
         self._offset_ns = int(round(calibration.tracker_time_offset_ms * 1.0e6))
         self._active: Optional[_ActiveEpisode] = None
         # 等待后滚动结束的 episode，允许与下一条活动 episode 并存。
@@ -201,7 +212,7 @@ class Link7RecordConverter:
         self._summary.rejected.append(
             {"name": name, "report": str(path), "rejections": [r["code"] for r in reasons]}
         )
-        self._log(f"  拒绝 {name}: " + "；".join(item["message"] for item in reasons))
+        self._reject_log(f"  拒绝 {name}: " + "；".join(item["message"] for item in reasons))
 
     def _finish(self, episode: _ActiveEpisode) -> None:
         """同步、检查并写出一条 episode，随后删除帧暂存。"""
@@ -235,6 +246,8 @@ class Link7RecordConverter:
                 self._fps,
                 self._processing.sync,
                 tracker_time_offset_ns=self._offset_ns,
+                gripper_field=self._gripper_source.field,
+                gripper_interpolation=self._gripper_source.interpolation,
             )
             stats = dict(result.stats)
             stats["decoded_frames_in_episode"] = int(len(timestamps))
@@ -371,6 +384,27 @@ class Link7RecordConverter:
         while buffer and buffer[0].timestamp_ns < sample.timestamp_ns - PRE_ROLL_NS:
             buffer.popleft()
 
+    def _gripper_sample(self, message) -> GripperSample:
+        """把第 N 条夹爪消息转为样本；``raw`` 二值化记录按 ``original_valid`` 恢复原有效性。"""
+        ordinal = self._gripper_count
+        self._gripper_count += 1
+        valid = bool(message.valid)
+        original_valid = self._gripper_source.original_valid
+        if original_valid is not None:
+            if ordinal >= len(original_valid):
+                raise ValueError(
+                    f"{self._bag_uri} 的夹爪消息多于 binarization.yaml 的 "
+                    f"frame_count {len(original_valid)}"
+                )
+            valid = original_valid[ordinal]
+        return GripperSample(
+            stamp_to_ns(message.header.stamp),
+            float(message.raw_openness),
+            float(message.filtered_openness),
+            int(message.detected_marker_count),
+            valid,
+        )
+
     def _accept_frames(self, frames) -> None:
         """为解码帧分配源序号，并把 START/STOP 时间窗内的帧写入暂存。"""
         for frame in frames:
@@ -467,20 +501,17 @@ class Link7RecordConverter:
                     ),
                 )
             elif topic == self._topics["gripper_state"]:
-                self._append_sample(
-                    "grippers",
-                    GripperSample(
-                        stamp_to_ns(message.header.stamp),
-                        float(message.raw_openness),
-                        float(message.filtered_openness),
-                        int(message.detected_marker_count),
-                        bool(message.valid),
-                    ),
-                )
+                self._append_sample("grippers", self._gripper_sample(message))
         try:
             self._accept_frames(decoder.drain())
         except VideoDecodeError as error:
             raise VideoDecodeError(f"{self._bag_uri} 排空解码器失败: {error}") from error
+        expected = self._gripper_source.frame_count
+        if expected is not None and self._gripper_count != expected:
+            raise ValueError(
+                f"{self._bag_uri} 的夹爪消息数 {self._gripper_count} 与 "
+                f"binarization.yaml 的 frame_count {expected} 不一致"
+            )
         self._flush_pending(None)
         if self._active is not None:
             self._reject(

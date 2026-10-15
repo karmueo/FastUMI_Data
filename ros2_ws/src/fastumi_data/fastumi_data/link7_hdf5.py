@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterator, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -167,9 +167,17 @@ def read_link7_arrays(path: Path) -> Dict[str, np.ndarray]:
         return arrays
 
 
-def iter_link7_images(path: Path) -> Iterator[Tuple[int, np.ndarray]]:
-    """逐帧读取原分辨率 RGB 图像，避免整段载入内存。"""
+def count_link7_images(path: Path) -> int:
+    """返回 HDF5 中原分辨率图像的帧数（不读取像素）。"""
+    with h5py.File(path, "r") as root:
+        return int(root["observations/images/front"].shape[0])
+
+
+def iter_link7_images(
+    path: Path, start: int = 0, stop: Optional[int] = None,
+) -> Iterator[Tuple[int, np.ndarray]]:
+    """逐帧读取原分辨率 RGB 图像，避免整段载入内存；``[start, stop)`` 限定帧范围（缺省全部）。"""
     with h5py.File(path, "r") as root:
         images = root["observations/images/front"]
-        for index in range(images.shape[0]):
+        for index in range(start, images.shape[0] if stop is None else min(stop, images.shape[0])):
             yield index, images[index]

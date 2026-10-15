@@ -1,4 +1,4 @@
-"""验证连续编码录制只使用已写入的图像门控，并保留 MCAP 到 HDF5 的数据流。"""
+"""验证连续编码录制只使用已写入的图像门控，并保留可被 Link7 转换读取的 MCAP 数据流。"""
 
 from pathlib import Path
 import signal
@@ -16,13 +16,14 @@ from rclpy.serialization import serialize_message
 import rosbag2_py
 from std_srvs.srv import Trigger
 
+from fastumi_data.bag_images import BagImageDecoder
 from fastumi_data.continuous_recorder import ContinuousRecorder
 from fastumi_data.episode_manager import EpisodeManager
 from fastumi_data.image_messages import packet_from_ffmpeg_message
-from fastumi_data.mcap_converter import McapEpisodeConverter, _load_processing_document
-from fastumi_data.models import ProcessingConfig
-from fastumi_data.video_decoding import DecodeReadiness
-from video_bag_builder import TOPICS, _event, _time, write_extrinsic
+from fastumi_data.link7_config import SOURCE_SNAPSHOT, resolve_processing
+from fastumi_data.mcap_converter import default_processing_path
+from fastumi_data.video_decoding import COLOR_RGB, DecodeReadiness
+from video_bag_builder import TOPICS, _event, _time
 from video_fixtures import compressed_message, ffmpeg_message, h264_packets, stamp_of
 
 
@@ -109,8 +110,8 @@ def test_failed_event_write_rejects_start_without_committing_state(
 
 
 @pytest.mark.parametrize("recording", ["compressed", "h264"], indirect=True)
-def test_recorded_video_converts_after_mid_gop_join(recording, monkeypatch) -> None:
-    """晚接入的连续录包先保存解码前缀，关键帧写入后开始的 episode 可转换。"""
+def test_recorded_video_decodes_after_mid_gop_join(recording, monkeypatch) -> None:
+    """晚接入的连续录包先保存解码前缀，关键帧写入后开始的 episode 可解码。"""
     recorder, manager, root = recording
     mode = recorder._mode
     packets = h264_packets(50) if mode == "h264" else None
@@ -167,22 +168,19 @@ def test_recorded_video_converts_after_mid_gop_join(recording, monkeypatch) -> N
     assert sum(t == TOPICS["image"] for t, _, _ in records) == 46
     assert sum(t == TOPICS["episode_event"] for t, _, _ in records) == 2
     assert [t for _, _, t in records] == sorted(t for _, _, t in records)
-    converter = McapEpisodeConverter(
-        str(root / "bag"), str(root),
-        ProcessingConfig(image_mode=mode, minimum_samples=5), dict(TOPICS),
-        str(write_extrinsic(root / "extrinsic.yaml")), force=False,
-    )
-
-    summary = converter.convert()
-
-    assert summary["converted"] == 1 and summary["rejected"] == 0
-    assert summary["image_packets_skipped_before_keyframe"] == (6 if packets else 0)
-    assert (root / "episodes" / "episode_0000.hdf5").is_file()
+    decoder = BagImageDecoder(mode, COLOR_RGB)
+    frames = []
+    for topic, data, stamp in records:
+        if topic == TOPICS["image"]:
+            frames.extend(decoder.feed(bytes(data), stamp))
+    frames.extend(decoder.drain())
+    assert decoder.stats.skipped_before_keyframe == (6 if packets else 0)
+    assert len(frames) == (40 if packets else 46)
 
 
 @pytest.mark.parametrize("mode", ["compressed", "h264"])
 def test_record_session_ros_topics_services_and_shutdown(tmp_path: Path, mode: str) -> None:
-    """真实独立进程验证话题发现、边界服务、退出写出索引及 HDF5 转换。"""
+    """真实独立进程验证话题发现、边界服务、退出写出索引及快照可被 Link7 转换读取。"""
     from test_collection_node import _Publishers, _write_extrinsic
 
     extrinsic = tmp_path / "extrinsic.yaml"
@@ -258,14 +256,22 @@ def test_record_session_ros_topics_services_and_shutdown(tmp_path: Path, mode: s
     assert tf_qos.durability == DurabilityPolicy.TRANSIENT_LOCAL
     assert tf_qos.reliability == ReliabilityPolicy.RELIABLE
     reader.close()
-    config, topics = _load_processing_document(
-        str(session / "calibration_snapshot" / "processing.yaml")
+    processing = resolve_processing(
+        None, session / "calibration_snapshot" / "processing.yaml", default_processing_path()
     )
-    summary = McapEpisodeConverter(
-        str(session / "raw" / "bag"), str(session), config, topics,
-        str(extrinsic), force=False,
-    ).convert()
-    assert summary["converted"] == 1 and summary["rejected"] == 0
-    assert summary["image_frames_decoded"] >= 30
+    assert processing.source == SOURCE_SNAPSHOT and processing.image_mode == mode
     assert (session / "raw" / "bag" / "metadata.yaml").is_file()
-    assert (session / "episodes" / "episode_0000.hdf5").is_file()
+    decoder = BagImageDecoder(mode, COLOR_RGB)
+    frames = []
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=str(session / "raw" / "bag"), storage_id="mcap"),
+        rosbag2_py.ConverterOptions("", ""),
+    )
+    while reader.has_next():
+        topic, data, stamp = reader.read_next()
+        if topic == image_topic:
+            frames.extend(decoder.feed(bytes(data), stamp))
+    reader.close()
+    frames.extend(decoder.drain())
+    assert len(frames) >= 30

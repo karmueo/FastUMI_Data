@@ -36,63 +36,34 @@ def write(path: Path, **fields) -> Path:
 
 @pytest.fixture
 def default(tmp_path: Path) -> Path:
-    """包默认配置：旧路径的 20 Hz。"""
-    return write(tmp_path / "default.yaml", sample_rate_hz=20.0, require_tracker_status=True)
+    """包默认配置。"""
+    return write(tmp_path / "default.yaml", require_tracker_status=True)
 
 
-@pytest.mark.parametrize("rate", [30, 30.0])
-def test_explicit_thirty_hz_is_accepted(tmp_path, default, rate) -> None:
-    """显式配置 30 或 30.0 接受，无覆盖记录。"""
-    resolved = resolve_processing(write(tmp_path / "c.yaml", sample_rate_hz=rate), None, default)
-    assert resolved.source == SOURCE_EXPLICIT
-    assert not [item for item in resolved.adjustments if item["field"] == "sample_rate_hz"]
-
-
-def test_explicit_other_rate_fails_before_conversion(tmp_path, default) -> None:
-    """显式配置其他采样率直接报错，不得静默覆盖。"""
-    with pytest.raises(ConfigError, match="30 Hz"):
-        resolve_processing(write(tmp_path / "c.yaml", sample_rate_hz=20), None, default)
-
-
-def test_explicit_missing_rate_defaults_to_contract(tmp_path, default) -> None:
-    """显式配置未给出采样率时采用 30 并记录字段缺省。"""
-    resolved = resolve_processing(write(tmp_path / "c.yaml"), None, default)
-    item = next(item for item in resolved.adjustments if item["field"] == "sample_rate_hz")
-    assert item["original"] is None and item["effective"] == 30
-
-
-def test_snapshot_used_when_no_explicit_config(tmp_path, default) -> None:
-    """无显式配置时采用记录快照；30 Hz 快照直接采用。"""
-    resolved = resolve_processing(None, write(tmp_path / "s.yaml", sample_rate_hz=30), default)
-    assert resolved.source == SOURCE_SNAPSHOT
-    assert not [item for item in resolved.adjustments if item["field"] == "sample_rate_hz"]
-
-
-def test_legacy_snapshot_rate_is_overridden_with_report(tmp_path, default) -> None:
-    """旧快照的 20 Hz 兼容输出为 30 Hz，并记录原值与原因。"""
-    resolved = resolve_processing(None, write(tmp_path / "s.yaml", sample_rate_hz=20.0), default)
-    item = next(item for item in resolved.adjustments if item["field"] == "sample_rate_hz")
-    assert item["original"] == 20.0 and item["effective"] == 30 and item["reason"]
-    assert resolved.report()["sample_rate_hz"] == 30
-
-
-def test_package_default_used_last(tmp_path, default) -> None:
-    """快照缺失时使用包默认配置，其 20 Hz 同样被覆盖记录。"""
+def test_source_priority_is_explicit_snapshot_default(tmp_path, default) -> None:
+    """显式配置优先于记录快照，快照优先于包默认。"""
+    explicit = write(tmp_path / "c.yaml")
+    snapshot = write(tmp_path / "s.yaml")
+    assert resolve_processing(explicit, snapshot, default).source == SOURCE_EXPLICIT
+    assert resolve_processing(None, snapshot, default).source == SOURCE_SNAPSHOT
     resolved = resolve_processing(None, tmp_path / "missing.yaml", default)
     assert resolved.source == SOURCE_PACKAGE_DEFAULT
-    assert any(item["field"] == "sample_rate_hz" for item in resolved.adjustments)
 
 
-@pytest.mark.parametrize("value", ["30", True, float("nan"), float("inf"), 0, -30])
 @pytest.mark.parametrize("source", ["explicit", "snapshot"])
-def test_invalid_rate_values_are_errors_for_every_source(tmp_path, default, value, source) -> None:
-    """非数值、非有限或非正采样率在任何来源都报错。"""
-    path = write(tmp_path / "c.yaml", sample_rate_hz=value)
-    with pytest.raises(ConfigError):
-        if source == "explicit":
-            resolve_processing(path, None, default)
-        else:
-            resolve_processing(None, path, default)
+def test_legacy_rate_and_minimum_fields_are_ignored(tmp_path, default, source) -> None:
+    """遗留的 sample_rate_hz、minimum_samples、max_image_delta_s 不报错、不产生调整，也不进入报告。"""
+    path = write(
+        tmp_path / "c.yaml", sample_rate_hz=20.0, minimum_samples=10, max_image_delta_s=0.03
+    )
+    resolved = (
+        resolve_processing(path, None, default)
+        if source == "explicit"
+        else resolve_processing(None, path, default)
+    )
+    assert resolved.adjustments == []
+    report = resolved.report()
+    assert not {"sample_rate_hz", "minimum_samples", "max_image_delta_s"} & set(report)
 
 
 def test_explicit_disabled_tracker_status_is_rejected(tmp_path, default) -> None:
@@ -120,13 +91,21 @@ def test_tracker_status_topic_is_required(tmp_path, default) -> None:
         resolve_processing(path, None, default)
 
 
+def test_image_mode_is_optional_and_validated(tmp_path, default) -> None:
+    """image_mode 缺省为 None（按 bag 话题类型识别），非法取值报错。"""
+    assert resolve_processing(write(tmp_path / "a.yaml"), None, default).image_mode is None
+    resolved = resolve_processing(write(tmp_path / "b.yaml", image_mode="h264"), None, default)
+    assert resolved.image_mode == "h264"
+    with pytest.raises(ConfigError, match="image_mode"):
+        resolve_processing(write(tmp_path / "c.yaml", image_mode="mjpeg"), None, default)
+
+
 def test_quality_thresholds_are_read_and_validated(tmp_path, default) -> None:
-    """质量门限从所选文档读取，非法值报错；最少样本提升到 16。"""
+    """质量门限从所选文档读取，非法值报错。"""
     resolved = resolve_processing(
-        write(tmp_path / "c.yaml", interval_tolerance_s=0.006, minimum_samples=10), None, default
+        write(tmp_path / "c.yaml", interval_tolerance_s=0.006), None, default
     )
     assert resolved.sync.selection.interval_tolerance_s == 0.006
-    assert resolved.sync.minimum_samples == 16
     with pytest.raises(ConfigError):
         resolve_processing(write(tmp_path / "d.yaml", max_rate_deviation_ratio=-1), None, default)
 

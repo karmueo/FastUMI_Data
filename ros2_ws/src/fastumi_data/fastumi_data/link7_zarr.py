@@ -18,29 +18,43 @@
 
 图像按部署预处理等比例缩放（INTER_AREA）并居中补黑边至 224×224。先在同目录临时
 路径构建，全部写入并逐帧回读验收后才写 ``complete=true`` 并原子改名发布。
+
+图像每帧一个 chunk（一帧一个文件），帧间互不依赖：数值数组与数组形状先在主进程写好，
+再把图像按帧范围切片，由当前进程（``jobs=1``）或多个 spawn 工作进程并行写入互不重叠的 chunk，
+输出与串行完全一致。
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
-from typing import Any, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from fastumi_data.jxl_codec import lossless_jpegxl
-from fastumi_data.link7_hdf5 import iter_link7_images, read_link7_arrays
+from fastumi_data.jxl_codec import load_codecs, lossless_jpegxl
+from fastumi_data.link7_hdf5 import count_link7_images, iter_link7_images, read_link7_arrays
 
 
 ZARR_FORMAT = "fastumi-rm75-link7-v1"
 IMAGE_SIZE = 224
 # 图像逐批写入及回读校验的帧数。
 _IMAGE_BATCH = 64
+# 图像任务切片的帧数：并行调度与进度回报的粒度。
+_IMAGE_SLICE = 256
+# 并行写图像时限制每个工作进程的数值库线程数，避免进程数 × 线程数超订 CPU。
+_SINGLE_THREAD_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+# 进度回调：(阶段名, 已完成, 总数)。
+ProgressCallback = Callable[[str, int, int], None]
+# 一个图像写入任务：(临时 Zarr 路径, HDF5 路径, HDF5 起止帧, Zarr 起始帧, episode 名)。
+_ImageTask = Tuple[str, str, int, int, int, str]
 # 根属性固定契约；urdf_sha256 与 complete 运行时写入。
 ROOT_CONTRACT: Dict[str, Any] = {
     "format": ZARR_FORMAT,
@@ -162,8 +176,14 @@ def export_link7_zarr(
     output_path: Path,
     urdf_sha256: str,
     extra_attributes: Dict[str, Any] | None = None,
+    jobs: int = 1,
+    on_progress: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """合并导出 Zarr，验收后发布到 ``output_path``；失败时保留临时目录供诊断。
+
+    Args:
+        jobs: 写图像的进程数；1 在当前进程串行，不超过图像切片数。
+        on_progress: 可选回调 ``(阶段, 已完成, 总数)``；图像阶段按帧、数值校验阶段按 episode 计。
 
     Returns:
         帧数、episode 数及临时目录等摘要。
@@ -185,6 +205,7 @@ def export_link7_zarr(
         raise ValueError("episode 名称必须非空且唯一")
     if len(urdf_sha256) != 64:
         raise ValueError("urdf_sha256 必须是 64 位十六进制摘要")
+    report = on_progress or (lambda _stage, _done, _total: None)
     temporary = output.with_name(f".{output.name}.tmp-{os.getpid()}")
     if temporary.exists():
         shutil.rmtree(temporary)
@@ -212,44 +233,43 @@ def export_link7_zarr(
     }
     ends: List[int] = []
     episode_metadata: List[Dict[str, Any]] = []
+    image_tasks: List[_ImageTask] = []
     total = 0
+    # 数值部分很快，先全部写完并检查，坏数据在耗时的图像阶段之前暴露。
     for episode in episodes:
         values = numeric_episode(read_link7_arrays(episode.hdf5_path))
         _check_episode_arrays(episode.name, values)
         count = len(values["timestamp"])
+        image_count = count_link7_images(episode.hdf5_path)
+        if image_count != count:
+            raise ValueError(f"{episode.name} 图像 {image_count} 帧与数值 {count} 帧不一致")
         start = total
         for key, array in numeric.items():
             array.append(values[key], axis=0)
-        images.resize((start + count, IMAGE_SIZE, IMAGE_SIZE, 3))
-        batch: List[np.ndarray] = []
-        batch_start = start
-        written = 0
-        for _, frame in iter_link7_images(episode.hdf5_path):
-            batch.append(letterbox_rgb_uint8(frame))
-            if len(batch) == _IMAGE_BATCH:
-                _write_verified_images(images, batch_start, batch, episode.name)
-                batch_start += len(batch)
-                written += len(batch)
-                batch = []
-        if batch:
-            _write_verified_images(images, batch_start, batch, episode.name)
-            written += len(batch)
-        if written != count:
-            raise ValueError(f"{episode.name} 图像 {written} 帧与数值 {count} 帧不一致")
+        for offset in range(0, count, _IMAGE_SLICE):
+            stop = min(offset + _IMAGE_SLICE, count)
+            image_tasks.append(
+                (str(temporary), str(episode.hdf5_path), offset, stop, start + offset, episode.name)
+            )
         total += count
         ends.append(total)
         record = dict(episode.metadata)
         record.update({"name": episode.name, "start": start, "end": total, "frames": count})
         episode_metadata.append(to_jsonable(record))
+    images.resize((total, IMAGE_SIZE, IMAGE_SIZE, 3))
+
+    _write_images(image_tasks, total, jobs, report)
 
     meta.create_dataset("episode_ends", data=np.asarray(ends, dtype=np.int64))
     meta.create_dataset("episode_names", data=np.asarray(names, dtype=str))
     # 回读数值数组，确认与源 HDF5 逐元素一致。
-    for episode, record in zip(episodes, episode_metadata):
+    report("校验数值", 0, len(episodes))
+    for number, (episode, record) in enumerate(zip(episodes, episode_metadata), start=1):
         expected = numeric_episode(read_link7_arrays(episode.hdf5_path))
         for key in NUMERIC_ARRAYS:
             if not np.array_equal(numeric[key][record["start"]:record["end"]], expected[key]):
                 raise ValueError(f"{episode.name} 的 {key} 回读不一致")
+        report("校验数值", number, len(episodes))
     attributes = dict(ROOT_CONTRACT)
     attributes.update(to_jsonable(extra_attributes or {}))
     attributes.update(
@@ -268,7 +288,69 @@ def export_link7_zarr(
         "path": str(output),
         "frames": total,
         "episodes": len(ends),
+        "jobs": max(1, min(jobs, len(image_tasks))),
     }
+
+
+def _write_image_slice(task: _ImageTask) -> int:
+    """写入并回读校验一个帧范围的图像，返回写入帧数。
+
+    每帧是独立 chunk，不同切片写入互不重叠的文件，可并行；数组形状已由主进程定好。
+    """
+    import zarr
+
+    store_path, hdf5_path, offset, stop, zarr_start, name = task
+    load_codecs()
+    images = zarr.open_group(zarr.DirectoryStore(store_path), mode="r+")["data/camera0_rgb"]
+    batch: List[np.ndarray] = []
+    batch_start = zarr_start
+    written = 0
+    for _, frame in iter_link7_images(Path(hdf5_path), offset, stop):
+        batch.append(letterbox_rgb_uint8(frame))
+        if len(batch) == _IMAGE_BATCH:
+            _write_verified_images(images, batch_start, batch, name)
+            batch_start += len(batch)
+            written += len(batch)
+            batch = []
+    if batch:
+        _write_verified_images(images, batch_start, batch, name)
+        written += len(batch)
+    if written != stop - offset:
+        raise ValueError(f"{name} 图像 {written} 帧与预期 {stop - offset} 帧不一致")
+    return written
+
+
+def _init_image_worker() -> None:
+    """工作进程初始化：OpenCV 单线程，避免多进程下线程超订。"""
+    cv2.setNumThreads(1)
+
+
+def _write_images(
+    tasks: Sequence[_ImageTask], total: int, jobs: int, report: ProgressCallback,
+) -> None:
+    """串行或在 spawn 进程池中写入全部图像切片，每完成一个切片回报一次进度。"""
+    stage = "写入图像"
+    report(stage, 0, total)
+    done = 0
+    workers = max(1, min(jobs, len(tasks)))
+    if workers <= 1:
+        for task in tasks:
+            done += _write_image_slice(task)
+            report(stage, done, total)
+        return
+    for name in _SINGLE_THREAD_ENV:
+        os.environ.setdefault(name, "1")
+    pool = ProcessPoolExecutor(
+        max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_image_worker,
+    )
+    try:
+        futures = [pool.submit(_write_image_slice, task) for task in tasks]
+        for future in as_completed(futures):
+            done += future.result()
+            report(stage, done, total)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def _write_verified_images(images, start: int, batch: List[np.ndarray], name: str) -> None:

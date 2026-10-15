@@ -185,3 +185,48 @@ def test_missing_tracker_status_is_rejected() -> None:
     poses, _ = tracker_stream(lambda t: [t, 0, 0])
     result = run(times, poses, gripper_stream(times), [])
     assert result.episode is None
+
+
+def test_nearest_gripper_interpolation_keeps_binary_values() -> None:
+    """二值开度用最近邻取值：无中间值，等距取较早样本。"""
+    times = images()
+    poses, statuses = tracker_stream(lambda t: [t, 0, 0])
+    # 夹爪样本与图像错开半帧，且每隔一帧缺失，强制走插值分支。
+    half = int(round(1e9 / 60))
+    grippers = [GripperSample(int(t) + half, 0.0, 1.0 if k < 30 else 0.0, 2, True)
+                for k, t in enumerate(times) if k % 2 == 0]
+    linear = run(times, poses, grippers, statuses).episode
+    nearest = synchronize_link7_episode(
+        times, poses, grippers, statuses, np.eye(4), 30, Link7SyncConfig(),
+        gripper_interpolation="nearest",
+    ).episode
+    assert set(np.unique(nearest.qpos[:, 7])) == {0.0, 1.0}
+    assert not np.isin(linear.qpos[:, 7], [0.0, 1.0]).all()
+    assert not nearest.gripper_observed.any()
+
+
+def test_nearest_gripper_tie_picks_earlier_sample() -> None:
+    """目标时刻恰在两样本正中时取较早的样本。"""
+    from fastumi_data.link7_sync import _interpolate_gripper_sample
+
+    samples = [GripperSample(0, 0.0, 1.0, 2, True), GripperSample(100_000_000, 0.0, 0.0, 2, True)]
+    stamps = [sample.timestamp_ns for sample in samples]
+    value, observed, _ = _interpolate_gripper_sample(
+        samples, stamps, 50_000_000, 200_000_000, interpolation="nearest")
+    assert value == 1.0 and not observed
+    assert _interpolate_gripper_sample(
+        samples, stamps, 60_000_000, 200_000_000, interpolation="nearest")[0] == 0.0
+    assert _interpolate_gripper_sample(
+        samples, stamps, 50_000_000, 90_000_000, interpolation="nearest") is None
+
+
+def test_gripper_field_selects_raw_openness() -> None:
+    """gripper_field 选择 raw_openness 时忽略 filtered_openness。"""
+    times = images()
+    poses, statuses = tracker_stream(lambda t: [t, 0, 0])
+    grippers = [GripperSample(int(t), 0.25, 0.75, 2, True) for t in times]
+    episode = synchronize_link7_episode(
+        times, poses, grippers, statuses, np.eye(4), 30, Link7SyncConfig(),
+        gripper_field="raw_openness",
+    ).episode
+    np.testing.assert_allclose(episode.qpos[:, 7], 0.25)

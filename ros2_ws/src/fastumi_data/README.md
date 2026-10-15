@@ -255,8 +255,8 @@ Tracker 按最近源时间戳在 30 ms 窗口内配对，无匹配时显示不�
 ### 验证与未覆盖项
 
 **自动化测试**覆盖状态机、存储、写入队列、健康逻辑、launch，以及用合成三路消息启动真实
-`collection_node` 进程、生成真实 MCAP 并由现有转换器产出 HDF5 的端到端流程（含
-SIGINT/SIGKILL 重启清理）。
+`collection_node` 进程、生成真实 MCAP，并确认其来源、快照配置和 Tracker 身份可被 `convert_mcap` 读取的端到端流程
+（含 SIGINT/SIGKILL 重启清理）。
 
 **实机验证**（2026-10-10，UMI 设备固定不动，USB 相机 1920×1080 MJPEG 30 fps、VIVE Tracker
 `LHR-B77A06A7`、夹爪估计均在线，RViz2 显示在 `:10.0`）：
@@ -266,7 +266,7 @@ SIGINT/SIGKILL 重启清理）。
 - 一条 17 s 的面板采集：522 帧图像，图像/夹爪 30.12 Hz、Tracker 100.06 Hz，相邻间隔最大 36.8 ms
   （零丢帧），夹爪与图像时间戳 522/522 完全匹配，START 在前、STOP 在后，日志时间单调，无报警；
   数据 2.3 GiB（约 135 MB/s，录制中面板显示的写入队列深度为 1/600）。
-- 同一条记录经 `convert_mcap` 转成 HDF5：347 个 20 Hz 样本、图像 1080×1920、夹爪观测率 99.7%、
+- 同一条记录当时经旧版 TCP 转换（已移除）转成 HDF5：347 个 20 Hz 样本、图像 1080×1920、夹爪观测率 99.7%、
   Tracker 跟踪正常率 100%。因本机没有 v2 外参，转换用的是测试用外参，**未验证真实外参下的 TCP 位姿**。
 - 静止的 Tracker 始终判为健康（位置标准差约 40 µm）；暂停夹爪节点 3 s 后，`get_status`
   给出 `can_start=false`、`夹爪数据已超过 0.25 s 未更新` 和 `GRIPPER_STALE`，恢复后 `can_start` 回到 true。
@@ -274,8 +274,8 @@ SIGINT/SIGKILL 重启清理）。
   回退到 ToF 标定；Tracker 子 launch 的 `use_rviz:=false` 泄漏并关闭了采集 RViz2；默认 DDS
   共享内存段过小导致静默丢帧（见上文）。
 
-**压缩视频验证**（2026-10-10，合成数据）：JPEG 与 H.264 经真实 `collection_node`、真实 MCAP 和
-`convert_mcap` 转成 RGB HDF5 的端到端测试通过；CDR 解析与 rclpy 序列化逐字节一致（含大端和截断）；接收器
+**压缩视频验证**（2026-10-10，合成数据）：JPEG 与 H.264 经真实 `collection_node` 采集并解码为 RGB 帧、
+合成 MCAP 经 `convert_mcap` 转成 Link7 RGB HDF5 的端到端测试通过；CDR 解析与 rclpy 序列化逐字节一致（含大端和截断）；接收器
 `auto` 后端在本机 NVIDIA GPU（`h264_cuvid`）和强制 GPU 初始化失败（软件回退）两条路径上都通过。
 **未验证**：真实 Jetson 1280×960@30 FPS 码流、真实相机的 H.264 软件编码链路、长时间运行；包丢失只有在破坏解码
 时才会被发现（best-effort 传输下静默丢掉的 P 帧无法从码流本身察觉）。
@@ -287,23 +287,89 @@ SIGINT/SIGKILL 重启清理）。
 ## MCAP→Link7 训练数据（convert_mcap）
 
 `convert_mcap` 手动执行，完成 MCAP→`fastumi_ros2_link7_v1` HDF5→合并
-`fastumi-rm75-link7-v1` Zarr。
+`fastumi-rm75-link7-v1` Zarr。只有输入路径和 `--output-dir` 必填，其余参数都有缺省值。
+
+> **运行方式**：`ros2 run fastumi_data convert_mcap` 的入口脚本固定使用系统 `/usr/bin/python3`，其中没有
+> `zarr`，会在最后导出 Zarr 时报 `No module named 'zarr'`。在已加载 Jazzy、`.venv-numpy1` 与
+> `install/setup.bash` 的终端里改用 `python -m fastumi_data.mcap_converter`，参数完全相同。下文示例均用此形式。
+
+### 默认参数执行
 
 ```bash
-ros2 run fastumi_data convert_mcap <输入目录> \
-  --output-dir <新输出目录> \
-  --urdf <实际部署使用的URDF> \
-  [--tracker-camera-extrinsic <T_cam_tracker.yaml>] \
-  [--end-camera-extrinsic <T_cam_end.yaml>] \
-  [--tracker-serial <自定义外参缺少绑定时声明的序列号>] \
-  [--source-camera-fps <标称源帧率覆盖值>] \
-  [--config <处理配置>]
+# ros2_ws 目录，已加载 Jazzy、.venv-numpy1 和 install/setup.bash
+python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
+  --output-dir <新输出目录>
 ```
 
+缺省时依次使用：包内默认外参 `T_cam_tracker.yaml`/`T_cam_end.yaml`（Tracker 绑定 `LHR-B77A06A7`）、包内
+`rm_75.urdf`、记录快照中的标称源帧率与处理配置（无快照时用包默认 `processing.yaml`），夹爪按 `auto`
+选择（二值化副本用 0/1，否则用 `filtered_openness`）。连续录制（`record_session`）的快照没有标称源帧率，
+须加 `--source-camera-fps 30`。
+
+### 完整参数执行
+
+```bash
+python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
+  --output-dir <新输出目录> \
+  --urdf <实际部署使用的URDF> \
+  --tracker-camera-extrinsic <T_cam_tracker.yaml> \
+  --end-camera-extrinsic <T_cam_end.yaml> \
+  --tracker-serial <自定义外参缺少绑定时声明的序列号> \
+  --source-camera-fps <标称源帧率覆盖值> \
+  --gripper-source auto|binary|filtered|raw \
+  --config <处理配置> \
+  --jobs <并行进程数>
+```
+
+### 参数
+
+| 参数 | 必填 | 缺省值 | 说明 |
+| --- | --- | --- | --- |
+| `input`（位置参数） | 是 | — | 单个 bag（目录或 `.mcap`）、单条已保存记录（含 `session.yaml`）或任务目录 |
+| `--output-dir` | 是 | — | 新输出目录，必须尚不存在 |
+| `--urdf` | 否 | 包内 `assets/rm_75.urdf` | 部署使用的 URDF，只记录摘要与快照，不参与计算 |
+| `--tracker-camera-extrinsic` | 否 | 包内 `T_cam_tracker.yaml` | `T_cam_tracker` 外参，须带 Tracker 身份（文件内序列号或 `.binding.yaml`） |
+| `--end-camera-extrinsic` | 否 | 包内 `T_cam_end.yaml` | `T_cam_end` 外参（相机到 Link7） |
+| `--tracker-serial` | 否 | 空 | 自定义 Tracker 外参缺少身份绑定时声明序列号；不能覆盖既有绑定 |
+| `--source-camera-fps` | 否 | 读记录快照 `image.nominal_source_fps` | 标称源帧率覆盖值（如 30、29.97、90）；快照缺失时必须给出 |
+| `--gripper-source` | 否 | `auto` | 夹爪开度来源：`auto`、`binary`、`filtered`、`raw`，见下方说明 |
+| `--config` | 否 | 记录 processing 快照，否则包默认 `processing.yaml` | 处理配置（话题、采样率等） |
+| `--jobs` | 否 | `1` | 并行转换记录的进程数；`1` 在当前进程串行，`0` 按 CPU 数和记录数自动选择（上限 8），见下方说明 |
+
+### 参数说明
+
+- **URDF**：转换不解析 URDF，只计算其 SHA-256、复制到 `snapshots/urdf/` 并写入 `manifest.json`、HDF5
+  元数据与 Zarr 根属性 `urdf_sha256`，供校验器、训练 checkpoint 和 `dp_infer` 部署时核对。缺省 `--urdf`
+  时使用包内 `assets/rm_75.urdf`（源文件在仓库根 `assets/rm_75.urdf`，SHA-256 `c3754583…b056`，与
+  `dp_infer` 默认 `expected_urdf_sha256` 一致）。部署换用其他 URDF 文件时须显式传入同一文件；仅格式不同
+  （换行、缩进、注释）的等价 URDF 摘要也不同，会被部署端拒绝。
+
+- **夹爪数据来源**：`--gripper-source` 默认 `auto`。记录目录含 `binarization.yaml`（由仓库根目录
+  `binarize_gripper.py` 生成的二值化副本）时用二值结果，否则用采集时的 `filtered_openness`。可手动指定：
+
+  | 选项 | 二值化副本 | 普通记录 |
+  | --- | --- | --- |
+  | `binary` | `filtered_openness`（0/1），最近邻取值，不产生中间值 | 预检报错 |
+  | `filtered` | 预检报错（原值已被二值覆盖） | `filtered_openness`，线性插值（原行为） |
+  | `raw` | `raw_openness`，按 `binarization.yaml` 的 `original_valid` 恢复原有效性，线性插值 | `raw_openness`，线性插值 |
+
+  裸 bag（无记录目录）视为普通记录。二值化副本的夹爪消息数须等于 `binarization.yaml` 的 `frame_count`，
+  否则中止。实际来源写入 `manifest.json`、`record_report.json`、HDF5 元数据和 Zarr `episode_metadata` 的
+  `gripper_source`。
+
+- **并行转换**：`--jobs N`（N≥2）用 N 个 spawn 工作进程并行转换各条记录，进程数不超过记录数；每条记录仍在
+  单个进程内顺序处理（H.264 解码状态只在一条记录内保留），全部记录完成后由主进程统一合并 Zarr。默认 `1`
+  保持串行。身份预检、配置解析、数值数组写入与回读校验仍在主进程执行。`manifest.json` 的 `sources`、Zarr 的 episode 顺序始终按记录发现顺序排列，与串行输出一致；实际进程数写入
+  `manifest.json` 的 `jobs`。任一记录硬错误会中止批次：取消尚未开始的记录，等待已在运行的记录结束，错误
+  文本带记录标识，诊断产物（`.work`、已发布的 HDF5 与报告）保留且不发布 Zarr。每个进程各自解码并暂存
+  帧，内存与 `.work` 磁盘占用随进程数线性增长，请按可用内存选择；进程被系统终止（如内存不足）时同样中止。
+  负数报参数错误。
+
 - **输入**：单个 bag（目录或 `.mcap`）、单条已保存记录（含 `session.yaml`）或任务目录；任务目录按来源路径稳定
-  排序，跳过 `.staging`、`.trash`。`--urdf`、`--output-dir` 必填，输出目录必须尚不存在。
-- **配置**：按“显式 `--config`、记录 processing 快照、包默认配置”选首个文档。显式配置的 `sample_rate_hz`
-  只接受 30；快照或包默认中的旧值（如 20）覆盖为 30 并写入报告；缺省按 30。非数值、非有限或非正值报错。
+  排序，跳过 `.staging`、`.trash`。`--output-dir` 必填，输出目录必须尚不存在。
+- **配置**：按“显式 `--config`、记录 processing 快照、包默认配置”选首个文档。输出固定 30 Hz、每条
+  episode 最终至少保留 16 帧，由格式契约决定；配置中遗留的 `sample_rate_hz`、`minimum_samples`、
+  `max_image_delta_s` 被忽略。
   显式 `require_tracker_status=false` 报错，旧快照的 false 升级为 true。所有调整写入报告。
 - **标称源帧率**：`--source-camera-fps` 优先，否则读快照 `image.nominal_source_fps`；缺失时报错，**不用实测帧率
   推断**。旧记录须按实际采集配置声明（2026-10-12 的六份记录为 30）。30 Hz ±1%（含 29.97）走同频逐帧路径，
@@ -343,6 +409,22 @@ ros2 run fastumi_data convert_mcap <输入目录> \
   整条 episode；最终至少 16 帧。`data/timestamp` 是名义时间（同频路径 `n/30`，丢帧处跳 `m/30`），实际图像时间
   另存；按 +0.2% 速率偏差，35 s 名义与实际约差 70 ms，报告记录该累积量。
 
+- **Zarr 合并的并行**：合并是整个流程里最耗时的一段（逐帧缩放、JPEG XL 无损压缩并回读校验）。图像每帧一个 chunk，
+  帧间互不依赖，所以 `--jobs N` 同样用于这一步：主进程先写完并检查全部数值数组、定好数组形状，再把图像按 256 帧
+  切片，由 N 个工作进程并行写入互不重叠的 chunk（进程数不超过切片数；`--jobs 0` 按 CPU 数自动选择，上限 8）。输出与串行
+  完全一致，实际进程数写入 `manifest.json` 的 `zarr.jobs`。每个工作进程只暂存一批 224×224 帧，内存很小；磁盘随机读
+  源 HDF5，建议放在 SSD 上。
+
+### 终端输出
+
+正常运行只在终端（stderr 为 TTY）显示一条进度条 `转换记录 [####------] 3/10`，依次经过“转换记录”（按记录）、
+“写入图像”（按帧）、“校验数值”（按 episode）三个阶段，不打印过程行；
+管道或日志重定向时不画进度条，正常情况下 stderr 为空。只有异常才打印：episode 被质量拒绝时输出
+`拒绝 <episode>: 原因`（显示在进度条上方，不被覆盖），硬错误（转换前检查失败、转换中止、无有效 episode）输出到
+stderr 并返回 1。成功结束时 stdout 只有一行汇总：`完成：有效 N / 拒绝 M episode，F 帧 → <dataset.zarr>`。
+时间戳来源提示、配置调整、单 episode 提示等不再打印，可在 `manifest.json`（`warnings`、各来源 `processing`）和
+`record_report.json` 中查看。
+
 ### 输出
 
 ```text
@@ -368,7 +450,8 @@ ros2 run fastumi_data convert_mcap <输入目录> \
   `episode_metadata` 逐条保留来源、帧率、身份、外参摘要和时间偏移；`complete=true` 只表示导出完整，
   不表示时间标定已验证。
 - **失败行为**：质量拒绝跳过并写报告；损坏文件、标定或身份错误、导出异常中止并返回非零，保留诊断产物；
-  零条有效 episode 返回失败；只有一条时成功但提示当前训练默认验证划分至少需要两条。转换按 episode 把解码帧
+  零条有效 episode 返回失败；只有一条时成功，并在 `manifest.json` 的 `warnings` 记录当前训练默认验证划分至少需要
+  两条。转换按 episode 把解码帧
   暂存到磁盘，内存不随 episode 长度增长。
 
 ### 校验与训练
@@ -429,9 +512,8 @@ ros2 run fastumi_data episode_command stop
 ros2 run fastumi_data episode_command abort
 
 # 4. 离线转换为 30 Hz Link7 训练数据（连续录制的快照没有标称源帧率，须显式声明）
-ros2 run fastumi_data convert_mcap dataset/pick_place/<session>/raw/bag \
-  --output-dir /data/converted/pick_place_link7 \
-  --urdf /path/to/rm_75.urdf --source-camera-fps 30
+python -m fastumi_data.mcap_converter dataset/pick_place/<session>/raw/bag \
+  --output-dir /data/converted/pick_place_link7 --source-camera-fps 30
 ```
 
 连续录制同样支持压缩图像：`record_session` 增加 `--image-mode`、`--image-topic`、
@@ -447,7 +529,7 @@ ros2 run fastumi_data record_session --task pick_place --extrinsic … \
   --image-mode h264 --image-topic /wrist_camera/image_raw/ffmpeg
 ```
 
-旧的 TCP 格式（`fastumi_ros2_v2`，按处理配置采样率）仍保留为 `McapEpisodeConverter` 库接口，
+旧的 TCP 格式（`fastumi_ros2_v2`，按处理配置采样率）转换已移除，`convert_mcap` 只输出 Link7 数据，
 命令行不再提供 `--extrinsic` 用法。完整流程、数据结构和验收步骤见仓库
 `docs/ros2_fastumi_pipeline.md`。
 
