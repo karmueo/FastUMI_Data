@@ -221,6 +221,10 @@ ros2 service call /fastumi/collection/stop_and_save fastumi_interfaces/srv/Colle
 消费。写入使用 `rosbag2_py.SequentialWriter`、MCAP 和 `zstd_fast`，由单一写入线程消费有界
 队列；队列溢出、写入或关闭失败都会明确报错。
 
+写调用耗时、Python 心跳、队列深度和真实 MCAP 往返核对可使用
+[`写盘基线验证`](../../../docs/recording_write_baseline.md) 中的有界诊断命令。
+普通采集与连续编码路径分别判定，目标设备复测后再决定是否调整写入机制。
+
 ```text
 dataset/
 ├── .fastumi_collection.lock          根目录独占锁，同一目录只允许一个采集服务
