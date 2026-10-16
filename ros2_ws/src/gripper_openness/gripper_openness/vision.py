@@ -29,6 +29,8 @@ class MarkerPose:
 
     rotation_vector: Tuple[float, float, float]
     translation_mm: Tuple[float, float, float]
+    # 去畸变像素平面上四角点的 RMS 重投影误差；未计算时为 NaN。
+    reprojection_error_px: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,29 @@ class VisionResult:
     def valid(self) -> bool:
         """返回两枚目标标记是否均完成有效位姿计算。"""
         return self.distance_mm is not None
+
+    @property
+    def max_reprojection_error_px(self) -> float:
+        """返回两码中较大的重投影误差；任一位姿缺失时为 NaN。"""
+        if self.left_pose is None or self.right_pose is None:
+            return math.nan
+        return max(
+            self.left_pose.reprojection_error_px, self.right_pose.reprojection_error_px
+        )
+
+    @property
+    def relative_rotation_deg(self) -> float:
+        """返回右码相对左码的旋转角（度）；任一位姿缺失时为 NaN。
+
+        两码贴在平行移动的手指上，该角度在整个行程内应基本恒定；
+        IPPE 方形 PnP 的翻转解会让它明显偏离会话中位数。
+        """
+        if self.left_pose is None or self.right_pose is None:
+            return math.nan
+        left, _ = cv2.Rodrigues(np.asarray(self.left_pose.rotation_vector, dtype=np.float64))
+        right, _ = cv2.Rodrigues(np.asarray(self.right_pose.rotation_vector, dtype=np.float64))
+        relative, _ = cv2.Rodrigues(left.T @ right)
+        return float(np.degrees(np.linalg.norm(relative)))
 
 
 class GripperVision:
@@ -219,9 +244,19 @@ class GripperVision:
             or translation_values[2] <= 0.0
         ):
             return None
+        projected, _ = cv2.projectPoints(
+            self._object_points,
+            rotation_values,
+            translation_values,
+            calibration.camera_matrix,
+            distortion,
+        )
+        residual = projected.reshape(4, 2) - corrected
+        error = float(np.sqrt(np.mean(np.sum(residual * residual, axis=1))))
         return MarkerPose(
             rotation_vector=tuple(float(value) for value in rotation_values),
             translation_mm=tuple(float(value) for value in translation_values),
+            reprojection_error_px=error,
         )
 
     @staticmethod

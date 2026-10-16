@@ -1,13 +1,16 @@
-"""ROS 2 夹爪范围标定节点，支持图像话题和本地视频输入。"""
+"""ROS 2 夹爪范围标定节点，支持实时图像、本地视频和 MCAP 离线输入。"""
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import cv2
+from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from gripper_openness.calibration import (
+    CalibrationQualityConfig,
     load_camera_calibration,
     RangeAccumulator,
     write_gripper_calibration,
@@ -32,9 +35,18 @@ class GripperCalibrationNode(Node):
         )
         self._declare_parameters()
         self._source_mode = str(self.get_parameter("source_mode").value).lower()
-        if self._source_mode not in ("topic", "video"):
-            raise RuntimeError("source_mode 必须是 topic 或 video")
+        if self._source_mode not in ("topic", "video", "mcap"):
+            raise RuntimeError("source_mode 必须是 topic、video 或 mcap")
         camera_path = str(self.get_parameter("camera_calibration_path").value)
+        if self._source_mode == "mcap":
+            from gripper_openness.mcap_source import resolve_camera_path, resolve_mcap_path
+
+            _, session_dir, _ = resolve_mcap_path(str(self.get_parameter("mcap_path").value))
+            camera_path = resolve_camera_path(camera_path, session_dir, "")
+        if not camera_path.strip():
+            camera_path = str(
+                Path(get_package_share_directory("gripper_openness")) / "config/calib.yaml"
+            )
         try:
             self._camera_calibration = load_camera_calibration(camera_path)
             self._marker_size_mm = float(self.get_parameter("marker_size_mm").value)
@@ -48,18 +60,33 @@ class GripperCalibrationNode(Node):
                 left_marker_id=self._left_id,
                 right_marker_id=self._right_id,
             )
+            quality = CalibrationQualityConfig(
+                max_reprojection_error_px=float(
+                    self.get_parameter("max_reprojection_error_px").value
+                ),
+                min_marker_side_px=float(self.get_parameter("min_marker_side_px").value),
+                max_relative_rotation_deviation_deg=float(
+                    self.get_parameter("max_relative_rotation_deviation_deg").value
+                ),
+                plateau_window_frames=int(self.get_parameter("plateau_window_frames").value),
+                plateau_band_mm=float(self.get_parameter("plateau_band_mm").value),
+                min_endpoint_frames=int(self.get_parameter("min_endpoint_frames").value),
+                min_range_mm=float(self.get_parameter("min_range_mm").value),
+            )
         except (ValueError, TypeError, cv2.error) as error:
             self.get_logger().error(f"加载夹爪标定参数失败: {error}")
             raise RuntimeError("夹爪标定参数无效") from error
         self._bridge = CvBridge()
-        self._accumulator = RangeAccumulator()
-        self._sampling = self._source_mode == "video"
+        self._accumulator = RangeAccumulator(quality)
+        self._sampling = self._source_mode in ("video", "mcap")
         self._sampling_frame_count = 0
         self._pair_detection_count = 0
         self._last_result: Optional[VisionResult] = None
         self._video_capture: Optional[cv2.VideoCapture] = None
         self._video_timer = None
         self._debug_publisher = None
+        # 启动时校验 ROI，避免错误参数在每一帧中重复报错。
+        self._configured_roi(*self._camera_calibration.resolution)
         self._setup_ros_interfaces()
         if self._source_mode == "video":
             self._open_video_source()
@@ -75,6 +102,8 @@ class GripperCalibrationNode(Node):
         self.declare_parameter("image_topic", "/umi_camera/image_raw")
         self.declare_parameter("source_mode", "topic")
         self.declare_parameter("video_path", "")
+        self.declare_parameter("mcap_path", "")
+        self.declare_parameter("mcap_image_topic", "")
         self.declare_parameter("video_fps", 30.0)
         self.declare_parameter("camera_calibration_path", "")
         self.declare_parameter("output_path", "")
@@ -86,6 +115,13 @@ class GripperCalibrationNode(Node):
         self.declare_parameter("left_finger_tag_id", 0)
         self.declare_parameter("right_finger_tag_id", 1)
         self.declare_parameter("roi_ratios", [0.0, 0.0, 1.0, 1.0])
+        self.declare_parameter("max_reprojection_error_px", 2.0)
+        self.declare_parameter("min_marker_side_px", 20.0)
+        self.declare_parameter("max_relative_rotation_deviation_deg", 10.0)
+        self.declare_parameter("plateau_window_frames", 5)
+        self.declare_parameter("plateau_band_mm", 1.5)
+        self.declare_parameter("min_endpoint_frames", 5)
+        self.declare_parameter("min_range_mm", 5.0)
 
     def _setup_ros_interfaces(self) -> None:
         """创建图像输入、调试图像发布器和控制服务。"""
@@ -138,6 +174,34 @@ class GripperCalibrationNode(Node):
             return
         self._process_frame(image, message.header)
 
+    def run_mcap(self) -> None:
+        """流式扫描录包，完成后保存；读取或标定失败时抛出异常供入口返回非零状态。"""
+        from gripper_openness.mcap_source import McapImageSource
+
+        source = McapImageSource(
+            str(self.get_parameter("mcap_path").value),
+            str(self.get_parameter("mcap_image_topic").value),
+        )
+        try:
+            self.get_logger().info(f"读取 MCAP: {source.path}，图像话题={source.image_topic}")
+            for image, header in source.frames():
+                self._process_frame(image, header)
+                if source.message_count % 100 == 0:
+                    self.get_logger().info(
+                        f"已读取 {source.message_count} 条图像消息，"
+                        f"有效双码帧 {self._accumulator.count}"
+                    )
+            self.get_logger().info(
+                f"MCAP 读取完成：图像消息 {source.message_count}，"
+                f"处理帧 {self._sampling_frame_count}，解码失败 {source.decode_failures}，"
+                f"有效双码帧 {self._accumulator.count}"
+            )
+            response = self._save(Trigger.Request(), Trigger.Response())
+            if not response.success:
+                raise RuntimeError(response.message)
+        finally:
+            source.close()
+
     def _video_tick(self) -> None:
         """读取视频下一帧，视频结束时自动保存并停止。"""
         if self._video_capture is None:
@@ -157,6 +221,8 @@ class GripperCalibrationNode(Node):
                 self._configured_roi(image.shape[1], image.shape[0]),
             )
         except (ValueError, cv2.error) as error:
+            if self._source_mode == "mcap":
+                raise ValueError(f"MCAP 标定帧处理失败: {error}") from error
             self.get_logger().error(f"标定帧处理失败: {error}", throttle_duration_sec=2.0)
             return
         self._last_result = result
@@ -170,6 +236,9 @@ class GripperCalibrationNode(Node):
                     result.left_corners,
                     result.right_corners,
                     self._camera_calibration.resolution,
+                    reprojection_error_px=result.max_reprojection_error_px,
+                    relative_rotation_deg=result.relative_rotation_deg,
+                    frame_index=self._sampling_frame_count,
                 )
         if self._debug_publisher is not None:
             range_values = None
@@ -241,12 +310,21 @@ class GripperCalibrationNode(Node):
             return response
         self._sampling = False
         response.success = True
+        statistics = calibration.statistics or {}
+        rejected = statistics.get("rejected_frames", {})
         response.message = (
-            f"标定已保存到 {output_path}，有效帧 {calibration.total_valid_frames}，"
+            f"标定已保存到 {output_path}，有效帧 {calibration.total_valid_frames}"
+            f"/{statistics.get('sampled_frames', calibration.total_valid_frames)}"
+            f"（剔除 重投影 {rejected.get('reprojection_error', 0)}、"
+            f"边长 {rejected.get('marker_side', 0)}、"
+            f"姿态 {rejected.get('relative_rotation', 0)}），"
             f"范围 {calibration.min_marker_dist_mm:.3f}.."
             f"{calibration.max_marker_dist_mm:.3f} mm"
+            f"（原始极值 {statistics.get('raw_min_mm')}..{statistics.get('raw_max_mm')} mm）"
         )
         self.get_logger().info(response.message)
+        for warning in statistics.get("warnings", []):
+            self.get_logger().warning(warning)
         return response
 
     def _reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
@@ -314,9 +392,13 @@ def main(args: Optional[List[str]] = None) -> None:
     node = None
     try:
         node = GripperCalibrationNode()
-        rclpy.spin(node)
-    except (RuntimeError, ValueError) as error:
-        print(f"夹爪标定节点启动失败: {error}")
+        if node._source_mode == "mcap":
+            node.run_mcap()
+        else:
+            rclpy.spin(node)
+    except (RuntimeError, ValueError, OSError) as error:
+        print(f"夹爪标定失败: {error}")
+        raise SystemExit(1) from error
     finally:
         if node is not None:
             node.destroy_node()

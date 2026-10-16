@@ -57,9 +57,12 @@ ros2 launch fastumi_data fastumi_collection.launch.py \
 | `extrinsic_path` | 空 | 可选 Tracker→TCP 外参，按 2 mm、1° 验收；留空则记录标记为未标定。 |
 | `start_camera` / `start_tracker` / `start_gripper` | `false` | 分别按需启动 USB 相机、VIVE Tracker（不含其自带 RViz2）、夹爪估计。 |
 | `video_device` | 空 | 可为空：留空时自动选择编号最小的 USB 相机（多相机时端口不稳定）；显式给出须是 `/dev/v4l/by-path/*-video-index0`。 |
-| `camera_calibration_path` / `gripper_calibration_path` | 空 | 可选覆盖夹爪估计的内参和夹爪标定；留空沿用其默认解析，并把实际文件写入快照。 |
+| `camera_calibration_path` | `<share>/config/calib.yaml` | 夹爪估计使用的相机内参；省略或留空时使用此路径，可显式覆盖，实际文件写入快照。 |
+| `gripper_calibration_path` | `<share>/config/gripper_calibration.yaml` | 夹爪范围标定；省略或留空时使用此路径，可显式覆盖，实际文件写入快照。不再读取 `~/fastumi_gripper_calibration.yaml`。 |
 | `use_rviz` / `rviz_config` / `fixed_frame` | `true` / 内置布局 / `vive_tracker_odom` | RViz2 开关、配置和固定坐标系。 |
 | `fastdds_profile` | `config/fastdds_large_images.xml` | Fast DDS 配置，见下文“1080p 图像传输”；留空禁用，已设置 `FASTRTPS_DEFAULT_PROFILES_FILE` 时不覆盖。 |
+
+上表 `<share>` 指 `gripper_openness` 包的安装共享目录。两个标定参数在 launch 声明中以空字符串表示使用上述默认路径。
 
 旧的 `record_mcap:=true` 已移除：launch 不再随设备自动连续录包，传入时会报迁移提示。
 连续录包仍可使用下文的 `record_session`。

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import yaml
@@ -41,6 +41,49 @@ class GripperCalibration:
     resolution: Tuple[int, int]
     crop_reference: Dict[str, int]
     total_valid_frames: int = 0
+    # 标定过程统计（门限剔除数、端点平台、原始极值等），仅供追溯，不参与预测。
+    statistics: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class CalibrationQualityConfig:
+    """单帧质量门限和端点平台检测参数。
+
+    Attributes:
+        max_reprojection_error_px: 任一标记在去畸变像素平面上的 RMS 重投影误差上限。
+        min_marker_side_px: 两码平均像素边长中较小者的下限，过小的码深度误差大。
+        max_relative_rotation_deviation_deg: 两码相对旋转角偏离会话中位数的上限，
+            用于剔除 IPPE 翻转解和局部遮挡造成的错误位姿。
+        plateau_window_frames: 判定“停留”所需的连续有效帧数。
+        plateau_band_mm: 停留窗口内距离极差上限，也是端点平台的宽度。
+        min_endpoint_frames: 每个端点平台至少包含的帧数。
+        min_range_mm: 闭合与全开端点之间的最小距离差，低于它视为未覆盖行程。
+    """
+
+    max_reprojection_error_px: float = 2.0
+    min_marker_side_px: float = 20.0
+    max_relative_rotation_deviation_deg: float = 10.0
+    plateau_window_frames: int = 5
+    plateau_band_mm: float = 1.5
+    min_endpoint_frames: int = 5
+    min_range_mm: float = 5.0
+
+    def __post_init__(self) -> None:
+        """拒绝非正或非有限的门限。"""
+        for name in (
+            "max_reprojection_error_px",
+            "min_marker_side_px",
+            "max_relative_rotation_deviation_deg",
+            "plateau_band_mm",
+            "min_range_mm",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} 必须为正的有限数")
+        if int(self.plateau_window_frames) < 2:
+            raise ValueError("plateau_window_frames 至少为 2")
+        if int(self.min_endpoint_frames) < 1:
+            raise ValueError("min_endpoint_frames 至少为 1")
 
 
 def load_camera_calibration(path: str) -> CameraCalibration:
@@ -164,6 +207,8 @@ def write_gripper_calibration(
             "total_valid_frames": int(calibration.total_valid_frames),
         }
     }
+    if calibration.statistics:
+        document["gripper_calibration"]["calibration_statistics"] = calibration.statistics
     temporary_name: Optional[str] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -189,24 +234,33 @@ def write_gripper_calibration(
 
 
 class RangeAccumulator:
-    """累积双 ArUco 有效帧并按参考脚本生成范围和 ROI。"""
+    """累积双 ArUco 有效帧，经质量门限后用端点停留平台的中位数生成范围。
 
-    def __init__(self) -> None:
-        """初始化空采样器。"""
+    原始极值会被单帧 PnP 噪声和错误解向外拉偏，因此范围端点取
+    “闭合/全开停留段”内距离的中位数；ROI 仍按通过门限帧的角点分位数生成。
+    """
+
+    def __init__(self, quality: Optional[CalibrationQualityConfig] = None) -> None:
+        """初始化空采样器和质量门限。"""
+        self.quality = quality if quality is not None else CalibrationQualityConfig()
         self.reset()
 
     def reset(self) -> None:
-        """清空距离、角点和图像尺寸采样。"""
-        self.distances_mm = []
-        self.top_y = []
-        self.bottom_y = []
-        self.left_x = []
-        self.right_x = []
+        """清空距离、角点、质量指标和图像尺寸采样。"""
+        self.distances_mm: List[float] = []
+        self.top_y: List[float] = []
+        self.bottom_y: List[float] = []
+        self.left_x: List[float] = []
+        self.right_x: List[float] = []
+        self.reprojection_errors_px: List[float] = []
+        self.marker_sides_px: List[float] = []
+        self.relative_rotations_deg: List[float] = []
+        self.frame_indices: List[int] = []
         self.resolution: Optional[Tuple[int, int]] = None
 
     @property
     def count(self) -> int:
-        """返回有效双码帧数量。"""
+        """返回门限前的有效双码帧数量。"""
         return len(self.distances_mm)
 
     def add(
@@ -215,8 +269,22 @@ class RangeAccumulator:
         left_corners: np.ndarray,
         right_corners: np.ndarray,
         resolution: Tuple[int, int],
+        *,
+        reprojection_error_px: float = math.nan,
+        relative_rotation_deg: float = math.nan,
+        frame_index: Optional[int] = None,
     ) -> None:
-        """加入一帧有效双码检测及其四角点。"""
+        """加入一帧有效双码检测及其四角点和质量指标。
+
+        Args:
+            distance_mm: 两码中心三维距离，毫米。
+            left_corners: 左码原图像素角点，形状 ``(4, 2)``。
+            right_corners: 右码原图像素角点，形状 ``(4, 2)``。
+            resolution: 图像宽高。
+            reprojection_error_px: 两码中较大的重投影误差；NaN 表示不做该门限。
+            relative_rotation_deg: 两码相对旋转角；NaN 表示不做该门限。
+            frame_index: 源帧序号，用于判断停留窗口是否连续；缺省按加入顺序。
+        """
         distance = float(distance_mm)
         if not math.isfinite(distance) or distance < 0.0:
             raise ValueError("标记距离必须为非负有限数")
@@ -226,12 +294,18 @@ class RangeAccumulator:
             self.resolution = _valid_resolution(resolution)
         elif tuple(resolution) != self.resolution:
             raise ValueError("采样帧分辨率不一致")
+        if frame_index is None:
+            frame_index = self.frame_indices[-1] + 1 if self.frame_indices else 0
         self.distances_mm.append(distance)
         all_corners = np.vstack((left, right))
         self.top_y.append(float(np.min(all_corners[:, 1])))
         self.bottom_y.append(float(np.max(all_corners[:, 1])))
         self.left_x.append(float(np.min(left[:, 0])))
         self.right_x.append(float(np.max(right[:, 0])))
+        self.reprojection_errors_px.append(float(reprojection_error_px))
+        self.marker_sides_px.append(min(_side_length(left), _side_length(right)))
+        self.relative_rotations_deg.append(float(relative_rotation_deg))
+        self.frame_indices.append(int(frame_index))
 
     def build(
         self,
@@ -240,30 +314,109 @@ class RangeAccumulator:
         left_finger_tag_id: int,
         right_finger_tag_id: int,
     ) -> GripperCalibration:
-        """根据采样结果生成可写入的标定对象。"""
+        """根据采样结果生成可写入的标定对象。
+
+        Raises:
+            ValueError: 无样本、全部被门限剔除、缺少端点停留段、范围退化或
+                ROI 无效时抛出。
+        """
         if self.count == 0 or self.resolution is None:
             raise ValueError("没有有效的双 ArUco 标定样本")
-        if not self.left_x or not self.right_x:
-            raise ValueError("无法从标记角点生成有效 ROI")
-        minimum = float(np.min(self.distances_mm))
-        maximum = float(np.max(self.distances_mm))
-        if (
-            not math.isfinite(minimum)
-            or not math.isfinite(maximum)
-            or minimum >= maximum
-        ):
+        quality = self.quality
+        accepted, rejected, rotation_median = self._quality_mask()
+        accepted_count = int(np.count_nonzero(accepted))
+        if accepted_count == 0:
+            raise ValueError(
+                f"{self.count} 帧双码样本全部未通过质量门限："
+                f"重投影误差 {rejected['reprojection_error']}，"
+                f"像素边长 {rejected['marker_side']}，"
+                f"两码相对姿态 {rejected['relative_rotation']}"
+            )
+        order = np.argsort(np.asarray(self.frame_indices)[accepted], kind="stable")
+        distances = np.asarray(self.distances_mm, dtype=np.float64)[accepted][order]
+        indices = np.asarray(self.frame_indices, dtype=np.int64)[accepted][order]
+        stable = _stable_mask(
+            distances, indices, int(quality.plateau_window_frames), float(quality.plateau_band_mm)
+        )
+        stable_distances = distances[stable]
+        if stable_distances.size == 0:
+            raise ValueError(
+                f"{accepted_count} 帧通过门限，但没有连续 {quality.plateau_window_frames} 帧"
+                f"距离波动不超过 {quality.plateau_band_mm} mm 的停留段；"
+                "请在机械闭合和全开位置各停留约 1 秒"
+            )
+        band = float(quality.plateau_band_mm)
+        low_anchor = float(np.min(stable_distances))
+        high_anchor = float(np.max(stable_distances))
+        # 两端平台各宽 band，锚点间距不超过 2 * band 时平台会重叠，等同于只停在一处。
+        if high_anchor - low_anchor <= 2.0 * band:
+            raise ValueError(
+                "标定距离范围必须包含两个不同的停留端点，"
+                f"当前停留段仅覆盖 {low_anchor:.3f}..{high_anchor:.3f} mm"
+            )
+        low_plateau = stable_distances[stable_distances <= low_anchor + band]
+        high_plateau = stable_distances[stable_distances >= high_anchor - band]
+        minimum_frames = int(quality.min_endpoint_frames)
+        for name, plateau in (("闭合", low_plateau), ("全开", high_plateau)):
+            if plateau.size < minimum_frames:
+                raise ValueError(
+                    f"{name}端停留帧 {plateau.size} 少于 {minimum_frames}，请在该位置停留更久"
+                )
+        minimum = float(np.median(low_plateau))
+        maximum = float(np.median(high_plateau))
+        if not math.isfinite(minimum) or not math.isfinite(maximum) or minimum >= maximum:
             raise ValueError("标定距离范围必须包含两个不同的有限端点")
+        if maximum - minimum < float(quality.min_range_mm):
+            raise ValueError(
+                f"闭合与全开端点仅相差 {maximum - minimum:.3f} mm，小于 "
+                f"min_range_mm={quality.min_range_mm}，请覆盖完整开闭行程"
+            )
+
         crop = {
-            "top_y": int(np.percentile(self.top_y, 1.0)),
-            "bottom_y": int(np.percentile(self.bottom_y, 99.0)),
-            "left_x": int(np.percentile(self.left_x, 1.0)),
-            "right_x": int(np.percentile(self.right_x, 99.0)),
+            "top_y": int(np.percentile(np.asarray(self.top_y)[accepted], 1.0)),
+            "bottom_y": int(np.percentile(np.asarray(self.bottom_y)[accepted], 99.0)),
+            "left_x": int(np.percentile(np.asarray(self.left_x)[accepted], 1.0)),
+            "right_x": int(np.percentile(np.asarray(self.right_x)[accepted], 99.0)),
         }
         width, height = self.resolution
         if not (0 <= crop["left_x"] < crop["right_x"] <= width):
             raise ValueError("标定 ROI 的左右边界无效")
         if not (0 <= crop["top_y"] < crop["bottom_y"] <= height):
             raise ValueError("标定 ROI 的上下边界无效")
+
+        low_percentile = float(np.percentile(distances, 1.0))
+        high_percentile = float(np.percentile(distances, 99.0))
+        warnings = []
+        # 通过门限的帧明显越过平台，说明端点可能只是路过而没有停留。
+        if low_percentile < minimum - 2.0 * band:
+            warnings.append(
+                f"1% 分位距离 {low_percentile:.3f} mm 明显小于闭合端 {minimum:.3f} mm，"
+                "闭合端可能未停留"
+            )
+        if high_percentile > maximum + 2.0 * band:
+            warnings.append(
+                f"99% 分位距离 {high_percentile:.3f} mm 明显大于全开端 {maximum:.3f} mm，"
+                "全开端可能未停留"
+            )
+        statistics = {
+            "method": "plateau_median",
+            "sampled_frames": self.count,
+            "accepted_frames": accepted_count,
+            "rejected_frames": rejected,
+            "relative_rotation_median_deg": _round(rotation_median),
+            "stable_frames": int(stable_distances.size),
+            "raw_min_mm": _round(float(np.min(self.distances_mm))),
+            "raw_max_mm": _round(float(np.max(self.distances_mm))),
+            "accepted_p1_mm": _round(low_percentile),
+            "accepted_p99_mm": _round(high_percentile),
+            "min_endpoint": _plateau_statistics(low_plateau),
+            "max_endpoint": _plateau_statistics(high_plateau),
+            "thresholds": {
+                key: (int(value) if isinstance(value, int) else float(value))
+                for key, value in asdict(quality).items()
+            },
+            "warnings": warnings,
+        }
         return GripperCalibration(
             marker_size_mm=float(marker_size_mm),
             dictionary_name=str(dictionary_name),
@@ -273,8 +426,72 @@ class RangeAccumulator:
             max_marker_dist_mm=maximum,
             resolution=self.resolution,
             crop_reference=crop,
-            total_valid_frames=self.count,
+            total_valid_frames=accepted_count,
+            statistics=statistics,
         )
+
+    def _quality_mask(self) -> Tuple[np.ndarray, Dict[str, int], float]:
+        """按重投影误差、像素边长、两码相对姿态依次过滤，每帧只计入首个失败项。"""
+        quality = self.quality
+        errors = np.asarray(self.reprojection_errors_px, dtype=np.float64)
+        sides = np.asarray(self.marker_sides_px, dtype=np.float64)
+        rotations = np.asarray(self.relative_rotations_deg, dtype=np.float64)
+        # NaN 表示调用方未提供该指标，不据此剔除。
+        error_ok = ~(errors > float(quality.max_reprojection_error_px))
+        side_ok = sides >= float(quality.min_marker_side_px)
+        prior = error_ok & side_ok
+        rotation_ok = np.ones_like(prior)
+        rotation_median = math.nan
+        reference = rotations[prior & np.isfinite(rotations)]
+        if reference.size:
+            rotation_median = float(np.median(reference))
+            deviation = np.abs(rotations - rotation_median)
+            rotation_ok = ~(deviation > float(quality.max_relative_rotation_deviation_deg))
+        rejected = {
+            "reprojection_error": int(np.count_nonzero(~error_ok)),
+            "marker_side": int(np.count_nonzero(error_ok & ~side_ok)),
+            "relative_rotation": int(np.count_nonzero(prior & ~rotation_ok)),
+        }
+        return prior & rotation_ok, rejected, rotation_median
+
+
+def _stable_mask(
+    distances: np.ndarray, indices: np.ndarray, window: int, band_mm: float
+) -> np.ndarray:
+    """标记位于任一“连续 window 帧、极差不超过 band_mm”窗口内的样本。
+
+    源帧序号跨度超过 ``2 * (window - 1)`` 的窗口视为中间丢帧过多，不算停留。
+    """
+    stable = np.zeros(distances.size, dtype=bool)
+    max_span = 2 * (window - 1)
+    for start in range(0, distances.size - window + 1):
+        stop = start + window
+        if indices[stop - 1] - indices[start] > max_span:
+            continue
+        values = distances[start:stop]
+        if float(np.max(values) - np.min(values)) <= band_mm:
+            stable[start:stop] = True
+    return stable
+
+
+def _plateau_statistics(values: np.ndarray) -> Dict[str, Any]:
+    """返回端点平台的帧数、中位数和 MAD。"""
+    median = float(np.median(values))
+    return {
+        "frames": int(values.size),
+        "median_mm": _round(median),
+        "mad_mm": _round(float(np.median(np.abs(values - median)))),
+    }
+
+
+def _round(value: float) -> Optional[float]:
+    """统计值保留 4 位小数，NaN 写为 null。"""
+    return round(float(value), 4) if math.isfinite(value) else None
+
+
+def _side_length(corners: np.ndarray) -> float:
+    """返回四角点构成四边形的平均边长（像素）。"""
+    return float(np.mean(np.linalg.norm(corners - np.roll(corners, -1, axis=0), axis=1)))
 
 
 def _parse_gripper_calibration(data: Mapping[str, Any]) -> GripperCalibration:
@@ -326,6 +543,8 @@ def _parse_gripper_calibration(data: Mapping[str, Any]) -> GripperCalibration:
     total = _integer_value(data.get("total_valid_frames", 0), "total_valid_frames")
     if total < 0:
         raise ValueError("total_valid_frames 不能为负数")
+    raw_statistics = data.get("calibration_statistics")
+    statistics = dict(raw_statistics) if isinstance(raw_statistics, Mapping) else None
     return GripperCalibration(
         marker_size_mm=marker_size,
         dictionary_name=dictionary_name,
@@ -336,6 +555,7 @@ def _parse_gripper_calibration(data: Mapping[str, Any]) -> GripperCalibration:
         resolution=resolution,
         crop_reference=crop,
         total_valid_frames=total,
+        statistics=statistics,
     )
 
 

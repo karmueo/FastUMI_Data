@@ -281,8 +281,10 @@ def test_start_tracker_disables_its_own_rviz_and_forwards_serial() -> None:
     }
 
 
-def test_start_gripper_reuses_default_calibration_resolution() -> None:
-    """验证夹爪估计订阅采集图像话题，未覆盖标定时沿用其默认解析并写入快照。"""
+def test_start_gripper_reuses_default_calibration_resolution(monkeypatch, tmp_path) -> None:
+    """验证默认标定取自包共享目录，忽略主目录旧文件并传给估计节点和快照。"""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "fastumi_gripper_calibration.yaml").write_text("legacy: true\n")
     _, nodes, includes, _ = _expand(start_gripper="true", publish_debug_image="true")
 
     assert [_include_name(i) for i in includes] == ["fastumi_gripper_estimator/gripper_openness.launch.py"]
@@ -296,7 +298,8 @@ def test_start_gripper_reuses_default_calibration_resolution() -> None:
         "gripper_calibration_path": snapshots[1],
     }
     assert [Path(p).name for p in snapshots][0] == "calib.yaml"
-    assert Path(snapshots[1]).name in ("calibration.yaml", "fastumi_gripper_calibration.yaml")
+    assert snapshots[1].endswith("/share/gripper_openness/config/gripper_calibration.yaml")
+    assert _load_launch_module()._gripper_snapshot_files("", "") == snapshots
 
 
 def test_explicit_calibration_paths_are_forwarded_and_snapshotted() -> None:

@@ -1,9 +1,9 @@
 """启动夹爪开合度预测节点并加载相机、夹爪范围标定。"""
 
 import os
-from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
+from gripper_openness.paths import default_gripper_calibration_path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -14,12 +14,8 @@ def generate_launch_description() -> LaunchDescription:
     """创建夹爪开合度预测 LaunchDescription。"""
     package_share = get_package_share_directory("gripper_openness")
     parameter_file = os.path.join(package_share, "config", "gripper_openness.yaml")
-    user_gripper_calibration = Path.home() / "fastumi_gripper_calibration.yaml"
-    default_gripper_calibration = (
-        str(user_gripper_calibration)
-        if user_gripper_calibration.is_file()
-        else os.path.join(package_share, "config", "calibration.yaml")
-    )
+    # 与标定输出、采集快照使用同一份安装包内配置。
+    default_gripper_calibration = default_gripper_calibration_path()
     arguments = [
         DeclareLaunchArgument(
             "image_topic", default_value="/umi_camera/image_raw", description="ROS 图像话题"

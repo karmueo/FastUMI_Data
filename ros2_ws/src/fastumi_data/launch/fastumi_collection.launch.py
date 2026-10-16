@@ -293,17 +293,12 @@ def _gripper_snapshot_files(
 ) -> List[str]:
     """解析夹爪估计实际使用的内参和夹爪标定文件，供采集快照。
 
-    与 ``gripper_openness.launch.py`` 的默认规则一致：夹爪标定优先使用
-    用户主目录下新生成的文件，否则使用包内示例。
+    默认使用 gripper_openness 安装共享目录下的 ``config/calib.yaml`` 和
+    ``config/gripper_calibration.yaml``，不读取用户主目录中的旧夹爪标定文件。
     """
     share = Path(get_package_share_directory("gripper_openness")) / "config"
     camera = camera_calibration or str(share / "calib.yaml")
-    user_calibration = Path.home() / "fastumi_gripper_calibration.yaml"
-    gripper = gripper_calibration or (
-        str(user_calibration)
-        if user_calibration.is_file()
-        else str(share / "calibration.yaml")
-    )
+    gripper = gripper_calibration or str(share / "gripper_calibration.yaml")
     return [camera, gripper]
 
 
@@ -792,7 +787,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "gripper_calibration_path",
             default_value="",
-            description="可选夹爪范围标定 YAML；留空沿用夹爪估计默认标定。",
+            description="可选夹爪范围标定 YAML；留空使用 gripper_openness 的 <share>/config/gripper_calibration.yaml。",
         ),
         DeclareLaunchArgument(
             "fastdds_profile",

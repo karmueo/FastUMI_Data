@@ -1,9 +1,9 @@
 """启动 FastUMI 夹爪开合度估计节点并加载默认参数。"""
 
 import os
-from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
+from gripper_openness.paths import default_gripper_calibration_path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -28,13 +28,8 @@ def generate_launch_description() -> LaunchDescription:
     default_calibration_file = os.path.join(
         calibration_share, "config", "calib.yaml"
     )
-    # 优先使用用户新生成的标定，首次运行时保留包内示例标定。
-    user_gripper_calibration = Path.home() / "fastumi_gripper_calibration.yaml"
-    default_gripper_calibration_file = (
-        str(user_gripper_calibration)
-        if user_gripper_calibration.is_file()
-        else os.path.join(calibration_share, "config", "calibration.yaml")
-    )
+    # 与标定工具及采集入口使用同一份安装包内夹爪标定。
+    default_gripper_calibration_file = default_gripper_calibration_path()
     # 默认订阅 UMI 相机命名空间中的原始图像。
     image_topic_argument = DeclareLaunchArgument(
         "image_topic",

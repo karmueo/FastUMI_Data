@@ -46,13 +46,13 @@ normalized_distance =
 
 ## 必需配置
 
-默认启动使用与 `gripper_openness` 标定节点对应的文件：
+默认启动使用 `gripper_openness` 安装包共享目录下的文件：
 
 - `config/calib.yaml`：相机内参和畸变参数。
-- `~/fastumi_gripper_calibration.yaml`：标定节点生成的夹爪距离范围、标签参数及 ROI；文件不存在时使用包内 `config/calibration.yaml` 示例。
+- `config/gripper_calibration.yaml`：标定节点生成的夹爪距离范围、标签参数及 ROI。
 
 先运行 `gripper_openness gripper_calibration.launch.py` 完成标定，生成
-`~/fastumi_gripper_calibration.yaml`，再启动本估计节点。默认从 `/usb_camera/image_raw` 读取
+安装共享目录下的 `config/gripper_calibration.yaml`，再启动本估计节点。默认从 `/umi_camera/image_raw` 读取
 `1920x1080` 图像。可分别通过 `camera_calibration_path:=...` 和
 `gripper_calibration_path:=...` 指定其他文件。两个文件的分辨率必须一致。
 
@@ -162,7 +162,7 @@ RPY 使用 XYZ roll-pitch-yaw 约定：
 
 更换相机标定、相机安装位置、ArUco 实际尺寸或夹爪结构后，需要在正确
 鱼眼解算流程下重新测量完全闭合和完全张开距离。默认启动使用
-`~/fastumi_gripper_calibration.yaml` 的新标定结果；直接运行旧节点参数
+`gripper_openness` 安装共享目录下 `config/gripper_calibration.yaml` 的新标定结果；直接运行旧节点参数
 模式时更新 `config/gripper_openness.yaml` 的 `gripper_range` 子项。范围单位为毫米。
 
 ## 开合端点标定命令

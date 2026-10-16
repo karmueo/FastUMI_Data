@@ -1,17 +1,47 @@
-# 该文件提供夹爪范围标定节点的默认 ROS 2 参数。
 gripper_calibration:
-  ros__parameters:
-    source_mode: topic
-    image_topic: /umi_camera/image_raw
-    video_path: ''
-    video_fps: 30.0
-    camera_calibration_path: ''
-    output_path: ''
-    overwrite: false
-    publish_debug_image: false
-    debug_image_topic: /gripper/calibration/debug_image
-    marker_size_mm: 16.0
-    dictionary_name: DICT_4X4_50
-    left_finger_tag_id: 0
-    right_finger_tag_id: 1
-    roi_ratios: [0.0, 0.0, 1.0, 1.0]
+  marker_size_mm: 16.0
+  dictionary_name: DICT_4X4_50
+  left_finger_tag_id: 0
+  right_finger_tag_id: 1
+  min_marker_dist_mm: 47.478588725679266
+  max_marker_dist_mm: 128.11784749079249
+  resolution:
+  - 1920
+  - 1080
+  crop_reference:
+    top_y: 890
+    bottom_y: 997
+    left_x: 382
+    right_x: 1448
+  total_valid_frames: 1086
+  calibration_statistics:
+    method: plateau_median
+    sampled_frames: 1104
+    accepted_frames: 1086
+    rejected_frames:
+      reprojection_error: 18
+      marker_side: 0
+      relative_rotation: 0
+    relative_rotation_median_deg: 0.9322
+    stable_frames: 1005
+    raw_min_mm: 47.1849
+    raw_max_mm: 129.1881
+    accepted_p1_mm: 47.2328
+    accepted_p99_mm: 128.777
+    min_endpoint:
+      frames: 494
+      median_mm: 47.4786
+      mad_mm: 0.0978
+    max_endpoint:
+      frames: 175
+      median_mm: 128.1178
+      mad_mm: 0.1794
+    thresholds:
+      max_reprojection_error_px: 2.0
+      min_marker_side_px: 20.0
+      max_relative_rotation_deviation_deg: 10.0
+      plateau_window_frames: 5
+      plateau_band_mm: 1.5
+      min_endpoint_frames: 5
+      min_range_mm: 5.0
+    warnings: []
