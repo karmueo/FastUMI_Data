@@ -226,3 +226,78 @@ def test_maintenance_skips_homing(monkeypatch):
     actions = mod._launch_hardware(context(mod, start_wrist_camera='false', start_gripper='false',
                                           move_to_initial_pose='false'))
     assert actions == ['rm_driver', 'fastumi_recorder']
+
+
+def _fixed_actions(mod, monkeypatch, tmp_path, **changes):
+    wrist = tmp_path / 'wrist-video-index0'
+    wrist.touch()
+    monkeypatch.setattr(mod, 'is_physical_video_device_path', lambda _: True)
+    monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: (package, arguments))
+    return mod._launch_hardware(context(
+        mod, start_arm='false', start_gripper='false', wrist_video_device=str(wrist), **changes))
+
+
+def test_fixed_camera_default_skipped(monkeypatch, tmp_path):
+    mod = module()
+    actions = _fixed_actions(mod, monkeypatch, tmp_path)
+    assert [a[0] for a in actions] == ['fastumi_usb_camera', 'fastumi_recorder']
+    assert actions[1][1]['fixed_image_topic'] == ''
+
+
+def test_fixed_camera_online_starts_and_records(monkeypatch, tmp_path):
+    mod = module()
+    fixed = tmp_path / 'fixed-video-index0'
+    fixed.touch()
+    actions = _fixed_actions(mod, monkeypatch, tmp_path, fixed_video_device=str(fixed))
+    assert [a[0] for a in actions] == ['fastumi_usb_camera', 'fastumi_usb_camera', 'fastumi_recorder']
+    args = actions[1][1]
+    assert args['namespace'] == 'fixed_camera' and args['video_device'] == str(fixed)
+    assert args['publish_compressed'] == 'true' and args['enable_ffmpeg'] == 'false'
+    assert args['frame_id'] == 'fixed_camera_optical_frame'
+    assert args['width'].perform(context(mod)) == '1920'
+    assert args['fps'].perform(context(mod)) == '30'
+    assert actions[0][1]['namespace'] == 'wrist_camera'
+    assert actions[2][1]['fixed_image_topic'] == '/fixed_camera/image_raw/compressed'
+
+
+def test_fixed_camera_offline_is_skipped(monkeypatch, tmp_path):
+    mod = module()
+
+    def offline(_device):
+        raise ValueError('USB 离线')
+
+    monkeypatch.setattr(mod, 'usb_location_from_physical_port', offline)
+    actions = _fixed_actions(mod, monkeypatch, tmp_path,
+                             fixed_video_device='/dev/v4l/by-path/pci-missing-video-index0')
+    assert [a[0] for a in actions] == ['fastumi_usb_camera', 'fastumi_recorder']
+    assert actions[1][1]['fixed_image_topic'] == ''
+
+
+def test_fixed_camera_missing_node_but_usb_online(monkeypatch, tmp_path):
+    mod = module()
+    monkeypatch.setattr(mod, 'usb_location_from_physical_port', lambda _: (1, 15))
+    actions = _fixed_actions(mod, monkeypatch, tmp_path,
+                             fixed_video_device='/dev/v4l/by-path/pci-missing-video-index0')
+    assert actions[1][1]['namespace'] == 'fixed_camera'
+
+
+def test_fixed_camera_same_device_fails(monkeypatch, tmp_path):
+    mod = module()
+    with pytest.raises(ValueError, match='同一设备'):
+        _fixed_actions(mod, monkeypatch, tmp_path,
+                       fixed_video_device=str(tmp_path / 'wrist-video-index0'))
+
+
+def test_fixed_camera_invalid_path_fails(tmp_path):
+    mod = module()
+    with pytest.raises(ValueError, match='固定相机'):
+        mod._launch_hardware(context(mod, start_arm='false', start_gripper='false',
+                                     wrist_video_device='/dev/v4l/by-path/x-video-index0',
+                                     fixed_video_device='/dev/video9'))
+
+
+def test_fixed_camera_disabled_switch(monkeypatch, tmp_path):
+    mod = module()
+    actions = _fixed_actions(mod, monkeypatch, tmp_path, start_fixed_camera='false',
+                             fixed_video_device='/dev/v4l/by-path/x-video-index0')
+    assert actions[1][1]['fixed_image_topic'] == ''

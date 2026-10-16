@@ -62,6 +62,46 @@ def _after_home(event, context, recorder):
     return [recorder] if recorder is not None else []
 
 
+def _fixed_camera(context, publish_reliability):
+    """解析固定视角相机；未配置或 USB 端口离线时跳过，非法配置明确报错。"""
+    logger = get_logger('fastumi_bringup')
+    if not _enabled(context, 'start_fixed_camera'):
+        return None
+    device = LaunchConfiguration('fixed_video_device').perform(context).strip()
+    if not device:
+        logger.info('未配置 fixed_video_device，跳过固定视角相机')
+        return None
+    if not is_physical_video_device_path(device):
+        raise ValueError(f'固定相机必须指定 /dev/v4l/by-path/*-video-index0: {device}')
+    wrist = LaunchConfiguration('wrist_video_device').perform(context).strip()
+    if _enabled(context, 'start_wrist_camera') and device == wrist:
+        raise ValueError(f'固定相机与末端相机指向同一设备: {device}')
+    for name in ('fixed_width', 'fixed_height'):
+        value = LaunchConfiguration(name).perform(context).strip()
+        if not value.isdecimal() or int(value) <= 0:
+            raise ValueError(f'{name} 必须是正整数')
+    if not Path(device).exists():
+        try:
+            usb_location_from_physical_port(device)
+        except ValueError as error:
+            logger.warning(f'固定相机离线，跳过: {error}')
+            return None
+    share = Path(get_package_share_directory('fastumi_usb_camera'))
+    return _include('fastumi_usb_camera', 'usb_camera.launch.py', {
+        'config': str(share / 'config/usb_camera_1280_960.yaml'),
+        'namespace': 'fixed_camera', 'video_device': device,
+        'width': LaunchConfiguration('fixed_width'),
+        'height': LaunchConfiguration('fixed_height'),
+        'fps': LaunchConfiguration('camera_fps'),
+        'frame_id': 'fixed_camera_optical_frame',
+        'enable_ffmpeg': 'false', 'publish_compressed': 'true',
+        'enable_decoder': 'false',
+        'topic': '/fixed_camera/image_raw',
+        'decoded_topic': '/fixed_camera/image_decoded',
+        'publish_reliability': publish_reliability,
+    })
+
+
 def _launch_hardware(context):
     """先验证设备配置，再启动硬件；UMI 不属于此启动入口。"""
     mode = LaunchConfiguration('wrist_camera_mode').perform(context).strip().lower()
@@ -87,6 +127,10 @@ def _launch_hardware(context):
         if publish_reliability == 'best_effort' and record_reliability == 'reliable':
             raise ValueError('录制端 reliable 与相机发布端 best_effort 不兼容')
     actions = []
+    fixed_topic = ''
+    fixed_action = _fixed_camera(context, publish_reliability)
+    if fixed_action is not None:
+        fixed_topic = '/fixed_camera/image_raw/compressed'
     if camera_enabled:
         device = LaunchConfiguration('wrist_video_device').perform(context)
         if not is_physical_video_device_path(device):
@@ -116,6 +160,8 @@ def _launch_hardware(context):
         if mode == 'h264':
             camera_arguments['h264_encoder'] = LaunchConfiguration('h264_encoder')
         actions.append(_include('fastumi_usb_camera', 'usb_camera.launch.py', camera_arguments))
+    if fixed_action is not None:
+        actions.append(fixed_action)
     if _enabled(context, 'start_gripper'):
         arguments = {'network_interface': LaunchConfiguration('gripper_network_interface')}
         config = LaunchConfiguration('gripper_config_file').perform(context)
@@ -131,7 +177,8 @@ def _launch_hardware(context):
         }
         recorder_arguments.update(
             image_topic=image_topic, image_transport=image_transport,
-            image_reliability=record_reliability, image_qos_depth=record_depth)
+            image_reliability=record_reliability, image_qos_depth=record_depth,
+            fixed_image_topic=fixed_topic)
         recorder = _include('fastumi_recorder', 'recorder.launch.py', recorder_arguments)
     if _enabled(context, 'start_arm'):
         actions.append(_include('rm_driver', 'rm_75_driver.launch.py'))
@@ -159,8 +206,9 @@ def generate_launch_description():
         start_arm='true', start_gripper='true', start_wrist_camera='true', start_recorder='true',
         move_to_initial_pose='true', enable_decoder='false', h264_encoder='hardware',
         wrist_camera_mode='jpeg',
-        wrist_video_device='', wrist_width='1280',
-        wrist_height='960', camera_fps='30', gripper_config_file=gripper_default_config,
+        wrist_video_device='', wrist_width='1920',
+        wrist_height='1080', start_fixed_camera='true', fixed_video_device='',
+        fixed_width='1920', fixed_height='1080', camera_fps='30', gripper_config_file=gripper_default_config,
         gripper_network_interface='',
         dataset_root='', dir_name='test', name='default_test', record_camera='true',
         image_topic='', image_transport='',

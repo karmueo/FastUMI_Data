@@ -87,6 +87,7 @@ source install/setup.bash
 source hardware.local.env
 launch_args=(
   "wrist_video_device:=$WRIST_VIDEO_DEVICE"
+  "fixed_video_device:=${FIXED_VIDEO_DEVICE:-}"
   "wrist_camera_mode:=${WRIST_CAMERA_MODE:-jpeg}"
   "h264_encoder:=${H264_ENCODER:-hardware}"
   "camera_publish_reliability:=${CAMERA_PUBLISH_RELIABILITY:-reliable}"
@@ -163,7 +164,7 @@ MoveJ 失败或等待结果超过 120 秒后，节点停止接受回位命令，
 
 ## 相机模式与画面查看
 
-默认采集 1280×960@30 FPS；一次模式选择同时设置相机输出和 Recorder 输入。
+默认采集 1920×1080@30 FPS；一次模式选择同时设置相机输出和 Recorder 输入。
 
 | `wrist_camera_mode` | 相机话题 | 消息类型 | Recorder 处理 |
 |---|---|---|---|
@@ -178,8 +179,23 @@ MCAP 记录时间使用 Jetson 接收时间。
 - `jpeg`：默认发布相机原生 JPEG。
 - `h264`：约 4 Mbps，Jetson 默认使用 NVIDIA GStreamer 硬件编码；排障或非 Jetson 环境使用 `h264_encoder:=software`。
   本地解码需同时设置 `wrist_camera_mode:=h264 enable_decoder:=true`，解码话题为 `/wrist_camera/image_decoded`。
-- `raw`：1280×960@30 的未压缩数据约 6.6 GB/分钟，Zstd 压缩率取决于画面。
+- `raw`：1280×960@30 的未压缩数据约 6.6 GB/分钟（1920×1080 约 2.25 倍），Zstd 压缩率取决于画面。
   此前本机短测为 raw 约 25.4 FPS、JPEG 约 30 FPS，实际设备需重新评估。
+
+### 固定视角相机（双路录制）
+
+设置 `fixed_video_device`（`/dev/v4l/by-path/*-video-index0`，本机为 USB 4.3）后，同一入口
+额外启动固定相机，固定使用原生 JPEG，发布 `/fixed_camera/image_raw/compressed`
+（`sensor_msgs/msg/CompressedImage`，坐标系 `fixed_camera_optical_frame`），并自动传给录制器
+`fixed_image_topic`，与末端相机写入同一份 MCAP。
+
+- 为空、`start_fixed_camera:=false` 或该 USB 端口启动时离线：跳过固定相机并提示，仍可单路运行。
+- 路径非法或与 `wrist_video_device` 相同：启动前报错。
+- 开始录制前两路均需 2 秒内有效输入，否则返回 `NOT_READY` 并指出具体相机；`record_camera=false` 同时关闭两路。
+- 两路分别保留各自时间戳，不做硬件同步或强制配对；`image_frames` 等计数为两路合计，
+  `image_age` 为最旧一路的年龄（任一路无有效输入为 -1），每路消息数以 MCAP 话题元数据为准。
+- 暂不支持热插拔重连；`convert_hardware_mcap.py` 等离线转换工具仍只导出末端视角。
+- 两台相机共用同一 USB 2.0 Hub（480 Mbps）时带宽可能不足，务必按性能验收项实测；不足时优先分接到独立 USB 上行链路。
 
 相机发布与录制订阅默认均为 `reliable`；录制端 `KEEP_LAST(30)` 在 30 FPS 下约容纳
 1 秒图像消息。Reliable 可重传传输丢包，也可能增加积压和延迟，不能覆盖采集或编码器内部丢帧。
@@ -239,7 +255,10 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 | `camera_publish_reliability` / `camera_record_reliability` | reliable / reliable | 相机发布端与录制端订阅分别选择 `reliable` 或 `best_effort` |
 | `camera_record_depth` | 30 | 录制端相机订阅 `KEEP_LAST` 队列深度，必须为正整数 |
 | `wrist_video_device` | 空，必须填写 | 完整物理端口路径 |
-| `wrist_width` / `wrist_height` / `camera_fps` | 1280 / 960 / 30 | 相机采集模式 |
+| `wrist_width` / `wrist_height` / `camera_fps` | 1920 / 1080 / 30 | 相机采集模式（`camera_fps` 两路共用） |
+| `fixed_video_device` | 空 | 固定相机完整物理端口路径；空则不启动 |
+| `start_fixed_camera` | true | 固定相机总开关 |
+| `fixed_width` / `fixed_height` | 1920 / 1080 | 固定相机分辨率 |
 | `gripper_config_file` | 已安装 `unitree_gripper` 包的 `config/gripper.yaml` | 夹爪 ROS 参数 YAML |
 | `gripper_network_interface` | 配置中的值 | 同时覆盖厂商服务端和 ROS 节点网卡 |
 | `dataset_root` | 仓库 dataset/h5dy_data | 覆盖时使用绝对路径 |

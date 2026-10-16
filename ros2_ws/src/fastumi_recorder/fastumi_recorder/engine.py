@@ -28,6 +28,7 @@ DEFAULT_TOPICS = {
     'gripper_action': ('/motion_control/gripper_command', 'std_msgs/msg/Float32'),
     'tracker_pose': ('/vive_tracker/odom', 'nav_msgs/msg/Odometry'),
 }
+IMAGE_STREAMS = ('image', 'fixed_image')
 SAMPLE_FIELDS = {
     'joint_state': 'joint_samples', 'joint_action': 'action_samples',
     'gripper_state': 'gripper_samples', 'tracker_pose': 'tracker_samples',
@@ -55,7 +56,8 @@ class RecorderEngine:
             self.topics.setdefault('image',
                                    ('/wrist_camera/image_raw/ffmpeg', IMAGE_TYPES[image_transport]))
         else:
-            self.topics.pop('image', None)
+            for stream in IMAGE_STREAMS:
+                self.topics.pop(stream, None)
         self.freshness, self.shutdown_timeout = freshness, shutdown_timeout
         self.max_queued_bytes, self.writer_factory = max_queued_bytes, writer_factory
         self.lock = threading.RLock()
@@ -131,7 +133,7 @@ class RecorderEngine:
             try:
                 if self._closing or self._writer_active or self.state in ('recording', 'saving'):
                     raise RecordingError('BUSY', '录制器正在录制、保存或退出')
-                required = ['joint', 'gripper'] + (['image'] if self.record_camera else [])
+                required = ['joint', 'gripper'] + [s for s in IMAGE_STREAMS if s in self.topics]
                 now = time.monotonic()
                 missing = [stream for stream in required
                            if stream not in self._seen or now - self._seen[stream] > self.freshness]
@@ -275,22 +277,23 @@ class RecorderEngine:
         """Queue original CDR; validity affects readiness only, never bag content."""
         with self.lock:
             readiness = {'joint_state': 'joint', 'gripper_state': 'gripper',
-                         'tracker_pose': 'tracker', 'image': 'image'}.get(stream)
+                         'tracker_pose': 'tracker', 'image': 'image',
+                         'fixed_image': 'fixed_image'}.get(stream)
             if valid_for_readiness and readiness:
                 self._seen[readiness] = time.monotonic()
             if self.state != 'recording' or stream not in self.topics:
                 return
-            if stream == 'image':
+            if stream in IMAGE_STREAMS:
                 self._counts['received_frames'] += 1
             try:
                 serialized = serialize_message(message)
             except Exception as error:
-                if stream == 'image':
+                if stream in IMAGE_STREAMS:
                     self._counts['dropped_frames'] += 1
                 self._fail(f'ROS 消息序列化失败: {error}')
                 return
             if self._queued_bytes + len(serialized) > self.max_queued_bytes:
-                if stream == 'image':
+                if stream in IMAGE_STREAMS:
                     self._counts['dropped_frames'] += 1
                 self._fail('MCAP 写入队列已满')
                 return
@@ -305,11 +308,15 @@ class RecorderEngine:
             if self.state == 'recording':
                 duration = max(0.0, (time.time() if timestamp is None else timestamp)
                                - self.current['started_at'])
+            enabled = [s for s in IMAGE_STREAMS if s in self.topics]
+            ages = [now - self._seen[s] if s in self._seen else -1.0 for s in enabled]
+            image_age = -1.0 if not ages or min(ages) < 0 else max(ages)
             return dict(state=self.state, recording_id=self.current.get('recording_id', ''),
                         current=deepcopy(self.current), last_completed=deepcopy(self.last_completed),
                         duration=duration, last_error=self.last_error, **self._counts,
                         **{f'{s}_age': now - self._seen[s] if s in self._seen else -1.0
-                           for s in ('joint', 'gripper', 'image', 'tracker')})
+                           for s in ('joint', 'gripper', 'tracker')},
+                        image_age=image_age)
 
     def _work(self):
         """Write messages and process ordered close/publish barriers."""
@@ -328,7 +335,7 @@ class RecorderEngine:
                             field = SAMPLE_FIELDS.get(stream)
                             if field:
                                 self._counts[field] += 1
-                            elif stream == 'image':
+                            elif stream in IMAGE_STREAMS:
                                 self._counts['encoded_frames'] += 1
                 except Exception as error:
                     with self.lock:

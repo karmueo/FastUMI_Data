@@ -48,6 +48,7 @@ class RecorderNode(Node):
             tracker_odom_topic='/vive_tracker/odom',
             image_topic='/wrist_camera/image_raw/ffmpeg', image_transport='ffmpeg',
             image_reliability='reliable', image_qos_depth=30,
+            fixed_image_topic='',
         )
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -76,6 +77,10 @@ class RecorderNode(Node):
         }
         if values['record_camera']:
             topics['image'] = (values['image_topic'], IMAGE_TYPES[image_transport])
+            # 固定相机仅支持原生 JPEG CompressedImage；空字符串表示未启用。
+            fixed_topic = str(values['fixed_image_topic']).strip()
+            if fixed_topic:
+                topics['fixed_image'] = (fixed_topic, IMAGE_TYPES['jpeg'])
         self.engine = RecorderEngine(
             root or default_dataset_root(), dir_name=values['dir_name'], name=values['name'],
             record_camera=values['record_camera'], image_transport=image_transport, topics=topics,
@@ -115,6 +120,15 @@ class RecorderNode(Node):
                                  if image_reliability == 'reliable'
                                  else ReliabilityPolicy.BEST_EFFORT),
                     durability=DurabilityPolicy.VOLATILE))
+            if 'fixed_image' in topics:
+                self.fixed_image_subscription = self.create_subscription(
+                    CompressedImage, topics['fixed_image'][0], self._fixed_compressed_image,
+                    QoSProfile(
+                        depth=image_qos_depth,
+                        reliability=(ReliabilityPolicy.RELIABLE
+                                     if image_reliability == 'reliable'
+                                     else ReliabilityPolicy.BEST_EFFORT),
+                        durability=DurabilityPolicy.VOLATILE))
         self.create_timer(0.5, self.publish_status)
         self.create_timer(0.05, self._publish_change)
         self.publish_status()
@@ -261,13 +275,19 @@ class RecorderNode(Node):
                      and len(message.data) >= message.step * message.height)
         self.engine.record('image', message, self._now_ns(), valid_for_readiness=valid)
 
-    def _compressed_image(self, message):
+    def _record_jpeg(self, stream, message):
         """原样保存 JPEG 消息，检查仅用于启动就绪。"""
         image_format = message.format.lower()
         data = bytes(message.data)
         valid = (('jpeg' in image_format or 'jpg' in image_format) and len(data) >= 4
                  and data[:2] == b'\xff\xd8' and data[-2:] == b'\xff\xd9')
-        self.engine.record('image', message, self._now_ns(), valid_for_readiness=valid)
+        self.engine.record(stream, message, self._now_ns(), valid_for_readiness=valid)
+
+    def _compressed_image(self, message):
+        self._record_jpeg('image', message)
+
+    def _fixed_compressed_image(self, message):
+        self._record_jpeg('fixed_image', message)
 
     def _ffmpeg_image(self, message):
         """原样保存 H.264 transport 包。"""

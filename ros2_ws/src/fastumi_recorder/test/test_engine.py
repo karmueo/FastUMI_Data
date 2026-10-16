@@ -8,7 +8,7 @@ import uuid
 import pytest
 from rclpy.serialization import deserialize_message
 from rm_ros_interfaces.msg import Jointpos
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import CompressedImage, Image, JointState
 from std_msgs.msg import Float32
 
 from fastumi_recorder.catalog import RecordingError
@@ -207,3 +207,51 @@ def test_shutdown_auto_saves_without_camera(tmp_path):
     assert info['recording_id'] == recording_id
     assert info['image_frames'] == 0
     assert (tmp_path / info['relative_path'] / 'bag/bag_0.mcap').is_file()
+
+
+@pytest.fixture
+def dual(tmp_path):
+    FakeWriter.instances.clear()
+    FakeWriter.fail_write = False
+    FakeWriter.fail_close = False
+    topics = {'joint_state': ('/joint_states', 'sensor_msgs/msg/JointState'),
+              'image': ('/wrist_camera/image_raw', 'sensor_msgs/msg/Image'),
+              'fixed_image': ('/fixed_camera/image_raw/compressed',
+                              'sensor_msgs/msg/CompressedImage')}
+    instance = RecorderEngine(tmp_path, image_transport='raw', topics=topics,
+                              writer_factory=FakeWriter)
+    yield instance
+    instance.close(timestamp=30.)
+
+
+def test_dual_camera_requires_both_and_counts_total(dual):
+    ready(dual)
+    with pytest.raises(RecordingError, match='fixed_image'):
+        dual.start(request_id=str(uuid.uuid4()))
+    assert dual.status()['image_age'] == -1.0
+    dual.record('fixed_image', CompressedImage(format='jpeg', data=[1]), 4,
+                valid_for_readiness=True)
+    assert dual.status()['image_age'] >= 0
+    recording_id, _ = dual.start(timestamp=10., request_id=str(uuid.uuid4()))
+    dual.record('image', Image(width=1, height=1, step=3, data=[7, 8, 9]), 11)
+    dual.record('fixed_image', CompressedImage(format='jpeg', data=[5, 6]), 12)
+    dual.record('fixed_image', CompressedImage(format='jpeg', data=[5, 7]), 13)
+    wait_for(lambda: dual.status()['encoded_frames'] == 3)
+    assert dual.status()['received_frames'] == 3
+    dual.stop(recording_id, 12.)
+    wait_for(lambda: dual.state != 'saving')
+    topics = [t for t, _, _ in FakeWriter.instances[-1].messages]
+    assert topics == ['/wrist_camera/image_raw', '/fixed_camera/image_raw/compressed',
+                      '/fixed_camera/image_raw/compressed']
+    saved = deserialize_message(FakeWriter.instances[-1].messages[1][1], CompressedImage)
+    assert list(saved.data) == [5, 6]
+    assert dual.list()[0][0]['image_frames'] == 3
+
+
+def test_record_camera_false_drops_fixed_image(tmp_path):
+    instance = RecorderEngine(
+        tmp_path, record_camera=False, writer_factory=FakeWriter,
+        topics={'joint_state': ('/joint_states', 'sensor_msgs/msg/JointState'),
+                'fixed_image': ('/f', 'sensor_msgs/msg/CompressedImage')})
+    assert 'fixed_image' not in instance.topics
+    instance.close(timestamp=1.)
