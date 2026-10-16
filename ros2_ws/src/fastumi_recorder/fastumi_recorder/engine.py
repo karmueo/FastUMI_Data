@@ -10,7 +10,7 @@ import uuid
 
 from rclpy.serialization import serialize_message
 
-from fastumi_recorder.bag_writer import BagWriter
+from fastumi_recorder.bag_writer import ProcessBagWriter
 from fastumi_recorder.catalog import Catalog, RecordingError, atomic_json
 from fastumi_recorder.request_ledger import RequestLedger, canonical_request_id
 
@@ -41,7 +41,7 @@ class RecorderEngine:
     def __init__(self, root, *, dir_name='test', name='default_test',
                  record_camera=True, image_transport='ffmpeg', topics=None,
                  freshness=2.0, shutdown_timeout=120.0,
-                 max_queued_bytes=MAX_QUEUED_BYTES, writer_factory=BagWriter):
+                 max_queued_bytes=MAX_QUEUED_BYTES, writer_factory=ProcessBagWriter):
         if freshness <= 0 or shutdown_timeout <= 0 or max_queued_bytes <= 0:
             raise ValueError('超时和队列容量必须大于零')
         if image_transport not in IMAGE_TYPES:
