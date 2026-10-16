@@ -1,4 +1,9 @@
-"""验证写入基准的纯逻辑限额、分位数与重叠汇总。"""
+"""验证写入基准的限额、分位数、重叠汇总及两种真实 MCAP 入口。"""
+
+import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -13,14 +18,14 @@ def test_percentile_summary_interpolates_and_handles_empty_input() -> None:
     """统计结果按线性插值计算分位数，空序列返回空统计。"""
     result = percentile_summary([10, 20, 30, 40])
 
-    assert result == {
+    assert result == pytest.approx({
         "count": 4,
         "mean_ns": 25.0,
         "p50_ns": 25.0,
         "p95_ns": 38.5,
         "p99_ns": 39.7,
         "max_ns": 40,
-    }
+    })
     assert percentile_summary([])["max_ns"] is None
 
 
@@ -78,3 +83,31 @@ def test_touching_write_and_heartbeat_windows_do_not_overlap() -> None:
     )
 
     assert report["long_writes"][0]["overlapping_long_heartbeats"] == 0
+
+
+@pytest.mark.parametrize("path,mode", [("queued", "raw"), ("continuous", "compressed")])
+def test_real_baseline_cli_reports_writes_and_cleans_bag(
+    tmp_path: Path, path: str, mode: str,
+) -> None:
+    """运行两种入口的微型真实写入，核对汇总、读回和临时包清理。"""
+    output_dir = tmp_path / "baseline"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "fastumi_data.write_baseline",
+            "--output-dir", str(output_dir), "--path", path, "--mode", mode,
+            "--duration-s", "0.2", "--fps", "10", "--width", "64",
+            "--height", "48", "--max-input-mib", "4", "--max-disk-mib", "8",
+        ],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((output_dir / "baseline-report.json").read_text())
+    assert not report["error"]
+    assert report["actual_written"]["count"] == report["accepted"]["count"] == 4
+    assert report["readback"]["message_count"] == 4
+    assert report["readback"]["exact_bytes_topics_and_fifo"]
+    assert report["readback"]["topic_types_match"]
+    assert report["actual_written"]["drain_and_close"]["duration_ns"] >= 0
+    assert report["timing"]["image_callback_start_intervals"]["count"] == 1
+    assert not report["bag_kept"]
+    assert not (output_dir / "bag").exists()

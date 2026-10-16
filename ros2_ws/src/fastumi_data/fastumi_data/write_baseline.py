@@ -811,21 +811,21 @@ def run_baseline(arguments: argparse.Namespace) -> Dict[str, Any]:
             source.terminate()
             source.join(timeout=5)
             raise TimeoutError("源进程未在限定时间内退出，已终止")
+        finish_started_ns = time.monotonic_ns()
         if queued_writer is not None:
-            finish_started_ns = time.monotonic_ns()
             finish_result = queued_writer.finish(timeout_s=60)
-            finish_ended_ns = time.monotonic_ns()
-            writer_finish_timing = {
-                "start_ns": finish_started_ns,
-                "end_ns": finish_ended_ns,
-                "duration_ns": finish_ended_ns - finish_started_ns,
-            }
             writer_closed = finish_result.thread_stopped
             if not finish_result.ok:
                 report["error"] = finish_result.error_message or finish_result.error_code
         else:
             recorder.close()
             writer_closed = True
+        finish_ended_ns = time.monotonic_ns()
+        writer_finish_timing = {
+            "start_ns": finish_started_ns,
+            "end_ns": finish_ended_ns,
+            "duration_ns": finish_ended_ns - finish_started_ns,
+        }
         heartbeat_stop.set()
         depth_stop.set()
         if heartbeat_thread is not None:
@@ -915,6 +915,10 @@ def run_baseline(arguments: argparse.Namespace) -> Dict[str, Any]:
                 item["duration_ns"] for item in callbacks
             ),
             "callback_start_intervals": percentile_summary(callback_gaps),
+            "image_callback_start_intervals": percentile_summary(
+                item["image_start_interval_ns"] for item in callbacks
+                if item.get("image_start_interval_ns") is not None
+            ),
             "write_durations": percentile_summary(
                 item["duration_ns"] for item in actual_writes
             ),
