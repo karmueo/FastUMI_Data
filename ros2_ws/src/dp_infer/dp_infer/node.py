@@ -34,6 +34,13 @@ def stamp_ns(stamp):
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
+def close_guard_allowed(rgb):
+    """仅计算图像中的闭合许可；工作线程不访问 ROS 或任务状态。"""
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    center = ball_center_bgr(bgr)
+    return ball_near_jaws(center, bgr.shape[1], bgr.shape[0])
+
+
 def sequence_message(sequence, context):
     """将已校验的核心结果转换为 ROS 消息；header 保留原始观测时间。"""
     message = PolicyActionSequence()
@@ -118,6 +125,12 @@ class DpInferenceNode(Node):
         self._requested_steps = self.parameter("num_inference_steps")
         self.add_on_set_parameters_callback(self._on_parameters_changed)
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dp_infer_policy")
+        # 1080p JPEG 解码与视觉检测串行会超过 30 Hz 帧预算，饿死同步历史。
+        # 检测只保留一个在途任务，ROS 回调不等待它，也不累积旧图像。
+        self.guard_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dp_infer_guard")
+        self._guard_future = None
+        self._guard_context = None
+        self._guard_generation = 0
         self.future = None  # 唯一在途推理任务。
         self.pending = None  # 最新待推理的冻结观测及上下文，覆盖旧候选。
         self.active_context = None  # 唯一在途任务的上下文。
@@ -209,18 +222,46 @@ class DpInferenceNode(Node):
         self.get_logger().warning(text, throttle_duration_sec=2.0)
 
     def publish_close_guard(self, rgb, image_stamp_ns):
-        """仅用采集时间新鲜的腕部图像决定是否准许闭合。"""
+        """提交新鲜图像的异步检测，避免阻塞传感器接收和推理调度。"""
         if self._task_control_enabled and self.task_state != "running":
-            self.close_guard_publisher.publish(Bool(data=False))
+            self._invalidate_close_guard()
             return
         age_ns = self.get_clock().now().nanoseconds - image_stamp_ns
         if not 0 <= age_ns <= self.buffer.timeout_ns:
-            self.close_guard_publisher.publish(Bool(data=False))
+            self._invalidate_close_guard()
             return
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        center = ball_center_bgr(bgr)
-        self.close_guard_publisher.publish(Bool(
-            data=ball_near_jaws(center, bgr.shape[1], bgr.shape[0])))
+        self._finish_close_guard()
+        if self._guard_future is None:
+            self._guard_context = (image_stamp_ns, self.buffer.episode_id, self._guard_generation)
+            self._guard_future = self.guard_worker.submit(close_guard_allowed, rgb)
+
+    def _invalidate_close_guard(self):
+        """撤销许可，并使重置前或异常图像之前的在途检测失效。"""
+        self._guard_generation += 1
+        if self._guard_future is not None:
+            self._guard_future.cancel()
+        self.close_guard_publisher.publish(Bool(data=False))
+
+    def _finish_close_guard(self):
+        """在 ROS 回调中收取检测结果，重新校验 episode、任务及采集时间。"""
+        future = self._guard_future
+        if future is None or not future.done():
+            return
+        image_stamp_ns, episode_id, generation = self._guard_context
+        self._guard_future = None
+        self._guard_context = None
+        allowed = False
+        if not future.cancelled():
+            try:
+                allowed = bool(future.result())
+            except Exception as error:
+                self.warn(f"Close guard failed: {error}")
+        age_ns = self.get_clock().now().nanoseconds - image_stamp_ns
+        allowed = (allowed and episode_id == self.buffer.episode_id
+                   and generation == self._guard_generation
+                   and (not self._task_control_enabled or self.task_state == "running")
+                   and 0 <= age_ns <= self.buffer.timeout_ns)
+        self.close_guard_publisher.publish(Bool(data=allowed))
 
     def on_image(self, message):
         """解码相机消息并缓存图像采集时间；非法编码或尺寸跳过。"""
@@ -229,7 +270,7 @@ class DpInferenceNode(Node):
             self.publish_close_guard(rgb, stamp_ns(message.header.stamp))
             self.buffer.add_image(stamp_ns(message.header.stamp), letterbox_rgb(rgb))
         except (ValueError, TypeError) as error:
-            self.close_guard_publisher.publish(Bool(data=False))
+            self._invalidate_close_guard()
             self.warn(f"Dropped image: {error}")
 
     def on_compressed_image(self, message):
@@ -239,7 +280,7 @@ class DpInferenceNode(Node):
             self.publish_close_guard(rgb, stamp_ns(message.header.stamp))
             self.buffer.add_image(stamp_ns(message.header.stamp), letterbox_rgb(rgb))
         except (ValueError, TypeError) as error:
-            self.close_guard_publisher.publish(Bool(data=False))
+            self._invalidate_close_guard()
             self.warn(f"Dropped compressed image: {error}")
 
     def on_joint(self, message):
@@ -261,7 +302,7 @@ class DpInferenceNode(Node):
         """先使旧预测失效，再请求控制器停止并锁定新 episode。"""
         self.buffer.reset()
         self.pending = None
-        self.close_guard_publisher.publish(Bool(data=False))
+        self._invalidate_close_guard()
         self._reset_acknowledged = not self._require_controller_reset
         self._controller_reset_future = None
         if self._controller_reset_timer is not None:
@@ -325,7 +366,7 @@ class DpInferenceNode(Node):
         self.operation_id += 1
         self.buffer.reset()
         self.pending = None
-        self.close_guard_publisher.publish(Bool(data=False))
+        self._invalidate_close_guard()
         return self.operation_id
 
     async def _controller_call(self, client, timeout_s):
@@ -440,6 +481,7 @@ class DpInferenceNode(Node):
                 self.operation_id += 1
             self.warn("ROS clock moved backwards; episode reset")
         self.last_clock_ns = now_ns
+        self._finish_close_guard()
         self._finish_controller_reset()
         if self._task_control_enabled and self.task_state != "running":
             if self.future is not None and self.future.done():
@@ -501,6 +543,8 @@ class DpInferenceNode(Node):
         """停止工作线程后销毁 ROS 资源，防止退出过程中访问已释放的模型/消息。"""
         if hasattr(self, "worker"):
             self.worker.shutdown(wait=True, cancel_futures=True)
+        if hasattr(self, "guard_worker"):
+            self.guard_worker.shutdown(wait=True, cancel_futures=True)
         if getattr(self, "_controller_reset_timer", None) is not None:
             self.destroy_timer(self._controller_reset_timer)
         if hasattr(self, "close_guard_publisher"):

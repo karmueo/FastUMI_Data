@@ -3,6 +3,7 @@
 import asyncio
 from concurrent.futures import Future
 import hashlib
+from threading import Event
 import time
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from sensor_msgs.msg import CompressedImage
 from fastumi_interfaces.srv import ResetPolicyController, SetNumInferenceSteps
 from std_srvs.srv import Trigger
 
@@ -213,6 +215,8 @@ def test_close_guard_publishes_vision_permission_and_clears_on_reset(node):
     for location, expected in (((900, 350), False), ((650, 650), True)):
         rgb = cv2.cvtColor(_scene(location), cv2.COLOR_BGR2RGB)
         instance.publish_close_guard(rgb, instance.get_clock().now().nanoseconds)
+        instance._guard_future.result(timeout=5)
+        instance._finish_close_guard()
         assert decisions[-1].data is expected
     rgb = cv2.cvtColor(_scene((650, 650)), cv2.COLOR_BGR2RGB)
     now_ns = instance.get_clock().now().nanoseconds
@@ -222,6 +226,82 @@ def test_close_guard_publishes_vision_permission_and_clears_on_reset(node):
     assert decisions[-1].data is False
     instance.reset_episode()
     assert decisions[-1].data is False
+
+
+def test_slow_close_guard_does_not_block_observation_windows(node, monkeypatch):
+    """检测阻塞时仍接收连续图像及状态，且只保留一个检测任务。"""
+    instance, _ = node
+    entered, release = Event(), Event()
+
+    def slow_detection(_rgb):
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test did not release detection")
+        return True
+
+    monkeypatch.setattr("dp_infer.node.close_guard_allowed", slow_detection)
+    now = [1_000_000_000]
+    monkeypatch.setattr(instance, "get_clock", lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=now[0])))
+    _, jpeg = cv2.imencode(".jpg", np.zeros((24, 32, 3), dtype=np.uint8))
+    windows = []
+    try:
+        for index in range(10):
+            now[0] = 1_000_000_000 + round(index * 1e9 / 30)
+            message = CompressedImage(data=jpeg.tobytes(), format="jpeg")
+            message.header.stamp.sec, message.header.stamp.nanosec = divmod(now[0], 10**9)
+            instance.buffer.add_pose(now[0], np.eye(4))
+            instance.buffer.add_gripper(now[0], 1.0)
+            instance.on_compressed_image(message)
+            if index == 0:
+                assert entered.wait(timeout=2)
+                first_future = instance._guard_future
+            assert instance._guard_future is first_future
+            window = instance.buffer.poll(now[0])
+            if window is not None:
+                windows.append(window[-1].stamp_ns)
+        assert len(windows) == 9
+        assert not first_future.done()
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("invalidation", [
+    "reset", "clear_task", "invalid_image", "stale_image", "idle", "expired", "future", "error",
+])
+def test_inflight_close_guard_cannot_restore_invalid_permission(node, monkeypatch, invalidation):
+    """重置、坏图像、暂停、过期及检测失败均不能被在途的允许结果覆盖。"""
+    instance, _ = node
+    decisions = []
+    instance.close_guard_publisher = SimpleNamespace(publish=decisions.append)
+    now = [1_000_000_000]
+    monkeypatch.setattr(instance, "get_clock", lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(nanoseconds=now[0])))
+    future = Future()
+    future.set_running_or_notify_cancel()
+    instance._guard_future = future
+    instance._guard_context = (now[0], instance.buffer.episode_id, instance._guard_generation)
+    if invalidation == "reset":
+        instance.reset_episode()
+    elif invalidation == "clear_task":
+        instance._clear_task()
+    elif invalidation == "invalid_image":
+        instance.on_compressed_image(CompressedImage())
+    elif invalidation == "stale_image":
+        instance.publish_close_guard(None, now[0] - instance.buffer.timeout_ns - 1)
+    elif invalidation == "idle":
+        instance._task_control_enabled = True
+        instance.task_state = "idle"
+    elif invalidation == "expired":
+        now[0] += instance.buffer.timeout_ns + 1
+    elif invalidation == "future":
+        now[0] -= 1
+    if invalidation == "error":
+        future.set_exception(ValueError("invalid detection"))
+    else:
+        future.set_result(True)
+    instance._finish_close_guard()
+    assert decisions and all(not decision.data for decision in decisions)
 
 
 def test_reset_response_waits_for_controller_acknowledgement():

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from array import array
 import signal
 import threading
 import time
@@ -153,7 +154,8 @@ class UsbCameraNode(Node):
             compressed.header.stamp = frame.stamp
             compressed.header.frame_id = self._frame_id
             compressed.format = "jpeg"
-            compressed.data = frame.jpeg
+            # uint8 数组走 ROS 消息的快速赋值路径，避免逐字节校验阻塞发布。
+            compressed.data = array("B", frame.jpeg)
             self._compressed_publisher.publish(compressed)
             self.published_count += 1
             return
