@@ -36,3 +36,5 @@ wandb
 
 # DexGraspVLA 本地运行环境、第三方源码、权重及缓存。
 .local
+CLAUDE.md
+plan.md
