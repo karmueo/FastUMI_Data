@@ -54,7 +54,7 @@ ls -l /dev/v4l/by-path/*-video-index0
 
 | 配置键 | 填写方式 |
 |---|---|
-| `WRIST_VIDEO_DEVICE` | USB 4.2 对应的完整 `/dev/v4l/by-path/*-video-index0` 路径，必须存在 |
+| `WRIST_VIDEO_DEVICE` | USB 4.2 对应的完整 `/dev/v4l/by-path/*-video-index0` 路径；JPEG/raw 在节点缺失时按相同物理端口定位在线相机 |
 | `GRIPPER_NETWORK_INTERFACE` | 实际网卡；留空使用夹爪配置中的值 |
 | `GRIPPER_CONFIG_FILE` | 默认使用已安装的 `config/gripper.yaml`，需要时替换 |
 | `DATASET_ROOT` | 留空使用仓库 `dataset/h5dy_data`；覆盖时填绝对路径 |
@@ -62,6 +62,8 @@ ls -l /dev/v4l/by-path/*-video-index0
 其余键可保留默认值：JPEG、硬件 H.264 编码、两端 Reliable、录制队列深度 30。
 需要修改时见[相机模式](#相机模式与画面查看)和[参数表](#参数与维护)。
 本机文件被 Git 忽略，后续启动直接加载，不必再复制模板。设备缺失时启动会明确报错。
+JPEG/raw 模式支持此前采集退出后视频节点丢失的情况，无需拔插；
+相机须仍连接在配置的同一 USB 端口。H.264 模式仍要求视频节点存在。
 
 ### 3. 启动硬件与录制服务
 

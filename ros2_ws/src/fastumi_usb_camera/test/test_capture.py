@@ -1,6 +1,8 @@
 """验证 UVC 设备选择、模式协商、坏帧跳过和异常释放。"""
 
 import threading
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -206,3 +208,63 @@ def test_close_before_streaming_releases_device():
     camera = make_camera(uvc)
     camera.close()
     assert uvc.capture.closed
+
+
+def test_missing_video_node_uses_exact_physical_usb_port(monkeypatch, tmp_path):
+    """驱动解绑后仍按完整物理端口选设备，不按 VID/PID 猜测其他相机。"""
+    root = tmp_path / "usb"
+    root.mkdir()
+    expected = PHYSICAL_DEVICE.split("/")[-1].removesuffix("-video-index0")
+    paths = {}
+    for address, port in ((14, expected), (15, expected + "-other")):
+        device = tmp_path / f"device-{address}"
+        interface = device / f"1-{address}:1.0"
+        interface.mkdir(parents=True)
+        (device / "busnum").write_text("1\n")
+        (device / "devnum").write_text(f"{address}\n")
+        (interface / "bInterfaceClass").write_text("0e\n")
+        (interface / "bInterfaceSubClass").write_text("01\n")
+        alias = root / interface.name
+        alias.symlink_to(interface)
+        paths[str(alias)] = port
+
+    def query(arguments, **kwargs):
+        """模拟 udev 按接口返回稳定端口标识。"""
+        assert arguments[:3] == ["udevadm", "info", "--query=property"]
+        assert kwargs["timeout"] == 2
+        return SimpleNamespace(stdout="ID_PATH=" + paths[arguments[3][7:]] + "\n")
+
+    monkeypatch.setattr(capture.subprocess, "run", query)
+    assert capture.usb_location_from_physical_port(PHYSICAL_DEVICE, root) == (1, 14)
+    paths = {key: value + "-other" for key, value in paths.items()}
+    with pytest.raises(ValueError, match="唯一在线 UVC"):
+        capture.usb_location_from_physical_port(PHYSICAL_DEVICE, root)
+
+
+def test_missing_video_node_falls_back_to_usb_location(monkeypatch, tmp_path):
+    """无需视频节点也能把准确的 USB 地址交给 libuvc。"""
+    calls = []
+
+    def locate(device):
+        calls.append(device)
+        return (1, 14)
+
+    monkeypatch.setattr(capture, "usb_location_from_physical_port", locate)
+    assert capture._usb_location_from_video_device(PHYSICAL_DEVICE) == (1, 14)
+    assert calls == [PHYSICAL_DEVICE]
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(), subprocess.TimeoutExpired("udevadm", 2)])
+def test_usb_port_query_failure_does_not_select_another_camera(monkeypatch, tmp_path, error):
+    """udev 工具缺失或超时时明确失败，不回退为任意 USB 相机。"""
+    interface = tmp_path / "1-2:1.0"
+    interface.mkdir()
+    (interface / "bInterfaceClass").write_text("0e")
+    (interface / "bInterfaceSubClass").write_text("01")
+
+    def query(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(capture.subprocess, "run", query)
+    with pytest.raises(ValueError, match="udevadm"):
+        capture.usb_location_from_physical_port(PHYSICAL_DEVICE, tmp_path)

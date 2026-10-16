@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import re
+import subprocess
 import threading
 import time
 from typing import Any, Callable
@@ -47,6 +48,40 @@ def _usb_id(value: Any) -> int:
     return int(value)
 
 
+def usb_location_from_physical_port(
+    video_device: str, usb_sysfs_root: Path = Path("/sys/bus/usb/devices"),
+) -> tuple[int, int]:
+    """视频节点丢失时，按 udev 物理端口精确定位仍在线的 UVC 控制接口。"""
+    if not is_physical_video_device_path(video_device):
+        raise ValueError(f"视频设备必须使用 /dev/v4l/by-path/*-video-index0：{video_device}")
+    expected_path = Path(video_device).name.removesuffix("-video-index0")
+    matches = []
+    for interface in usb_sysfs_root.glob("*:*"):
+        try:
+            if ((interface / "bInterfaceClass").read_text().strip() != "0e" or
+                    (interface / "bInterfaceSubClass").read_text().strip() != "01"):
+                continue
+            result = subprocess.run(
+                ["udevadm", "info", "--query=property", f"--path={interface}"],
+                check=True, capture_output=True, text=True, timeout=2,
+            )
+            properties = dict(line.split("=", 1) for line in result.stdout.splitlines()
+                              if "=" in line)
+            if properties.get("ID_PATH") != expected_path:
+                continue
+            device = interface.resolve(strict=True).parent
+            matches.append((int((device / "busnum").read_text().strip()),
+                            int((device / "devnum").read_text().strip())))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+    if len(matches) != 1:
+        raise ValueError(
+            f"视频节点 {video_device} 不存在或无法解析，且该物理端口未找到唯一在线 UVC 相机；"
+            "请检查 USB 连接及 udevadm 是否可用"
+        )
+    return matches[0]
+
+
 def _usb_location_from_video_device(
     video_device: str, sysfs_root: Path = Path("/sys/class/video4linux"),
     device_root: Path = Path("/dev"), by_path_root: Path = BY_PATH_ROOT,
@@ -59,8 +94,16 @@ def _usb_location_from_video_device(
         )
     try:
         resolved = Path(video_device).resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise ValueError(f"视频设备 {video_device} 不存在或无法解析") from error
+    except (OSError, RuntimeError):
+        try:
+            location = usb_location_from_physical_port(video_device)
+        except ValueError as error:
+            raise ValueError(f"视频设备 {video_device} 不存在或无法解析；{error}") from error
+        logging.warning(
+            "视频节点 %s 缺失，按相同物理端口连接在线 USB 相机 %s；"
+            "可能是此前 libuvc 采集退出后内核驱动未恢复", video_device, location,
+        )
+        return location
     if resolved.parent != device_root.resolve() or not (
         resolved.name.startswith("video") and resolved.name[5:].isdigit()
     ):

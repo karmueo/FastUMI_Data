@@ -111,6 +111,44 @@ def test_missing_camera_fails_before_start():
         mod._launch_hardware(context(mod))
 
 
+@pytest.mark.parametrize('mode', ['raw', 'jpeg'])
+def test_unbound_camera_can_start_by_physical_usb_port(monkeypatch, mode):
+    """节点缺失但相同物理端口仍在线时，允许 libuvc 恢复采集。"""
+    mod = module()
+    calls = []
+    device = '/dev/v4l/by-path/pci-missing-usb-0:4.2:1.0-video-index0'
+    monkeypatch.setattr(mod, 'usb_location_from_physical_port',
+                        lambda path: calls.append(path) or (1, 14))
+    monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: (package, arguments))
+    actions = mod._launch_hardware(context(
+        mod, start_arm='false', start_gripper='false', start_recorder='false',
+        wrist_video_device=device, wrist_camera_mode=mode))
+    assert calls == [device]
+    assert actions[0][1]['video_device'] == device
+
+
+def test_h264_still_requires_video_node(monkeypatch):
+    """V4L2 后端不能使用缺失的视频节点。"""
+    mod = module()
+    with pytest.raises(ValueError, match='H.264'):
+        mod._launch_hardware(context(
+            mod, wrist_camera_mode='h264',
+            wrist_video_device='/dev/v4l/by-path/pci-missing-video-index0'))
+
+
+def test_disconnected_camera_fails_before_start(monkeypatch):
+    """USB 端口本身离线时，仍在启动其他硬件前失败。"""
+    mod = module()
+
+    def missing(_device):
+        raise ValueError('USB 离线')
+
+    monkeypatch.setattr(mod, 'usb_location_from_physical_port', missing)
+    with pytest.raises(ValueError, match='末端相机不可用.*USB 离线'):
+        mod._launch_hardware(context(
+            mod, wrist_video_device='/dev/v4l/by-path/pci-missing-video-index0'))
+
+
 def test_wrist_decoder_override_is_forwarded(monkeypatch, tmp_path):
     mod = module()
     device = tmp_path / 'camera-video-index0'

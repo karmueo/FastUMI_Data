@@ -15,7 +15,9 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from fastumi_usb_camera.capture import is_physical_video_device_path
+from fastumi_usb_camera.capture import (
+    is_physical_video_device_path, usb_location_from_physical_port,
+)
 from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 
 
@@ -87,8 +89,15 @@ def _launch_hardware(context):
     actions = []
     if camera_enabled:
         device = LaunchConfiguration('wrist_video_device').perform(context)
-        if not is_physical_video_device_path(device) or not Path(device).exists():
+        if not is_physical_video_device_path(device):
             raise ValueError(f'末端相机必须指定存在的 /dev/v4l/by-path/*-video-index0: {device}')
+        if not Path(device).exists():
+            if mode == 'h264':
+                raise ValueError(f'末端相机 H.264 模式需要存在的 V4L2 视频节点: {device}')
+            try:
+                usb_location_from_physical_port(device)
+            except ValueError as error:
+                raise ValueError(f'末端相机不可用: {error}') from error
         share = Path(get_package_share_directory('fastumi_usb_camera'))
         camera_arguments = {
             'config': str(share / 'config/usb_camera_1280_960.yaml'),
