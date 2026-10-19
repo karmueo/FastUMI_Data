@@ -3,6 +3,8 @@ collection_node:
   ros__parameters:
     # 数据集根目录；相对路径相对于启动目录。内含暂存区 .staging 和回收区 .trash。
     dataset_root: dataset
+    # 标定模式允许缺少夹爪反馈；正式任务必须保持 false。
+    calibration_mode: false
     # 图像消息模式：raw（sensor_msgs/Image）、compressed（JPEG/PNG 的
     # sensor_msgs/CompressedImage）或 h264（无 B 帧、每包一个访问单元的
     # ffmpeg_image_transport_msgs/FFMPEGPacket）。MCAP 原样保存收到的消息。

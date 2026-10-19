@@ -580,3 +580,51 @@ def test_image_publisher_incompatibility_blocks_start(
     finally:
         bench.close()
         rclpy.shutdown()
+
+
+@pytest.mark.parametrize("calibration_mode", [False, True])
+@pytest.mark.parametrize("image_mode", ["raw", "compressed"])
+def test_missing_gripper_is_optional_only_in_calibration_mode(
+    tmp_path, calibration_mode, image_mode
+):
+    """使用无发布者的夹爪话题验证真实服务预检，并回读标定模式保存的 MCAP。"""
+    rclpy.init()
+    bench = _Rig(
+        tmp_path / "dataset", None, image_mode=image_mode,
+        node_arguments=(
+            "-p", f"calibration_mode:={str(calibration_mode).lower()}",
+            "-p", "gripper_state_topic:=/calibration_test/no_gripper",
+        ),
+    )
+    try:
+        bench.wait_for(
+            lambda: bench.status().image.received >= 70
+            and bench.status().tracker_tracking_ok,
+            timeout_s=30.0,
+        )
+        if not calibration_mode:
+            result = bench.start("missing-gripper")
+            assert not result.accepted and result.code == "PREFLIGHT_FAILED"
+            assert "夹爪话题没有发布者" in result.message
+            assert not bench.status().can_start
+            return
+        bench.wait_for(lambda: bench.status().can_start, timeout_s=30.0)
+        started = bench.start("calibration-start", task="gripper")
+        assert started.accepted and started.completed
+        bench.wait_for(lambda: bench.status().image_messages >= 10)
+        saved = bench.modify("stop_and_save", "calibration-save", started.collection_uuid)
+        assert saved.accepted and saved.completed
+        session_path = next(bench.root.glob("gripper/*/session.yaml"))
+        manifest = yaml.safe_load(session_path.read_text())
+        assert manifest["calibration_mode"] is True
+        assert manifest["message_counts"]["image"] > 0
+        assert manifest["message_counts"]["tracker_pose"] > 0
+        assert manifest["message_counts"]["gripper_state"] == 0
+        _, messages = _read_bag(session_path.parent / manifest["bag_uri"])
+        assert messages
+        quality = yaml.safe_load((session_path.parent / "quality.yaml").read_text())
+        assert quality["required_streams"] == ["image", "tracker"]
+        assert not any(code.startswith("GRIPPER_") for code in quality["alarms"])
+    finally:
+        bench.close()
+        rclpy.shutdown()

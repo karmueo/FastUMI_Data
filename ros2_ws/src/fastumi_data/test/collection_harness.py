@@ -123,12 +123,13 @@ def make_harness(
     backend_factory=None,
     uuids: Optional[list] = None,
     image_check=None,
+    health_config: Optional[HealthConfig] = None,
 ) -> Harness:
     """创建已取得根目录锁、预检即可通过的控制器。"""
     clock = Clock()
     resolved_config = config or CollectionConfig(min_free_disk_bytes=0)
     health = CollectionHealthMonitor(
-        HealthConfig(image_mode=resolved_config.topics.image_mode),
+        health_config or HealthConfig(image_mode=resolved_config.topics.image_mode),
         lambda: clock.mono,
         lambda: clock.wall,
     )

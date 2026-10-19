@@ -737,3 +737,26 @@ def test_state_enum_values_match_interface_constants() -> None:
 
     for state in CollectionState:
         assert getattr(CollectionStatus, f"STATE_{state.name}") == state.value
+
+
+def test_calibration_record_without_gripper_saves_mode_and_quality(tmp_path) -> None:
+    """标定模式完成录制保存并记录模式，缺少夹爪不会污染质量报警。"""
+    from fastumi_data.collection_health import GRIPPER, HealthConfig
+
+    harness = make_harness(tmp_path, health_config=HealthConfig(calibration_mode=True))
+    try:
+        harness.discovered[GRIPPER] = False
+        identifier = _start(harness, task="gripper")
+        _push_image(harness, b"calibration-image")
+        result = harness.controller.stop_and_save("save-calibration", identifier)
+        assert result.accepted and result.completed
+        destination = harness.storage.find_saved(identifier)
+        manifest = yaml.safe_load((destination / "session.yaml").read_text())
+        quality = yaml.safe_load((destination / "quality.yaml").read_text())
+        assert manifest["calibration_mode"] is True
+        assert quality["calibration_mode"] is True
+        assert quality["required_streams"] == ["image", "tracker"]
+        assert not manifest["quality"]["has_alarms"]
+    finally:
+        harness.controller.shutdown()
+        harness.storage.release()

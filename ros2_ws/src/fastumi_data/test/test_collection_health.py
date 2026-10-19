@@ -442,3 +442,55 @@ def test_single_dropped_frame_raises_gap_alarm() -> None:
     _feed(monitor, clock, 2)
 
     assert "IMAGE_GAP" in monitor.snapshot(ALL_FOUND).alarms
+
+
+def test_calibration_mode_requires_only_image_and_tracker() -> None:
+    """标定模式允许无夹爪且不产生夹爪报警，图像配对仅依赖 Tracker。"""
+    clock = _Clock()
+    monitor = _monitor(clock, calibration_mode=True, expected_image_rate_hz=30.0,
+                       expected_gripper_rate_hz=30.0)
+    _feed(monitor, clock, 90, gripper=False)
+    snapshot = monitor.snapshot({IMAGE: True, TRACKER: True, GRIPPER: False})
+    assert not preflight_issues(snapshot, monitor.config)
+    assert snapshot.image.matched and snapshot.tracker.matched
+    assert not snapshot.gripper.valid
+    assert not any(code.startswith("GRIPPER_") for code in snapshot.alarms)
+    # 相同输入在正式任务模式下仍被夹爪预检阻止。
+    codes = {issue.code for issue in preflight_issues(snapshot, HealthConfig())}
+    assert "GRIPPER_NOT_DISCOVERED" in codes
+    # 标定模式不会绕过图像/Tracker 缺失与过期检查。
+    missing = monitor.snapshot({IMAGE: False, TRACKER: False, GRIPPER: False})
+    codes = {issue.code for issue in preflight_issues(missing, monitor.config)}
+    assert codes == {"IMAGE_NOT_DISCOVERED", "TRACKER_NOT_DISCOVERED"}
+    clock.advance(1500)
+    stale = monitor.snapshot(ALL_FOUND)
+    codes = {issue.code for issue in preflight_issues(stale, monitor.config)}
+    assert codes == {"IMAGE_STALE", "TRACKER_STALE"}
+
+
+def test_calibration_mode_keeps_image_rate_and_tracker_validity_checks() -> None:
+    """标定模式仍要求完整图像频率窗口和有效 Tracker。"""
+    clock = _Clock()
+    monitor = _monitor(clock, calibration_mode=True, expected_image_rate_hz=30.0)
+    _feed(monitor, clock, 3, gripper=False)
+    assert "IMAGE_RATE_WINDOW_INCOMPLETE" in _issue_codes(monitor, monitor.config)
+    monitor.observe_tracker_status(True, False, 0)
+    assert "TRACKER_INVALID" in _issue_codes(monitor, monitor.config)
+
+
+def test_calibration_mode_ignores_invalid_gripper_but_reports_low_image_rate() -> None:
+    """夹爪无效不会阻止标定录制，图像持续低频仍阻止开始并产生报警。"""
+    clock = _Clock()
+    monitor = _monitor(clock, calibration_mode=True, expected_image_rate_hz=30.0,
+                       expected_gripper_rate_hz=30.0)
+    _feed(monitor, clock, 90, gripper_valid=False)
+    assert not _issue_codes(monitor, monitor.config)
+    assert not any(code.startswith("GRIPPER_") for code in monitor.snapshot(ALL_FOUND).alarms)
+    # 将图像降到约 10 Hz，持续超过频率窗口和低频报警保持时间。
+    for _ in range(60):
+        _feed(monitor, clock, 1, gripper_valid=False)
+        clock.advance(67)
+        snapshot = monitor.snapshot(ALL_FOUND)
+    assert "IMAGE_LOW_RATE" in _issue_codes(monitor, monitor.config)
+    assert "IMAGE_LOW_RATE" in snapshot.alarms
+    assert not any(code.startswith("GRIPPER_") for code in snapshot.alarms)

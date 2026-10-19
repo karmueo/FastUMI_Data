@@ -38,28 +38,15 @@
 
 默认已安装对应 ROS 2、`uv` 和 GPU/硬件驱动。UMI 端还需启动 SteamVR，确认基站、Tracker 正常连接，并准备 OpenVR SDK；见 [Tracker 环境说明](../ros2_ws/src/vive_tracker/README.md)。
 
-**每个操作终端先复制本块**，修改根目录与 Tracker 序列号；各主机保持相同 `TASK`、`RUN_ID`、`CALIB_ID`。路径使用绝对路径，示例中的设备、IP、用户和路径均须替换为实际值。重复实验更换 ID，保留原始数据。
+公共变量统一保存在仓库根目录的 `.env`。首次使用时执行 `cp -n .env.example .env`，按[模板中的中文注释](../.env.example)填写本机路径和设备信息；实际 `.env` 已被 Git 忽略。各主机保持相同 `TASK`、`RUN_ID`、`CALIB_ID`，重复实验更换 ID，保留原始数据。
+
+**每个新终端在仓库根目录执行：**
 
 ```bash
-export FASTUMI_ROOT=/absolute/path/to/FastUMI_Data
-export TASK=pick_place
-export RUN_ID=pick_place_v1
-export CALIB_ID=umi_v1
-export TRACKER_SERIAL=LHR-XXXXXXXX
-export ROS_DOMAIN_ID=42
-
-export CALIB_DIR="$FASTUMI_ROOT/dataset/calibration/$CALIB_ID"
-export UMI_CAMERA_YAML="$CALIB_DIR/umi_camera.yaml"
-export ARM_CAMERA_YAML="$CALIB_DIR/arm_camera.yaml"
-export TARGET_YAML="$CALIB_DIR/target.yaml"
-export TRAIN_URDF="$CALIB_DIR/rm_75.urdf"
-export COLLECT_ROOT="$FASTUMI_ROOT/dataset/umi"
-export TASK_INPUT="$COLLECT_ROOT/$TASK"
-export CONVERT_DIR="$FASTUMI_ROOT/dataset/processed/$RUN_ID"
-export RUN_DIR="$FASTUMI_ROOT/dataset/dp_runs/$RUN_ID"
-export WLL_ROOT=/absolute/path/to/wll
-cd "$FASTUMI_ROOT"
+source .env
 ```
+
+修改 `.env` 后需在各终端重新加载，已运行的进程需重启。ROS 和虚拟环境仍按后续章节加载；Jetson 部署章节中的专用路径赋值保留，加载公共配置后再执行。下文示例中的设备、IP、用户和路径均须替换为实际值。
 
 终端标识：**U1** 为 UMI 设备/面板，**U2** 为录包或服务调用，**U3** 为离线处理；**T** 为训练机；**J1** 为 Jetson 硬件，**J2** 为推理，**J3** 为任务服务。一个持续运行的进程占用一个终端。
 
@@ -137,75 +124,125 @@ Jetson 上 `.venv-numpy1` 负责 ROS/图像与构建，`.venv-numpy2` 运行 Pla
 
 ### 1.4 准备本次标定文件
 
-**位置：采集 PC。** 先准备两台实际相机的内参、实际标定板参数及后续部署使用的 URDF：
+**位置：采集 PC。** 当前相机默认使用以下内参，并复制到本次标定目录保存：
+
+- 手持 UMI 相机：[UmiCalib.yaml](../ros2_ws/src/fastumi_usb_camera/config/UmiCalib.yaml)。
+- 机械臂末端相机：[EndEffectorCalib.yaml](../ros2_ws/src/fastumi_usb_camera/config/EndEffectorCalib.yaml)。
+
+标定板配置统一放在 `config/calibration/`，`.env` 中的 `TARGET_YAML` 默认直接指向 45 mm 棋盘格配置：
+
+```bash
+export TARGET_YAML="$FASTUMI_ROOT/config/calibration/checkerboard_11x8_45mm.yaml"
+```
+
+| 配置文件 | 对应标定板 |
+| --- | --- |
+| [checkerboard_11x8_45mm.yaml](../config/calibration/checkerboard_11x8_45mm.yaml)（默认） | 11×8 内角点棋盘格，格长 45 mm |
+| [checkerboard_11x8.yaml](../config/calibration/checkerboard_11x8.yaml) | 11×8 内角点棋盘格，格长 30 mm |
+| [april_6x6.yaml](../config/calibration/april_6x6.yaml) | 6×6 AprilGrid，标签边长 55 mm，`tagSpacing` 为 0.3 |
+
+按实际标定板选择配置；需要切换时修改 `.env` 中的 `TARGET_YAML`，在仓库根目录重新执行 `source .env`。此文件直接供标定工具读取，无需复制到 `$CALIB_DIR`。
+
+准备相机内参及后续部署使用的 URDF，并检查所选标定板配置存在：
 
 ```bash
 mkdir -p "$CALIB_DIR" "$COLLECT_ROOT"
-cp -n /absolute/path/to/actual_umi_camera.yaml "$UMI_CAMERA_YAML"
-cp -n /absolute/path/to/actual_arm_camera.yaml "$ARM_CAMERA_YAML"
-cp -n /absolute/path/to/actual_target.yaml "$TARGET_YAML"
+cp -n "$FASTUMI_ROOT/ros2_ws/src/fastumi_usb_camera/config/UmiCalib.yaml" "$UMI_CAMERA_YAML"
+cp -n "$FASTUMI_ROOT/ros2_ws/src/fastumi_usb_camera/config/EndEffectorCalib.yaml" "$ARM_CAMERA_YAML"
+test -f "$TARGET_YAML"
 cp -n "$FASTUMI_ROOT/assets/rm_75.urdf" "$TRAIN_URDF"
 sha256sum "$TRAIN_URDF"
 ```
+
+**已有夹爪开合度标定时，可将标定文件复制到 `$CALIB_DIR`。** 默认使用仓库中的 [gripper_calibration.yaml](../ros2_ws/src/gripper_openness/config/gripper_calibration.yaml)，先确认其适用于当前夹爪、标签安装和相机配置：
+
+```bash
+cp --update=none \
+  "$FASTUMI_ROOT/ros2_ws/src/gripper_openness/config/gripper_calibration.yaml" \
+  "$CALIB_DIR/gripper_calibration.yaml"
+```
+
+使用其他已验收标定文件时，替换上面的源路径；目标文件已存在时会跳过复制。复制并确认有效后，可按第 2.1.2 节启用夹爪估计。尚无适用标定文件时跳过此步，按第 2.1.1 节采集图像，再按第 3.1 节生成标定结果；如需重新标定，使用新的 `CALIB_ID`，避免已有文件被 `overwrite:=false` 拒绝覆盖。
 
 | 文件 | 必查内容 |
 | --- | --- |
 | 相机内参 | 模型、畸变模型、分辨率、内参和畸变系数对应实际相机；`wll` 使用 `cam0` 格式。夹爪标定支持 `cam0` 或 `rgb` |
 | 标定板 | 棋盘格填内角点数量和米制格长；AprilGrid 填实际标签数、尺寸、间距 |
+| 夹爪开合度标定（可选） | 标签 ID、尺寸、安装位置和相机配置与当前装置一致，实测全闭接近 0、全开接近 1 |
 | URDF | 训练、导出、部署传递同一份文件，保留字节和 SHA-256；更换文件时从转换阶段重新指定 |
 
-现有 YAML 只作格式参考；相机型号、镜头或分辨率变化后应重新标定内参。内参生成见 [相机标定说明](../ros2_ws/src/fastumi_camera_calibration/README.md)。`wll` 的相机、标定板格式见其 `README.md`。
+**更换任一相机，或修改其镜头、采集分辨率后，必须重新标定对应相机的内参，并使用新标定结果替换上面的对应复制源文件。** 重新标定时更换 `CALIB_ID` 并重新加载 `.env`，将新结果保存到新的标定目录；`cp -n` 会保留已有文件，不会覆盖旧内参。内参生成见 [相机标定说明](../ros2_ws/src/fastumi_camera_calibration/README.md)。`wll` 的相机、标定板格式见其 `README.md`。
 
 ## 2. 采集标定数据
 
-### 2.1 UMI：启动设备，独立录制 MCAP
+### 2.1 UMI：通过面板采集标定数据
 
-**U1：采集 PC，已加载 Jazzy/NumPy 1 环境。** 先启动 SteamVR，使用实际 USB 物理端口：
+**U1：采集 PC，已加载 `.env` 和 Jazzy/NumPy 1 环境。** 先启动 SteamVR，确认 `UMI_VIDEO_DEVICE` 对应实际 USB 物理端口。首次使用新增的标定模式前，按第 1.2 节重新构建 `fastumi_data` 并加载工作区。
+
+#### 2.1.1 尚无夹爪开合度标定：先采集标定图像
+
+首次使用时，先采集夹爪闭合与全开的图像，再按第 3.1 节生成 `gripper_calibration.yaml`。此时设置 `start_gripper:=false`，关闭夹爪估计。 同时显式开启 `calibration_mode:=true`，允许没有夹爪反馈时通过面板开始录制；图像、Tracker、磁盘和写盘检查仍然生效。
 
 ```bash
-ls -l /dev/v4l/by-path/*-video-index0
-export UMI_VIDEO_DEVICE=/dev/v4l/by-path/实际端口-video-index0
 ros2 launch fastumi_data fastumi_collection.launch.py \
-  dataset_root:="$COLLECT_ROOT" \
-  start_camera:=true start_tracker:=true start_gripper:=false \
-  tracker_serial:="$TRACKER_SERIAL" video_device:="$UMI_VIDEO_DEVICE" \
-  image_mode:=compressed camera_fps:=30 camera_timestamp_mode:=v4l2_buffer
+  dataset_root:="$CALIB_DIR" \
+  calibration_mode:=true \
+  start_camera:=true \
+  start_tracker:=true \
+  start_gripper:=false \
+  tracker_serial:="$TRACKER_SERIAL" \
+  video_device:="$UMI_VIDEO_DEVICE" \
+  image_mode:=compressed \
+  camera_fps:=30
 ```
 
-此时面板可能提示缺少有效夹爪反馈，**标定包使用下方独立录包命令**，无需点击面板开始。这样首次夹爪标定也能录包。
+面板夹爪栏显示无数据属于正常现象。按下方共用操作录制 `gripper` 数据，再执行第 3.1 节标定；此模式也可录制 Tracker—相机标定数据。
 
-**U2：检查设备，再录 Tracker—相机标定包。** 每条 `hz` 查看后按 Ctrl+C，继续下一条：
+#### 2.1.2 已有夹爪开合度标定：启用夹爪估计采集
+
+已生成并检查适用于当前装置的 `gripper_calibration.yaml` 后，使用下列命令。只有原始录包时，需先完成第 3.1 节标定。切换前先在面板停止并保存当前记录，再在 U1 按 Ctrl+C 退出旧 launch，避免重复启动设备。
 
 ```bash
-ros2 topic hz /umi_camera/image_raw/compressed
-ros2 topic hz /vive_tracker/pose
-ros2 topic echo --once /vive_tracker/status
-mkdir -p "$CALIB_DIR/tracker_camera"
-ros2 bag record -s mcap -o "$CALIB_DIR/tracker_camera/bag" \
-  /umi_camera/image_raw/compressed /umi_camera/image_raw/time_reference \
-  /vive_tracker/pose /vive_tracker/status /tf_static
+ros2 launch fastumi_data fastumi_collection.launch.py \
+  dataset_root:="$CALIB_DIR" \
+  calibration_mode:=true \
+  start_camera:=true \
+  start_tracker:=true \
+  start_gripper:=true \
+  tracker_serial:="$TRACKER_SERIAL" \
+  video_device:="$UMI_VIDEO_DEVICE" \
+  camera_calibration_path:="$UMI_CAMERA_YAML" \
+  gripper_calibration_path:="$CALIB_DIR/gripper_calibration.yaml" \
+  image_mode:=compressed \
+  camera_fps:=30
 ```
 
-保持标定板静止、相机与 Tracker 刚性固定，让标定板清晰出现在不同图像位置，采集多个方向的平移和旋转。避免只有单轴运动、运动模糊或 Tracker 遮挡；完成后 Ctrl+C 等待录包正常关闭。
+若使用其他已验收批次，将 `gripper_calibration_path` 替换为对应文件路径。此命令仍用于采集标定数据，夹爪反馈为可选输入，实际发布的反馈会一并录制。正式任务采集使用第 4 节命令，恢复完整预检。
 
-**同一 U2 终端：另录夹爪开合标定包。**
+**两种方式共用的面板操作与输出检查**
+
+
+在 RViz2 的“数据采集”面板中依次录制两类数据，任务名决定保存子目录：
+
+1. **夹爪开合标定：任务名填写 `gripper`。** 确认图像清晰、Tracker 状态正常，退出文本输入框后按 Space 开始。让两枚 ArUco 标签完整可见，在机械闭合与全开位置各停留约 1 秒，往返 2～3 次，再按 Space 停止并保存。默认标签 ID 为 0、1，边长 16 mm，实物不同时须同步调整标定/预测参数。
+2. **Tracker—相机标定：任务名填写 `tracker_camera`。** 按 Space 开始，保持标定板静止、相机与 Tracker 刚性固定，让标定板清晰出现在不同图像位置，采集多个方向的平移和旋转，再按 Space 停止并保存。避免只有单轴运动、运动模糊或 Tracker 遮挡。
+
+也可点击面板对应按钮。Esc 停止并取消当前记录（需确认），Enter 保存待保存记录。输入框内快捷键用于文字输入，退出输入后再操作；保存完成后才开始下一条记录。
+
+面板分别保存到 `$CALIB_DIR/gripper/<记录目录>/` 和 `$CALIB_DIR/tracker_camera/<记录目录>/`；每条记录的 MCAP 位于 `raw/bag/`，同时保存 `session.yaml`、`quality.yaml` 和配置快照。`session.yaml` 中的 `calibration_mode: true` 标识该记录用于标定，夹爪缺失不会被记作质量报警。
+
+**U2/U3：从面板记录列表确认实际目录名，填写下列路径，后续第 3 节沿用这两个变量。** 在另一个终端做标定时也需设置；多条记录按采集内容选择，不自动选最新一条。
 
 ```bash
-mkdir -p "$CALIB_DIR/gripper"
-ros2 bag record -s mcap -o "$CALIB_DIR/gripper/bag" \
-  /umi_camera/image_raw/compressed /umi_camera/image_raw/time_reference
+export GRIPPER_BAG="$CALIB_DIR/gripper/替换为夹爪记录目录/raw/bag"
+export TRACKER_BAG="$CALIB_DIR/tracker_camera/替换为Tracker记录目录/raw/bag"
+ros2 bag info "$GRIPPER_BAG"
+ros2 bag info "$TRACKER_BAG"
 ```
 
-让两枚 ArUco 标签完整可见，在机械闭合与全开位置**各停留约 1 秒**，往返 2～3 次，再 Ctrl+C。默认标签 ID 为 0、1，边长 16 mm，实物不同时须同步调整标定/预测参数。
+确认 JPEG 图像为 `sensor_msgs/msg/CompressedImage`，图像、Tracker Pose/Status 均有非零计数；状态中序列号与目标设备一致，连接、位姿有效且跟踪为 `RUNNING_OK`。首次夹爪标定记录允许夹爪消息数为 0。标定和正式采集保持默认 `v4l2_buffer` 时间戳模式，不使用仿真时间。
 
-**输出与检查：**
-
-```bash
-ros2 bag info "$CALIB_DIR/tracker_camera/bag"
-ros2 bag info "$CALIB_DIR/gripper/bag"
-```
-
-确认 JPEG 图像为 `sensor_msgs/msg/CompressedImage`，Tracker 包包含非零计数的 Pose/Status；状态中序列号与目标设备一致，连接、位姿有效且跟踪为 `RUNNING_OK`。标定和正式采集保持相同相机时间戳模式，不使用仿真时间。
+完成第 3 节标定后，停止本次 launch，按第 4 节以 `calibration_mode:=false` 和 `start_gripper:=true` 重启，正式任务恢复完整预检。
 
 ### 2.2 机械臂端：截图与位姿采样
 
@@ -244,7 +281,7 @@ rsync -av --ignore-existing "$CALIB_DIR/arm" "$CALIB_HOST:$PC_CALIB_DIR/"
 
 ```bash
 ros2 launch gripper_openness gripper_calibration.launch.py \
-  source_mode:=mcap mcap_path:="$CALIB_DIR/gripper/bag" \
+  source_mode:=mcap mcap_path:="$GRIPPER_BAG" \
   mcap_image_topic:=/umi_camera/image_raw/compressed \
   camera_calibration_path:="$UMI_CAMERA_YAML" \
   roi_ratios:="[0.0, 0.0, 1.0, 1.0]" \
@@ -264,13 +301,13 @@ cat "$CALIB_DIR/gripper_calibration.yaml"
 
 ```bash
 cd "$WLL_ROOT"
-export TRACKER_MCAP="$CALIB_DIR/tracker_camera/bag/bag_0.mcap"
+export TRACKER_MCAP="$TRACKER_BAG/bag_0.mcap"
 test -f "$TRACKER_MCAP"
-test ! -e "$CALIB_DIR/tracker_camera/bag/cam0" && \
+test ! -e "$TRACKER_BAG/cam0" && \
 python extract_vive_tracker.py "$TRACKER_MCAP" \
   --pose-topic /vive_tracker/pose \
   --image-topic /umi_camera/image_raw/compressed
-head -n 5 "$CALIB_DIR/tracker_camera/bag/vive_tracker.txt"
+head -n 5 "$TRACKER_BAG/vive_tracker.txt"
 ```
 
 若文件名不同，用 `ros2 bag info` 中的文件名替换。提取输出在 MCAP 同目录：`vive_tracker.txt` 与 `cam0/*.jpg`。使用消息头时间戳，图像和轨迹计数均须非零；提取会覆盖同名轨迹和图像，不同录包使用独立目录。
@@ -279,8 +316,8 @@ head -n 5 "$CALIB_DIR/tracker_camera/bag/vive_tracker.txt"
 test ! -e "$CALIB_DIR/T_cam_tracker.yaml" && \
 LD_LIBRARY_PATH="$WLL_ROOT/binlibs/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 "$WLL_ROOT/binlibs/bin/run_calib_handeye_continuous" \
-  --hand="$CALIB_DIR/tracker_camera/bag/vive_tracker.txt" \
-  --eye="$CALIB_DIR/tracker_camera/bag/cam0" \
+  --hand="$TRACKER_BAG/vive_tracker.txt" \
+  --eye="$TRACKER_BAG/cam0" \
   --target="$TARGET_YAML" --cams="$UMI_CAMERA_YAML" \
   --config="$WLL_ROOT/config/config_calib_handeye_continuous.yaml" \
   --output="$CALIB_DIR/T_cam_tracker.yaml" --debug
@@ -323,13 +360,13 @@ T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7
 
 ## 4. 采集任务数据
 
-**U1：先停止第 2 节的设备 launch 和独立录包，再用已标定配置重启。**
+**U1：先在面板停止并保存第 2 节的标定记录，再退出设备 launch，用已标定配置重启。正式任务显式设置 `calibration_mode:=false`，保留完整预检。**
 
 ```bash
 cd "$FASTUMI_ROOT"
-export UMI_VIDEO_DEVICE=/dev/v4l/by-path/实际端口-video-index0
 ros2 launch fastumi_data fastumi_collection.launch.py \
   dataset_root:="$COLLECT_ROOT" \
+  calibration_mode:=false \
   start_camera:=true start_tracker:=true start_gripper:=true \
   tracker_serial:="$TRACKER_SERIAL" video_device:="$UMI_VIDEO_DEVICE" \
   image_mode:=compressed camera_fps:=30 camera_timestamp_mode:=v4l2_buffer \
@@ -472,7 +509,7 @@ export TRAIN_REPO=/absolute/path/to/FastUMI_Data
 rsync -av --ignore-existing "$CONVERT_DIR" "$TRAIN_HOST:$TRAIN_REPO/dataset/processed/"
 ```
 
-训练机按第 1.1 节设置本机根目录后，重新运行上面的校验命令。
+训练机按第 1.1 节填写本机 `.env` 并加载后，重新运行上面的校验命令。
 
 ## 7. 可选：Rerun 查看
 
@@ -611,7 +648,7 @@ rsync -av --ignore-existing "$RUN_DIR/checkpoints/best.ckpt" "$RUN_DIR/rm_75.urd
   "$JETSON_HOST:$JETSON_REPO/dataset/deploy/$RUN_ID/"
 ```
 
-**J1/J2/J3：各新终端先设置第 1.1 节变量，然后加载：**
+**J1/J2/J3：各新终端先在仓库根目录执行 `source .env`，然后加载：**
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -827,7 +864,7 @@ J3 使用第 9.4 节相同服务开始/停止任务，检查 16 个动作、`bas
 
 | 现象 | 优先检查 |
 | --- | --- |
-| 首次标定包无法从面板开始 | 夹爪尚未标定，按第 2 节独立录包；正式任务仍通过完整预检 |
+| 首次标定包无法从面板开始 | 确认启用 `calibration_mode:=true`、`start_gripper:=false`，并检查图像与 Tracker；正式任务使用 `calibration_mode:=false` 保留完整预检 |
 | 图像/夹爪低频、丢帧 | 光照与曝光、设备 30 Hz 档位、DDS 配置、在线解码负载；检查源频率和接收频率 |
 | 夹爪标定失败或范围很小 | 内参分辨率、标签尺寸/ID、ROI、双码完整性、闭合/全开端是否各停留约 1 秒 |
 | 标定二进制缺少共享库 | 使用 `WLL_ROOT/binlibs/libs` 的动态库路径；按外部工程说明检查依赖 |

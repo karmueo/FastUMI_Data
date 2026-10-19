@@ -326,6 +326,7 @@ class CollectionNode(Node):
         )
         health = CollectionHealthMonitor(
             HealthConfig(
+                calibration_mode=bool(self.get_parameter("calibration_mode").value),
                 image_timeout_s=float(self.get_parameter("image_timeout_s").value),
                 tracker_timeout_s=float(self.get_parameter("tracker_timeout_s").value),
                 gripper_timeout_s=float(self.get_parameter("gripper_timeout_s").value),
@@ -389,6 +390,8 @@ class CollectionNode(Node):
         """声明全部节点参数及默认值。"""
         defaults = {
             "dataset_root": "dataset",
+            # 标定采集允许缺少夹爪；正式任务默认保留完整预检。
+            "calibration_mode": False,
             "image_mode": DEFAULT_IMAGE_MODE,
             # 留空时按 image_mode 使用默认话题；显式配置优先。
             "image_topic": "",

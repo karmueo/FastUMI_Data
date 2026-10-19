@@ -902,7 +902,7 @@ class CollectionController:
             )
 
     def _start_blockers(self) -> List[Tuple[str, str]]:
-        """汇总开始前检查：三路输入、磁盘空间。"""
+        """汇总当前模式所需输入及磁盘空间的开始前检查。"""
         with self._health_lock:
             health = self._health.snapshot(self._discovery())
         try:
@@ -967,6 +967,7 @@ class CollectionController:
             "created_at": created_at.isoformat(),
             "created_at_unix": created_at.timestamp(),
             "storage_id": "mcap",
+            "calibration_mode": self._health.config.calibration_mode,
             "bag_uri": "raw/bag",
             "topics": [spec.name for spec in topics.specs()],
             "topic_map": topics.processing_topics(),
@@ -1256,6 +1257,8 @@ class CollectionController:
             image_health = self._health.snapshot(self._discovery()).image
         quality.update(
             {
+                "calibration_mode": self._health.config.calibration_mode,
+                "required_streams": list(self._health.config.required_streams),
                 "message_counts": message_counts,
                 "mean_rate_hz": rates,
                 "image_stream": {

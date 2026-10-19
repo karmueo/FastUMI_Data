@@ -523,6 +523,7 @@ def _launch_setup(context: LaunchContext) -> list:
     gripper_rate = nominal_fps if image_mode == MODE_RAW else nominal_fps / decode_every_n_frames
     parameters: dict = {
         "dataset_root": _text(context, "dataset_root"),
+        "calibration_mode": _flag(context, "calibration_mode"),
         "nominal_source_fps": nominal_fps,
         "nominal_source_fps_source": nominal_source,
         "expected_image_rate_hz": nominal_fps,
@@ -604,6 +605,12 @@ def generate_launch_description() -> LaunchDescription:
     data_share = FindPackageShare("fastumi_data")
     flag_choices = ["true", "false"]
     arguments = [
+        DeclareLaunchArgument(
+            "calibration_mode",
+            default_value="false",
+            choices=flag_choices,
+            description="标定采集模式：不要求夹爪反馈；正式任务保持 false 以执行完整预检。",
+        ),
         DeclareLaunchArgument(
             "dataset_root",
             default_value="dataset",

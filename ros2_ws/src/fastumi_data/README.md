@@ -42,6 +42,7 @@ ros2 launch fastumi_data fastumi_collection.launch.py \
 
 | launch 参数 | 默认值 | 说明 |
 | --- | --- | --- |
+| `calibration_mode` | `false` | 首次标定设为 `true`，允许没有夹爪反馈时通过面板录制；图像、Tracker、磁盘和写盘检查保留。正式任务保持 `false`。 |
 | `dataset_root` | `dataset` | 数据集根目录，含正式记录、`.staging` 暂存区和 `.trash` 回收区。 |
 | `image_mode` | `auto` | `auto` 启动本地相机时为 `compressed`（相机 JPEG 原样录制）；连接已有设备时按发布端实际消息类型订阅（探测 `image_probe_timeout_s`=5 s，探测不到按话题后缀或 `raw`）。也可显式指定 `raw`、`compressed`（JPEG/PNG）、`h264`，见下文“压缩图像与 H.264”。 |
 | `camera_fps` | `30` | 本地相机请求帧率（正整数），透传给相机子 launch 的 `fps`，三种输出模式都生效；设备协商值与请求不一致时相机节点报错，不接受静默降帧。同时作为标称源帧率写入 `session.yaml`。独立相机入口 `usb_camera.launch.py` 的默认值不变。 |
@@ -66,6 +67,23 @@ ros2 launch fastumi_data fastumi_collection.launch.py \
 
 旧的 `record_mcap:=true` 已移除：launch 不再随设备自动连续录包，传入时会报迁移提示。
 连续录包仍可使用下文的 `record_session`。
+
+### 首次标定：通过面板采集
+
+夹爪尚未标定时，显式开启标定采集模式并关闭夹爪估计：
+
+```bash
+ros2 launch fastumi_data fastumi_collection.launch.py \
+  calibration_mode:=true \
+  start_camera:=true start_tracker:=true start_gripper:=false \
+  image_mode:=compressed camera_fps:=30
+```
+
+在面板中填写任务名 `gripper`，按 Space 开始，采集夹爪闭合与全开图像，再按 Space 停止并保存；Tracker—相机标定可另用任务名 `tracker_camera` 录制。任务名决定保存子目录，录包在每条记录的 `raw/bag/` 中。已有适用的夹爪标定时可设置 `start_gripper:=true`，通过 `gripper_calibration_path` 指定该文件。
+
+`calibration_mode:=true` 仅将夹爪设为可选输入，跳过夹爪预检与夹爪相关持续报警；仍录制实际收到的夹爪消息，面板也如实显示其状态。图像/Tracker 检查、图像频率门槛、磁盘检查和写盘失败处理保持生效。`session.yaml` 与 `quality.yaml` 记录 `calibration_mode`，后者还记录 `required_streams`，便于区分标定记录与正式任务记录。
+
+正式任务必须以 `calibration_mode:=false`（默认值）重启。`start_gripper` 仅决定是否启动估计节点，单独设为 `false` 不会放宽预检，也可用于连接其他终端已启动的夹爪节点。
 
 ### 1080p 图像传输（Fast DDS 配置）
 
@@ -245,7 +263,7 @@ dataset/
 
 ### 健康监控
 
-开始前检查三路输入的发布者、新鲜度和有效性，Tracker 还要求跟踪状态为 `RUNNING_OK`；
+正式任务开始前检查三路输入的发布者、新鲜度和有效性；标定模式只要求图像和 Tracker。Tracker 还要求跟踪状态为 `RUNNING_OK`；
 默认超时图像 1 s、Tracker/夹爪 0.25 s（`config/collection.yaml`）。新鲜度使用单调接收
 时钟，静止但持续发布的 Tracker 不会被判为失效。图像与夹爪按完全相同的源时间戳配对，
 Tracker 按最近源时间戳在 30 ms 窗口内配对，无匹配时显示不可用。面板分别显示源时间差、

@@ -147,6 +147,7 @@ def test_collection_node_receives_defaults_file_and_overrides() -> None:
     assert parameters[0].endswith("/share/fastumi_data/config/collection.yaml")
     assert parameters[1] == {
         "dataset_root": "/data/umi",
+        "calibration_mode": False,
         # 外部相机未声明帧率：标称值未知，不检查绝对速率。
         "nominal_source_fps": 0.0,
         "nominal_source_fps_source": "unknown",
@@ -422,3 +423,16 @@ def test_start_camera_with_empty_video_device_auto_selects() -> None:
     camera = next(i for i in includes if _include_name(i).endswith("usb_camera.launch.py"))
 
     assert "video_device" not in dict(camera.launch_arguments)
+
+
+@pytest.mark.parametrize("calibration_mode", ["false", "true"])
+def test_calibration_mode_is_explicit_and_independent_of_gripper_start(calibration_mode) -> None:
+    """关闭夹爪节点不会隐式放宽预检；显式标定模式独立传入采集节点。"""
+    declarations, nodes, includes, context = _expand(
+        calibration_mode=calibration_mode, start_gripper="false"
+    )
+    assert perform_substitutions(context, declarations["calibration_mode"].default_value) == "false"
+    assert declarations["calibration_mode"].choices == ["true", "false"]
+    collection = next(n for n in nodes if n["executable"] == "collection_node")
+    assert collection["parameters"][1]["calibration_mode"] is (calibration_mode == "true")
+    assert not includes

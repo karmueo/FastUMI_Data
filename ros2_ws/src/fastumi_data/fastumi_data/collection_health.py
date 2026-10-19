@@ -9,6 +9,7 @@ Tracker 仍然健康。图像和有效夹爪状态另按完整的 ``rate_window_
 与排队，不应被解释为纯算法耗时。夹爪偶发单帧无效（如漏检一枚标签）不立即判为无效：
 只有即使下一帧恢复有效、相邻有效样本的源时间间隔也将超过 ``gripper_invalid_persist_s``
 时才报 ``GRIPPER_INVALID``，与离线转换的 ``max_gripper_gap_s`` 插值门限一致。
+显式标定模式仅要求图像与 Tracker，夹爪仍可观测和录制，但不阻止开始或产生报警。
 """
 
 from __future__ import annotations
@@ -70,6 +71,14 @@ class HealthConfig:
     """低频报警的触发与清除都要求条件连续保持的秒数。"""
     gripper_invalid_persist_s: float = 0.2
     """相邻有效夹爪样本允许的最大源时间间隔，超过才判为无效；0 表示单帧即无效。"""
+
+    calibration_mode: bool = False
+    """标定采集模式：夹爪为可选输入，正式任务默认要求全部三路输入。"""
+
+    @property
+    def required_streams(self) -> Tuple[str, ...]:
+        """返回当前模式必须通过预检和持续健康检查的输入。"""
+        return (IMAGE, TRACKER) if self.calibration_mode else STREAMS
 
     def expected_rate_hz(self, stream: str) -> float:
         """返回需检查绝对速率的输入的期望频率，其余为 0。"""
@@ -218,7 +227,7 @@ def preflight_issues(
     """根据快照列出开始采集前的阻塞原因：未发现、数据过期或内容无效。"""
     labels = {IMAGE: "图像", TRACKER: "Tracker", GRIPPER: "夹爪"}
     issues: List[PreflightIssue] = []
-    for name in STREAMS:
+    for name in config.required_streams:
         stream = snapshot.stream(name)
         label = labels[name]
         if not stream.discovered:
@@ -388,9 +397,10 @@ class CollectionHealthMonitor:
         image = streams[IMAGE]
         tracker = streams[TRACKER]
         gripper = streams[GRIPPER]
-        # 图像是配对基准：两路配对都成功才算匹配。
+        # 图像是配对基准；标定模式只要求 Tracker 配对。
         streams[IMAGE] = replace(
-            image, matched=tracker.matched and gripper.matched
+            image,
+            matched=tracker.matched and (self._config.calibration_mode or gripper.matched),
         )
         lag_ms = self._gripper_lag_ms()
         alarms = self._alarms(streams, lag_ms, now_mono)
@@ -614,7 +624,7 @@ class CollectionHealthMonitor:
     ) -> List[str]:
         """根据快照派生当前活动报警码。"""
         alarms: List[str] = []
-        for name in STREAMS:
+        for name in self._config.required_streams:
             stream = streams[name]
             prefix = name.upper()
             if not stream.discovered:
@@ -635,12 +645,13 @@ class CollectionHealthMonitor:
             if self._low_alarm[name]:
                 alarms.append(f"{prefix}_LOW_RATE")
         image = streams[IMAGE]
-        for other in (TRACKER, GRIPPER):
+        for other in self._config.required_streams[1:]:
             stream = streams[other]
             if image.fresh and stream.fresh and not stream.matched:
                 alarms.append(f"{other.upper()}_UNMATCHED")
         if (
-            image.fresh
+            not self._config.calibration_mode
+            and image.fresh
             and streams[GRIPPER].fresh
             and math.isfinite(gripper_lag_ms)
             and gripper_lag_ms > self._config.gripper_lag_warn_s * 1e3
