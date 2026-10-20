@@ -1,16 +1,10 @@
-# 该文件把同目录 T_cam_tracker.yaml 的原始字节绑定到标定所用 Tracker，
-# 供 convert_mcap 在转换前核对设备身份；修改外参文件后须同步更新摘要。
+# 标定外参与设备、源记录及时间戳语义的绑定。
 schema_version: 1
-# 被绑定外参文件名（同目录）及其原始字节 SHA-256。
 calibration_file: T_cam_tracker.yaml
-calibration_sha256: 1e5f2758fd102b577946124d93e769c8298b60bbcc32648314226b4649118f50
-# 标定数据来源记录中 /vive_tracker/status 全部 3747 条均为该序列号，且连接与跟踪有效。
+calibration_sha256: 56765ca2b8dfbe410dbd76280467678486d76f6a48e772b184d480f68d67cdce
 tracker_serial: LHR-B77A06A7
-source_collection_uuid: 4c5ce199-66f0-47a0-a9e4-0323373acf2a
+source_collection_uuid: 031ff1c6-084b-48d0-aa76-7a942d975357
 source_status_topic: /vive_tracker/status
-# 标定数据的图像 Header 时间戳来源；convert_mcap 要求与每条记录的时间戳来源一致。
 time_calibration_timestamp_source: v4l2_buffer_monotonic_mapped_to_ros
-time_calibration_conditions: >-
-  2026-10-13 tag_compressed_2 记录（4c5ce199），30 Hz JPEG compressed 模式，
-  图像 Header 为 V4L2 缓冲区 SOE 单调时间映射到 ROS 时间（时钟映射 gen=1 无重置），
-  约 37 s；角速度对齐残差 0.00139，偏移约 1.84 ms。
+time_offset_convention: t_camera_eq_t_tracker_plus_offset
+time_calibration_conditions: 固定板、刚性安装；原始像素拟合、时间块留出验收；详见 result.json
