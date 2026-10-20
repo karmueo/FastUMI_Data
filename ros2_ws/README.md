@@ -17,7 +17,8 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`xv_sdk_ros2`](src/xv_sdk_ros2/) | C++ 驱动包 | 将 XV 设备的 IMU、RGB、ToF 等数据发布为 ROS 2 话题，并提供图像截图功能。 |
 | [`tof_stereo_camera`](src/tof_stereo_camera/) | C++ 驱动包 | 使用随包内置的 stereo_camera SDK 发布 RGB、iTOF 深度/灰度和 IMU 数据。 |
 | [`fastumi_usb_camera`](src/fastumi_usb_camera/) | Python/C++ 相机包 | 使用 UVC 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
-| [`fastumi_bringup`](src/fastumi_bringup/) | Python 启动包 | 在 Jetson 上统一启动并回位 RM75，管理末端相机、Unitree 夹爪和录制服务。 |
+| [`fastumi_bringup`](src/fastumi_bringup/) | Python 启动包 | 在 Jetson 上统一启动并回位 RM75，管理末端相机、Unitree 夹爪和录制服务，提供 RM75 急停/回位服务。 |
+| [`fastumi_arm_keyboard`](src/fastumi_arm_keyboard/) | Python 工具包 | 在交互终端中按空格调用 RM75 急停服务、按回车调用回到初始位姿服务。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
 | [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度。 |

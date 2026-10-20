@@ -11,12 +11,13 @@ PACKAGE_NAME = "fastumi_bringup"
 setup(
     name=PACKAGE_NAME,
     version="0.1.0",
-    packages=[PACKAGE_NAME],
+    packages=[PACKAGE_NAME, f"{PACKAGE_NAME}.hand_eye"],
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE_NAME}"]),
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
-        (f"share/{PACKAGE_NAME}/config", glob("config/*.example")),
+        (f"share/{PACKAGE_NAME}/config", glob("config/*.example") + glob("config/*.yaml")),
+        (f"share/{PACKAGE_NAME}/assets", glob("assets/*.urdf")),
     ],
     install_requires=["setuptools"],
     extras_require={"test": ["pytest"]},
@@ -27,5 +28,6 @@ setup(
     license="Apache-2.0",
     entry_points={"console_scripts": [
         "keyboard_home = fastumi_bringup.keyboard_home:main",
+        "arm_control_service = fastumi_bringup.arm_control_service:main",
     ]},
 )

@@ -182,6 +182,9 @@ def _launch_hardware(context):
         recorder = _include('fastumi_recorder', 'recorder.launch.py', recorder_arguments)
     if _enabled(context, 'start_arm'):
         actions.append(_include('rm_driver', 'rm_75_driver.launch.py'))
+        if _enabled(context, 'start_arm_control'):
+            actions.append(Node(package='fastumi_bringup', executable='arm_control_service',
+                                output='screen'))
         if _enabled(context, 'move_to_initial_pose'):
             home = Node(package='rm_bringup', executable='rm_75_initial_pose',
                         output='screen', parameters=[{'initial_joint_positions': list(INITIAL_JOINT_POSITIONS)}])
@@ -204,7 +207,7 @@ def generate_launch_description():
     )
     defaults = dict(
         start_arm='true', start_gripper='true', start_wrist_camera='true', start_recorder='true',
-        move_to_initial_pose='true', enable_decoder='false', h264_encoder='hardware',
+        move_to_initial_pose='true', start_arm_control='true', enable_decoder='false', h264_encoder='hardware',
         wrist_camera_mode='jpeg',
         wrist_video_device='', wrist_width='1920',
         wrist_height='1080', start_fixed_camera='true', fixed_video_device='',

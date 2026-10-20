@@ -1,0 +1,7 @@
+# 目标关节角，按 joint1..joint7 排列，单位：度
+float64[] joint_degrees
+# MoveJ 速度百分比，1～100
+int32 speed
+---
+bool success
+string message

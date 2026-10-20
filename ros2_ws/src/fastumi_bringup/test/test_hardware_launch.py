@@ -225,6 +225,17 @@ def test_maintenance_skips_homing(monkeypatch):
     monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: package)
     actions = mod._launch_hardware(context(mod, start_wrist_camera='false', start_gripper='false',
                                           move_to_initial_pose='false'))
+    assert actions[0] == 'rm_driver'
+    assert actions[1].node_executable == 'arm_control_service'
+    assert actions[2:] == ['fastumi_recorder']
+
+
+def test_arm_control_service_can_be_disabled(monkeypatch):
+    mod = module()
+    monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: package)
+    actions = mod._launch_hardware(context(mod, start_wrist_camera='false', start_gripper='false',
+                                          move_to_initial_pose='false',
+                                          start_arm_control='false'))
     assert actions == ['rm_driver', 'fastumi_recorder']
 
 

@@ -36,6 +36,7 @@ rosidl_generate_interfaces(
   "srv/GetRecordingStatus.srv"
   "srv/ResetPolicyController.srv"
   "srv/SetNumInferenceSteps.srv"
+  "srv/MoveJoints.srv"
   "srv/ListRecordings.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs sensor_msgs trajectory_msgs
 )
