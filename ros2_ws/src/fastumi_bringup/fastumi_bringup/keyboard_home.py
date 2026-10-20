@@ -1,11 +1,8 @@
 """按空格键将 RM75 移至初始关节位姿，并将夹爪完全打开。"""
 
 import math
-import select
 import sys
-import termios
 import time
-import tty
 
 import rclpy
 from rclpy.node import Node
@@ -14,45 +11,13 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32
 
 from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
+from fastumi_bringup.terminal import TerminalKeyReader
 
 
 JOINT_NAMES = tuple(f"joint{index}" for index in range(1, 8))
 FEEDBACK_FRESHNESS_SECONDS = 0.5
 RESULT_TIMEOUT_SECONDS = 120.0
 ALREADY_AT_TARGET_TOLERANCE = 0.01
-
-
-class TerminalKeyReader:
-    """临时启用逐键输入，并在退出时恢复终端配置。"""
-
-    def __init__(self, stream):
-        self.stream = stream
-        self.original_settings = None
-
-    def __enter__(self):
-        if not self.stream.isatty():
-            raise RuntimeError("键盘回位需要交互终端；请在第二个终端运行 ros2 run")
-        fd = self.stream.fileno()
-        self.original_settings = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-        except BaseException:
-            termios.tcsetattr(fd, termios.TCSADRAIN, self.original_settings)
-            self.original_settings = None
-            raise
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        if self.original_settings is not None:
-            termios.tcsetattr(
-                self.stream.fileno(), termios.TCSADRAIN, self.original_settings
-            )
-            self.original_settings = None
-
-    def read_key(self, timeout_seconds):
-        """等待单个按键；超时返回 None。"""
-        readable, _, _ = select.select([self.stream], [], [], timeout_seconds)
-        return self.stream.read(1) if readable else None
 
 
 class KeyboardHome(Node):

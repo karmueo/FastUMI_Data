@@ -1,0 +1,6 @@
+# checkerboard.yaml
+target_type: 'checkerboard'
+targetCols: 11          # 内部角点的列数。如果是9x6的棋盘格，这里填 (9-1) = 8
+targetRows: 8          # 内部角点的行数。如果是9x6的棋盘格，这里填 (6-1) = 5
+rowSpacingMeters: 0.045 # 实际打印出的单个方格边长，单位米
+colSpacingMeters: 0.045 # 同上，正方向格子的物理边长

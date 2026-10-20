@@ -28,6 +28,7 @@ setup(
     license="Apache-2.0",
     entry_points={"console_scripts": [
         "keyboard_home = fastumi_bringup.keyboard_home:main",
+        "keyboard_hand_eye_capture = fastumi_bringup.keyboard_hand_eye_capture:main",
         "arm_control_service = fastumi_bringup.arm_control_service:main",
     ]},
 )

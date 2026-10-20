@@ -33,7 +33,8 @@ python -m colcon build --symlink-install --packages-select \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
 
-构建完成后再进行本机配置与启动。
+构建完成后再进行本机配置与启动。`fastumi_bringup` 随包安装 RM75 运动学 URDF，
+机械臂控制服务和手眼采集无需另外构建部署包 `fastumi_rm75`。
 
 ## 启动
 
@@ -162,6 +163,170 @@ ros2 run fastumi_bringup keyboard_home
 运动过程中重复按空格键不会排队。夹爪控制节点按自身限速逐步打开，回位节点不等待夹爪到位确认。
 MoveJ 失败或等待结果超过 120 秒后，节点停止接受回位命令，需检查机械臂后重启。
 
+## 急停与回位服务
+
+`start_arm:=true` 时，`hardware.launch.py` 默认同时启动 `arm_control_service`（节点名 `fastumi_arm_control`），提供三个服务：
+
+| 服务 | 类型 | 行为 |
+|---|---|---|
+| `/fastumi/arm/emergency_stop` | `std_srvs/srv/Trigger` | 立即向 `/rm_driver/move_stop_cmd` 发送轨迹停止（`rm_set_arm_stop`，机械臂保持上电），中断进行中的运动，并在 `stop_timeout` 内等待 `/rm_driver/move_stop_result` |
+| `/fastumi/arm/return_home` | `std_srvs/srv/Trigger` | 以 `home_speed` 发送阻塞 MoveJ 回到 `[0, 20, 0, 70, 0, 90, 90]` 度，等待 `/rm_driver/movej_result` 后返回；不控制夹爪 |
+| `/fastumi/arm/move_joints` | `fastumi_interfaces/srv/MoveJoints` | 按请求的 7 个关节角（`joint_degrees`，joint1..joint7，**单位度**）和速度（`speed`，1～100%）发送阻塞 MoveJ，等待结果后返回 |
+
+`move_joints` 先校验请求：关节数必须为 7 且为有限值，`speed` 在 1～100 之间，目标角在 URDF 关节限位内
+（默认读取已安装 `fastumi_bringup` 的 `assets/rm_75_kinematic.urdf`，可用 `urdf_path` 覆盖）；任一不满足都不下发命令，
+返回信息会说明原因（越限时给出关节名和限位度数）。
+
+回位和关节运动共用一套执行逻辑，**同一时间只允许一个运动**：机械臂反馈过期、UDP 反馈无效、驱动未订阅 `movej_cmd`、
+或已有运动在执行时，请求会被拒绝；已在目标关节角（各关节误差 ≤ 0.01 rad）时直接返回成功。
+运动过程中调用急停，运动服务立即返回失败（“运动被急停中断”）；
+被中断运动的 MoveJ 结果和所有停止命令的成功确认都收到后，才接受新的运动。
+等待 MoveJ 结果超过 `home_timeout` 时（对回位和关节运动都适用）会自动发送轨迹停止并返回失败。
+急停或超时后的迟到结果不会改变原请求的失败状态。结果一直缺失时保持拒绝新运动，需检查机械臂和驱动后重启节点；
+停止明确失败时，也会拒绝新运动，可再次急停并等待成功确认。
+**与 `keyboard_home` 相同，驱动没有指令仲裁，运动前须暂停遥操及其他机械臂命令发送端。**
+MoveJ 只在关节空间插值，不检查末端轨迹碰撞；实机首次使用时先用低速、离当前位姿较近的目标。
+
+```bash
+ros2 service call /fastumi/arm/emergency_stop std_srvs/srv/Trigger
+ros2 service call /fastumi/arm/return_home std_srvs/srv/Trigger
+ros2 service call /fastumi/arm/move_joints fastumi_interfaces/srv/MoveJoints \
+  "{joint_degrees: [0, 20, 0, 70, 0, 90, 90], speed: 20}"
+```
+
+节点参数：`emergency_stop_service`、`return_home_service`、`move_joints_service`（服务名）、`urdf_path`（关节限位来源）、
+`home_speed`（回位速度，默认 20，百分比）、`home_timeout`（默认 120 秒）、`stop_timeout`（默认 2 秒）。
+用 `start_arm_control:=false` 可不启动该节点；单独启动用 `ros2 run fastumi_bringup arm_control_service`。
+键盘调用（空格急停、回车回位、J 键输入关节角）见 [`fastumi_arm_keyboard`](../fastumi_arm_keyboard/README.md)。
+
+## 手眼标定采集（眼在手上）
+
+`keyboard_hand_eye_capture` 驱动 RM75 带腕部鱼眼相机围绕固定的标定板（Kalibr AprilGrid 或
+棋盘格），自动走一批随机但旋转激励充分的位姿。每个位姿静止后采一个“图像 + 法兰位姿”样本，
+写入 MCAP。之后用仓库根目录的 `export_hand_eye_dataset.py` 导出并求解 ^Link7 T_cam。
+
+**采集期间机械臂会自动运动：须暂停遥操和其他命令发送端，清空工作空间，手放在终端随时按空格急停。**
+
+### 1. 准备标定板
+
+`board_config` 直接使用仓库中的 Kalibr target YAML：
+
+| 配置 | 板 | 说明 |
+|---|---|---|
+| `config/calibration/april_6x6.yaml` | AprilGrid 6×6，tag36h11，tagSize 55 mm | 推荐；局部被夹爪遮挡时仍可用剩余标签求位姿 |
+| `config/calibration/checkerboard_11x8.yaml` | 棋盘格 11×8 内角点，30 mm | 必须整板可见 |
+| `config/calibration/checkerboard_11x8_45mm.yaml` | 棋盘格 11×8 内角点，45 mm | 板较大，需离远些 |
+
+板贴在平整硬板上并固定在桌面，采集期间不能移动；尺寸以实测为准。几何约定：
+
+- AprilGrid 与 Kalibr、`fastumi_data` 一致：原点为 Tag0 左下角，x 向右、y 向上；
+- 棋盘格与 OpenCV 一致：原点为左上内角点，x 沿列、y 沿行向下。检测时用手性和外圈方格颜色统一角点顺序，
+  因此内角点行列须一奇一偶（11×8 满足）。
+
+### 2. 采集
+
+bringup 按上文启动（`wrist_camera_mode` 保持默认 `jpeg`，夹爪需运行），在第二个交互终端执行：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+ros2 run fastumi_bringup keyboard_hand_eye_capture --ros-args \
+  -p board_config:=$PWD/../config/calibration/april_6x6.yaml -p num_samples:=25 -p speed:=15
+```
+
+| 键 | 作用 |
+|---|---|
+| `r` | 以当前静止位姿为参考位姿；此时需看到板，并让板大致位于画面中央、不被夹爪遮挡 |
+| `a` | 开始或继续自动采集：先做 8 个小幅自举运动（估计夹爪掩膜和粗外参），再随机规划位姿直到采满 |
+| 空格 | 立即下发 `/rm_driver/move_stop_cmd` 并暂停 |
+| `c` | 在当前静止位姿补采一个样本 |
+| `u` | 撤销上一个样本（导出时剔除） |
+| `m` | 用最近 12 个静止帧重新估计夹爪掩膜 |
+| `h` | 回到参考位姿 |
+| `q` | 停止、关闭 MCAP 并打印导出命令 |
+
+参考位姿可先用 `keyboard_home` 回位，再用示教器或拖动示教调整到能看清整块板的位置。
+
+**位姿规划**：相机位置在以板中心为球心的球冠上随机采样（距板 0.25–0.45 m，相对板法线倾斜
+10°–40°，绕视线滚转 ±45°），板中心成像在瞄准像素附近。无夹爪掩膜时瞄准像素为画面中心；
+有掩膜后取掩膜外“离掩膜和画面边界最远、又靠近画面中心”的点（如指尖伸到画面中部时瞄准指尖上方），
+启动日志会打印该像素。节点用 URDF 自行求 IK 并下发 MoveJ，不使用控制器笛卡尔指令。
+候选位姿须同时满足以下条件，并在其中优先选与已有样本姿态差最大的：
+
+- Link7 在 `workspace_min/max` 盒内；
+- 关节离限位至少 0.1 rad；
+- 单次关节变化不超过 `max_joint_step_rad`；
+- 预测视图中整块板在画面内，且不与夹爪掩膜重叠。
+
+**夹爪遮挡**：采样期间夹爪固定在 `gripper_openness`（默认全开），因此夹爪在图像中的区域固定。
+自举阶段由多视角帧中不随视角变化的、与画面边界相连的区域自动估计夹爪掩膜，也可用
+`gripper_mask_path` 提供人工掩膜。只有满足以下条件的样本才会保存：
+
+- 检测到的特征点比例 ≥ `min_corner_ratio`（AprilGrid 每个标签 4 个角点；棋盘格须整板检测）；
+- 鱼眼重投影 RMS ≤ `max_reprojection_px`；
+- 板投影轮廓不与掩膜相交。
+
+所有接受和拒绝的帧都以叠加图保存在 `debug/`，便于人工复核。叠加图上画有板坐标轴（x 红、y 绿），
+首次使用时按 `r` 后检查原点和方向是否符合上述约定。
+
+**安全**：
+
+- 每次运动前检查关节反馈和驱动 UDP 反馈新鲜度；
+- 速度默认 15%；
+- MoveJ 失败时锁定节点；超过 `motion_timeout` 无结果时先发送轨迹停止再锁定，此时可按空格再次急停或按 `q` 退出；
+- `dry_run:=true`（需 `prior_path`）只规划并打印目标关节。
+
+首次使用建议先 `speed:=10 num_samples:=5` 试跑。完整参数见
+[config/hand_eye_capture.example.yaml](config/hand_eye_capture.example.yaml)。
+
+输出位于 `<dataset_root>/hand_eye/session_<时间>/`，包含：
+
+- `bag/`：MCAP，含以下话题：
+  - `/hand_eye/sample_image`：原始鱼眼 JPEG；
+  - `/hand_eye/sample_flange_pose`：^base T_Link7，FK 结果，单位米，四元数 xyzw；
+  - `/hand_eye/sample_joints`、`/hand_eye/sample_meta`：关节与检测元数据，后者含采集时的鱼眼 PnP 位姿；
+  - `/hand_eye/sample_rejected`：撤销记录；
+  - `/hand_eye/gripper_mask`、`/hand_eye/session`：夹爪掩膜与会话配置；
+  - `/joint_states`：全程关节状态。
+
+  同一样本的消息共享同一 bag 时间戳，即图像接收时间。
+- `gripper_mask.png`、`debug/`、`summary.json`。
+
+### 3. 导出与求解
+
+在仓库根目录（ROS 环境已加载）执行：
+
+```bash
+python export_hand_eye_dataset.py --input <session_dir> --output <session_dir>/hand_eye_result \
+  --prior config/calibration/T_cam_end.yaml
+```
+
+脚本在原始鱼眼图上重新检测标定板，按以下步骤求解：
+
+1. 用 OpenCV `calibrateHandEye` 的五种方法求初值，取板在基座中离散度最小者；
+2. 对全部样本的鱼眼像素重投影误差，联合优化 ^Link7 T_cam 和 ^base T_board（Huber 损失）；
+3. 按单样本 RMS 做 MAD 离群剔除，再优化一次。
+
+输出：
+
+- `hand_eye_result.yaml`：
+  - `T_flange_cam`：^Link7 T_cam，单位米；
+  - `cam0.T_cam_hand`：与 `config/calibration/T_cam_end.yaml` 同格式，可直接替换；
+  - `T_base_board`、重投影 RMS、每样本残差、剔除的样本、各方法初值、旋转多样性统计；
+  - 与 `--prior` 的差值。
+- `images/<i>.png`、`poses.csv`、`intrinsics.yaml`：把鱼眼图矫正为针孔图（新 K，D=0）的通用数据集，
+  其中 `poses.csv` 为 ^base T_Link7，`x y z qx qy qz qw`。
+- `samples.tsv`、`README.txt`。
+
+建议至少 15 个样本、旋转跨度 ≥ 35°、轴间隔 ≥ 10°，不满足时脚本会给出警告。重投影 RMS 应在 1 px 以内；
+若某些样本残差明显偏大，到 `debug/` 中查看对应叠加图。
+
+使用棋盘格时，`README.txt` 附有 [hand_eye_calibration](https://github.com/vdovetzi/hand_eye_calibration)
+的交叉验证命令（`--calibration-pattern "2 8 11 0.03"`，`--eye-to-hand false`）。该工具不做棋盘格 180° 消歧，
+也不支持 AprilGrid。结果可作为下次采集的 `prior_path`，保持默认 `prior_convention:=cam_from_flange`。
+
 ## 相机模式与画面查看
 
 默认采集 1920×1080@30 FPS；一次模式选择同时设置相机输出和 Recorder 输入。
@@ -230,7 +395,8 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 | 本地解码节点 | `/wrist_camera/image_decoded` | `sensor_msgs/msg/Image` | 解码画面，仅在 `enable_decoder:=true` 时发布 |
 | 录制器 | `/fastumi/recording/status` | `fastumi_interfaces/msg/RecordingStatus` | 录制状态，定期及状态变化时发布 |
 
-以下服务的类型均以 `fastumi_interfaces/srv/` 为前缀。
+`/fastumi/arm/emergency_stop`、`/fastumi/arm/return_home`（`std_srvs/srv/Trigger`）与 `/fastumi/arm/move_joints`（`fastumi_interfaces/srv/MoveJoints`）由 `arm_control_service` 提供，见[急停与回位服务](#急停与回位服务)。
+以下录制服务的类型均以 `fastumi_interfaces/srv/` 为前缀。
 
 | 服务 | 类型 | 用途 |
 |---|---|---|
@@ -249,6 +415,7 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 |---|---|---|
 | `start_arm` / `start_gripper` / `start_wrist_camera` / `start_recorder` | true | 独立组件开关 |
 | `move_to_initial_pose` | true | 启动机械臂时执行一次回位；false 用于维护 |
+| `start_arm_control` | true | 启动机械臂时同时启动急停/回位服务节点 |
 | `wrist_camera_mode` | jpeg | `raw`、`jpeg` 或 `h264`；同时选择相机发布和录制器输入 |
 | `enable_decoder` | false | 是否在 Jetson 本地把 H.264 解码到 `/wrist_camera/image_decoded` |
 | `h264_encoder` | hardware | 仅 `h264` 模式使用；`hardware` 使用 NVIDIA GStreamer，`software` 使用 libx264 |

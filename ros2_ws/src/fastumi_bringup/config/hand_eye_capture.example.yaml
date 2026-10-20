@@ -1,0 +1,33 @@
+# keyboard_hand_eye_capture 参数示例：
+#   ros2 run fastumi_bringup keyboard_hand_eye_capture --ros-args --params-file <本文件>
+# 长度单位米，角度单位见参数名；未列出的参数使用节点默认值。
+keyboard_hand_eye_capture:
+  ros__parameters:
+    board_config: /abs/path/FastUMI_Data/config/calibration/april_6x6.yaml   # 必填，Kalibr target YAML（aprilgrid / checkerboard）
+    camera_config: ""          # 空 = fastumi_usb_camera/config/EndEffectorCalib.yaml（1920x1080 鱼眼）
+    urdf_path: ""              # 空 = fastumi_bringup/assets/rm_75_kinematic.urdf（base_link→Link7）
+    prior_path: ""             # 可选外参先验，如 config/calibration/T_cam_end.yaml
+    prior_convention: cam_from_flange   # T_cam_hand 为 ^cam T_flange（导出求解的 hand_eye_result.yaml 同格式）
+    gripper_mask_path: ""      # 可选人工夹爪掩膜 PNG（非零 = 夹爪）；空则自举时自动估计
+    image_topic: /wrist_camera/image_raw/compressed
+    dataset_root: ""           # 空 = $DATASET_ROOT 或录制器默认根目录；输出到 <root>/hand_eye/session_*
+    num_samples: 25            # 导出求解至少需要 15 个
+    speed: 15                  # MoveJ 速度百分比（1..50）
+    gripper_openness: 1.0      # 采样期间固定夹爪开合度
+    require_gripper: true
+    settle_seconds: 0.8        # 关节静止判定时长
+    motion_timeout: 60.0
+    max_reprojection_px: 1.0   # 鱼眼 PnP 重投影 RMS 上限
+    min_corner_ratio: 0.8      # 检测特征点占整板的最低比例（棋盘格只能整板检测）
+    dry_run: false             # true：只规划并打印目标，不发布 MoveJ（需 prior_path）
+    record_joint_stream: true
+    max_attempts_factor: 3
+    distance_min_m: 0.25       # 相机到板中心距离
+    distance_max_m: 0.45
+    tilt_min_deg: 10.0         # 相机相对板法线倾角
+    tilt_max_deg: 40.0
+    roll_max_deg: 45.0         # 绕光轴滚转
+    workspace_min: [-0.6, -0.5, 0.16]   # Link7 位置盒（base_link）
+    workspace_max: [0.6, 0.5, 0.60]
+    max_joint_step_rad: 1.2    # 单次 MoveJ 最大关节变化
+    random_seed: -1
