@@ -4,12 +4,13 @@
 标定板为 Kalibr AprilGrid 或棋盘格（会话信息 /hand_eye/session 中的 board）。导出时在
 原始鱼眼 JPEG 上重新检测板特征点，用 OpenCV calibrateHandEye 五种方法取初值，再对全部
 样本的鱼眼像素重投影误差联合优化 ^Link7 T_cam 与 ^base T_board（见
-fastumi_bringup.hand_eye.solve）。同时输出鱼眼矫正后的针孔数据集，供其它工具使用。
+hand_eye_calibration_macpdata.solve）。同时输出鱼眼矫正后的针孔数据集，供其它工具使用。
 
-需先 source ros2_ws/install/setup.bash（rosbag2_py、fastumi_bringup）。
+需先 source ros2_ws/install/setup.bash（rosbag2_py、本包与 fastumi_bringup）。
 
-启动：python export_hand_eye_dataset.py --input SESSION_DIR --output OUT_DIR
-      [--prior config/calibration/T_cam_end.yaml] [--no-solve]
+启动：ros2 run hand_eye_calibration_macpdata export_hand_eye_dataset \
+          --input SESSION_DIR --output OUT_DIR
+      [--prior <仓库>/config/calibration/T_cam_end.yaml] [--no-solve]
       [--balance 0.0] [--fov-scale 1.0] [--drop-outside] [--overwrite]
 启动参数：
     --input：会话目录（含 bag/）或 bag 目录本身。
@@ -49,10 +50,10 @@ from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import String
 import yaml
 
-from fastumi_bringup.hand_eye.board import FisheyeCamera, board_spec_from_dict, make_detector
-from fastumi_bringup.hand_eye.estimate import load_prior
-from fastumi_bringup.hand_eye.solve import View, solve_hand_eye
-from fastumi_bringup.hand_eye.transforms import invert, rotation_angle
+from fastumi_bringup.transforms import invert, rotation_angle
+from hand_eye_calibration_macpdata.board import FisheyeCamera, board_spec_from_dict, make_detector
+from hand_eye_calibration_macpdata.estimate import load_prior
+from hand_eye_calibration_macpdata.solve import View, solve_hand_eye
 
 
 TOPICS = {

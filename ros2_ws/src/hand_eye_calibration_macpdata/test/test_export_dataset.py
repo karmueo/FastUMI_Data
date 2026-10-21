@@ -1,6 +1,6 @@
 """手眼标定 MCAP 导出与求解：仿真采集 → 导出 → 对照真值。
 
-需要已 source ros2_ws/install/setup.bash（fastumi_bringup、fastumi_recorder 可导入）。
+需要已 source ros2_ws/install/setup.bash（本包、fastumi_bringup、fastumi_recorder 可导入）。
 """
 
 from pathlib import Path
@@ -11,17 +11,15 @@ import numpy as np
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "ros2_ws/src/fastumi_bringup/test"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-pytest.importorskip("fastumi_bringup.keyboard_hand_eye_capture")
+pytest.importorskip("hand_eye_calibration_macpdata.capture")
 pytest.importorskip("fastumi_recorder.bag_writer")
 
-import export_hand_eye_dataset as exporter  # noqa: E402
-from fastumi_bringup.hand_eye.board import make_detector, FisheyeCamera  # noqa: E402
-from fastumi_bringup.hand_eye.estimate import load_prior  # noqa: E402
-from fastumi_bringup.hand_eye.transforms import rotation_angle  # noqa: E402
+from fastumi_bringup.transforms import rotation_angle  # noqa: E402
+from hand_eye_calibration_macpdata import export_dataset as exporter  # noqa: E402
+from hand_eye_calibration_macpdata.board import make_detector, FisheyeCamera  # noqa: E402
+from hand_eye_calibration_macpdata.estimate import load_prior  # noqa: E402
 from hand_eye_sim import PRIOR, run_session  # noqa: E402
 
 

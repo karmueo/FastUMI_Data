@@ -5,14 +5,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fastumi_bringup.hand_eye.board import AprilGridSpec, load_fisheye_camera
-from fastumi_bringup.hand_eye.estimate import load_prior
-from fastumi_bringup.hand_eye.kinematics import ArmKinematics
-from fastumi_bringup.hand_eye.solve import View, solve_hand_eye
-from fastumi_bringup.hand_eye.transforms import (
+from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
+from fastumi_bringup.kinematics import ArmKinematics
+from fastumi_bringup.transforms import (
     axis_angle_matrix, invert, make_transform, rotation_angle,
 )
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
+from hand_eye_calibration_macpdata.board import AprilGridSpec, load_fisheye_camera
+from hand_eye_calibration_macpdata.estimate import load_prior
+from hand_eye_calibration_macpdata.solve import View, solve_hand_eye
 
 
 SRC = Path(__file__).resolve().parents[2]

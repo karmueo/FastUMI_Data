@@ -4,7 +4,7 @@
 config/calibration/april_6x6.yaml、checkerboard_11x8.yaml。
 
 在 hardware.launch.py 启动后于第二个终端运行：
-    ros2 run fastumi_bringup keyboard_hand_eye_capture --ros-args \
+    ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args \
         -p board_config:=/abs/FastUMI_Data/config/calibration/april_6x6.yaml
 
 按键：r 设参考位姿 | a 开始/继续自动采集 | 空格 急停并暂停 | c 当前位姿补采 |
@@ -39,21 +39,21 @@ from rm_ros_interfaces.msg import Movej
 from sensor_msgs.msg import CompressedImage, Image, JointState
 from std_msgs.msg import Bool, Empty, Float32, String
 
-from fastumi_bringup.hand_eye.board import (
+from fastumi_bringup.kinematics import JOINT_NAMES, ArmKinematics
+from fastumi_bringup.terminal import TerminalKeyReader
+from fastumi_bringup.transforms import invert, quaternion_from_matrix
+from hand_eye_calibration_macpdata.board import (
     load_board_spec, load_fisheye_camera, make_detector,
 )
-from fastumi_bringup.hand_eye.estimate import (
+from hand_eye_calibration_macpdata.estimate import (
     diversity_stats, estimate_board_in_base, estimate_flange_from_camera, load_prior,
 )
-from fastumi_bringup.hand_eye.kinematics import JOINT_NAMES, ArmKinematics
-from fastumi_bringup.hand_eye.occlusion import (
+from hand_eye_calibration_macpdata.occlusion import (
     check_board_view, estimate_gripper_mask, load_mask,
 )
-from fastumi_bringup.hand_eye.sampler import (
+from hand_eye_calibration_macpdata.sampler import (
     PlanContext, SamplerSettings, aim_for_mask, bootstrap_targets, check_reachable, plan_next,
 )
-from fastumi_bringup.hand_eye.transforms import invert, quaternion_from_matrix
-from fastumi_bringup.terminal import TerminalKeyReader
 
 
 FEEDBACK_FRESHNESS_SECONDS = 0.5
@@ -146,7 +146,7 @@ def default_dataset_root():
 
 
 class HandEyeCapture(Node):
-    """手眼标定自动采集节点；非 ROS 逻辑在 fastumi_bringup.hand_eye 中。"""
+    """手眼标定自动采集节点；非 ROS 算法在本包 board/estimate/sampler 等模块中。"""
 
     def __init__(self, **node_kwargs):
         super().__init__("keyboard_hand_eye_capture", **node_kwargs)
@@ -933,8 +933,8 @@ class HandEyeCapture(Node):
         (self.session_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         self.get_logger().info(
-            f"已保存 {len(self.samples)} 个样本到 {self.session_dir}\n导出：python "
-            f"export_hand_eye_dataset.py --input {self.session_dir} "
+            f"已保存 {len(self.samples)} 个样本到 {self.session_dir}\n导出：ros2 run "
+            f"hand_eye_calibration_macpdata export_hand_eye_dataset --input {self.session_dir} "
             f"--output {self.session_dir / 'hand_eye_result'}")
 
 

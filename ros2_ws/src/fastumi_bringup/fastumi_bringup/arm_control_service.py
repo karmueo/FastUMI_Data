@@ -17,7 +17,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty
 from std_srvs.srv import Trigger
 
-from fastumi_bringup.hand_eye.kinematics import ArmKinematics
+from fastumi_bringup.kinematics import ArmKinematics
 from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from fastumi_bringup.keyboard_home import (
     ALREADY_AT_TARGET_TOLERANCE, FEEDBACK_FRESHNESS_SECONDS, JOINT_NAMES,

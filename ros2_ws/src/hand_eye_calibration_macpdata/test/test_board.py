@@ -7,12 +7,12 @@ import sys
 import numpy as np
 import pytest
 
-from fastumi_bringup.hand_eye.board import (
+from fastumi_bringup.transforms import invert, rotation_angle
+from hand_eye_calibration_macpdata.board import (
     AprilGridSpec, CheckerboardSpec, board_spec_from_dict, load_board_spec,
     load_fisheye_camera, make_detector,
 )
-from fastumi_bringup.hand_eye.synthetic import gripper_occluder, look_at, render_board
-from fastumi_bringup.hand_eye.transforms import invert, rotation_angle
+from hand_eye_calibration_macpdata.synthetic import gripper_occluder, look_at, render_board
 
 
 SRC = Path(__file__).resolve().parents[2]

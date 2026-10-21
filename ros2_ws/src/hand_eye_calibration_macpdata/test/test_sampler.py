@@ -7,20 +7,20 @@ import cv2
 import numpy as np
 import pytest
 
-from fastumi_bringup.hand_eye.board import CheckerboardSpec, load_fisheye_camera
-from fastumi_bringup.hand_eye.estimate import (
+from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
+from fastumi_bringup.kinematics import ArmKinematics
+from fastumi_bringup.transforms import (
+    invert, make_transform, rotation_angle,
+)
+from hand_eye_calibration_macpdata.board import CheckerboardSpec, load_fisheye_camera
+from hand_eye_calibration_macpdata.estimate import (
     diversity_stats, estimate_board_in_base, estimate_flange_from_camera, load_prior,
 )
-from fastumi_bringup.hand_eye.kinematics import ArmKinematics
-from fastumi_bringup.hand_eye.occlusion import check_board_view
-from fastumi_bringup.hand_eye.sampler import (
+from hand_eye_calibration_macpdata.occlusion import check_board_view
+from hand_eye_calibration_macpdata.sampler import (
     PlanContext, SamplerSettings, aim_for_mask, bootstrap_targets, plan_next,
     sample_camera_pose,
 )
-from fastumi_bringup.hand_eye.transforms import (
-    invert, make_transform, rotation_angle,
-)
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 
 
 SRC = Path(__file__).resolve().parents[2]

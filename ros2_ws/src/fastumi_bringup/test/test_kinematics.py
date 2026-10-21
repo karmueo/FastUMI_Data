@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fastumi_bringup.hand_eye.kinematics import ArmKinematics
-from fastumi_bringup.hand_eye.transforms import (
+from fastumi_bringup.kinematics import ArmKinematics
+from fastumi_bringup.transforms import (
     average_transforms, axis_angle_matrix, invert, make_transform, matrix_from_quaternion,
     quaternion_from_matrix, rotation_angle, rotation_log,
 )

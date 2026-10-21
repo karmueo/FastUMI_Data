@@ -3,8 +3,8 @@
 import cv2
 import numpy as np
 
-from fastumi_bringup.hand_eye.board import TAG_FAMILIES, AprilGridSpec, CheckerboardSpec
-from fastumi_bringup.hand_eye.transforms import invert
+from fastumi_bringup.transforms import invert
+from hand_eye_calibration_macpdata.board import TAG_FAMILIES, AprilGridSpec, CheckerboardSpec
 
 
 def board_texture(spec, pixels_per_meter):

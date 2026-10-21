@@ -15,7 +15,7 @@ from std_srvs.srv import Trigger
 from fastumi_interfaces.srv import MoveJoints
 
 from fastumi_bringup.arm_control_service import ArmControlService
-from fastumi_bringup.hand_eye.kinematics import ArmKinematics
+from fastumi_bringup.kinematics import ArmKinematics
 from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 
 

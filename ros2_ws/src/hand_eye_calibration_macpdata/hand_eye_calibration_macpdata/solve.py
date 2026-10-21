@@ -13,8 +13,8 @@ import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
-from fastumi_bringup.hand_eye.estimate import diversity_stats, estimate_board_in_base
-from fastumi_bringup.hand_eye.transforms import invert, make_transform, rotation_angle
+from fastumi_bringup.transforms import invert, make_transform, rotation_angle
+from hand_eye_calibration_macpdata.estimate import diversity_stats, estimate_board_in_base
 
 
 HAND_EYE_METHODS = {

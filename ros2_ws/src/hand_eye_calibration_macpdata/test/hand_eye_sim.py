@@ -1,6 +1,6 @@
 """手眼采集节点的无硬件仿真：假 RM75 + 鱼眼合成图 + 固定夹爪遮挡。
 
-供 test_hand_eye_capture.py 和仓库根目录 tests/test_export_hand_eye_dataset.py 共用。
+供 test_capture.py 和 test_export_dataset.py 共用。
 真值：^Link7 T_cam 取仓库 T_cam_end.yaml，板放在初始位姿相机光轴前方 0.33 m。
 板型取仓库 config/calibration 下的 Kalibr YAML，通过 run_session(board=...) 选择。
 """
@@ -17,13 +17,13 @@ from sensor_msgs.msg import CompressedImage, JointState
 from std_msgs.msg import Bool, Float32
 import yaml
 
-from fastumi_bringup.hand_eye.board import AprilGridSpec, load_board_spec, load_fisheye_camera
-from fastumi_bringup.hand_eye.estimate import load_prior
-from fastumi_bringup.hand_eye.kinematics import JOINT_NAMES, ArmKinematics
-from fastumi_bringup.hand_eye.synthetic import gripper_occluder, render_board
-from fastumi_bringup.hand_eye.transforms import invert, make_transform
 from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
-from fastumi_bringup.keyboard_hand_eye_capture import HandEyeCapture
+from fastumi_bringup.kinematics import JOINT_NAMES, ArmKinematics
+from fastumi_bringup.transforms import invert, make_transform
+from hand_eye_calibration_macpdata.board import AprilGridSpec, load_board_spec, load_fisheye_camera
+from hand_eye_calibration_macpdata.capture import HandEyeCapture
+from hand_eye_calibration_macpdata.estimate import load_prior
+from hand_eye_calibration_macpdata.synthetic import gripper_occluder, render_board
 
 
 SRC = Path(__file__).resolve().parents[2]

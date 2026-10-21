@@ -11,7 +11,7 @@ import rosbag2_py
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, String
 
-from fastumi_bringup.keyboard_hand_eye_capture import main
+from hand_eye_calibration_macpdata.capture import main
 from hand_eye_sim import feed, make_node, run_session, run_until, warm_up
 
 

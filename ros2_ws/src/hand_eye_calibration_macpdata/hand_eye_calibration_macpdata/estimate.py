@@ -1,6 +1,6 @@
 """在线粗手眼估计、板在基座下的位姿与样本多样性统计。
 
-在线估计只用于规划“看向标定板”的位姿，最终标定由 export_hand_eye_dataset.py（hand_eye.solve）完成。
+在线估计只用于规划“看向标定板”的位姿，最终标定由 export_hand_eye_dataset 命令（本包 solve.py）完成。
 输入：base_from_flange = ^base T_flange（FK），camera_from_board = ^cam T_board（PnP）。
 输出：flange_from_camera = ^flange T_cam（眼在手上外参）。
 """
@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import yaml
 
-from fastumi_bringup.hand_eye.transforms import (
+from fastumi_bringup.transforms import (
     average_transforms, invert, rotation_angle, rotation_log,
 )
 

@@ -19,6 +19,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_usb_camera`](src/fastumi_usb_camera/) | Python/C++ 相机包 | 使用 UVC 发布单目 raw、JPEG 或 FFmpeg H.264 图像，并支持接收端解码。 |
 | [`fastumi_bringup`](src/fastumi_bringup/) | Python 启动包 | 在 Jetson 上统一启动并回位 RM75，管理末端相机、Unitree 夹爪和录制服务，提供 RM75 急停/回位服务。 |
 | [`fastumi_arm_keyboard`](src/fastumi_arm_keyboard/) | Python 工具包 | 在交互终端中按空格调用 RM75 急停服务、按回车调用回到初始位姿服务。 |
+| [`hand_eye_calibration_macpdata`](src/hand_eye_calibration_macpdata/) | Python 工具包 | 在 `hardware.launch.py` 启动后按键驱动 RM75 自动采集眼在手上手眼标定 MCAP，并离线导出数据集、求解 ^Link7 T_cam。 |
 | [`vive_tracker`](src/vive_tracker/) | C++ 驱动包 | 通过 OpenVR 读取 VIVE Tracker，发布绝对位姿、跟踪状态、里程计、轨迹和 TF。 |
 | [`fastumi_gripper_estimator`](src/fastumi_gripper_estimator/) | Python 感知包 | 从鱼眼 RGB 图像中的两枚 ArUco 标记估计夹爪归一化开度。 |
 | [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度。 |
@@ -253,12 +254,12 @@ source .venv-numpy1/bin/activate
 git -C .. submodule update --init ros2_ws/src/ros2_rm_robot
 git -C src/ros2_rm_robot switch agx
 rosdep install --from-paths src/fastumi_usb_camera src/unitree_gripper \
-  src/fastumi_bringup src/fastumi_recorder src/fastumi_interfaces \
+  src/fastumi_bringup src/fastumi_recorder src/fastumi_interfaces src/hand_eye_calibration_macpdata \
   src/ros2_rm_robot/rm_ros_interfaces src/ros2_rm_robot/rm_description \
   src/ros2_rm_robot/rm_driver src/ros2_rm_robot/rm_bringup --ignore-src -r -y
 python -m colcon build --symlink-install --packages-select \
   fastumi_interfaces rm_ros_interfaces rm_description rm_driver rm_bringup \
-  fastumi_usb_camera unitree_gripper fastumi_recorder fastumi_bringup \
+  fastumi_usb_camera unitree_gripper fastumi_recorder fastumi_bringup hand_eye_calibration_macpdata \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 source install/setup.bash
 python -m colcon build --symlink-install --packages-select fastumi_rm75 \

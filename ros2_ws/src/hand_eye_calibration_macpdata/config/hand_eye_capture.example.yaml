@@ -1,5 +1,5 @@
 # keyboard_hand_eye_capture 参数示例：
-#   ros2 run fastumi_bringup keyboard_hand_eye_capture --ros-args --params-file <本文件>
+#   ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args --params-file <本文件>
 # 长度单位米，角度单位见参数名；未列出的参数使用节点默认值。
 keyboard_hand_eye_capture:
   ros__parameters:

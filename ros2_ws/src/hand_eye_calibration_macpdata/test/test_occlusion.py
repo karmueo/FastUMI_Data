@@ -5,12 +5,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fastumi_bringup.hand_eye.board import CheckerboardSpec, load_fisheye_camera
-from fastumi_bringup.hand_eye.occlusion import (
+from fastumi_bringup.transforms import invert
+from hand_eye_calibration_macpdata.board import CheckerboardSpec, load_fisheye_camera
+from hand_eye_calibration_macpdata.occlusion import (
     check_board_view, estimate_gripper_mask, load_mask,
 )
-from fastumi_bringup.hand_eye.synthetic import gripper_occluder, look_at, render_board
-from fastumi_bringup.hand_eye.transforms import invert
+from hand_eye_calibration_macpdata.synthetic import gripper_occluder, look_at, render_board
 
 
 CAMERA = Path(__file__).resolve().parents[2] / "fastumi_usb_camera/config/EndEffectorCalib.yaml"
