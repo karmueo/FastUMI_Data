@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import yaml
 
 from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from fastumi_bringup.kinematics import ArmKinematics
@@ -45,7 +46,7 @@ def scene():
 def test_prior_is_inverted_cam_from_hand():
     prior = load_prior(PRIOR)
     raw = invert(prior)
-    assert raw[1, 3] == pytest.approx(0.0930904727)
+    assert raw == pytest.approx(np.array(yaml.safe_load(PRIOR.read_text())["cam0"]["T_cam_hand"]))
     assert load_prior(PRIOR, "flange_from_cam") == pytest.approx(raw)
     with pytest.raises(ValueError):
         load_prior(PRIOR, "unknown")

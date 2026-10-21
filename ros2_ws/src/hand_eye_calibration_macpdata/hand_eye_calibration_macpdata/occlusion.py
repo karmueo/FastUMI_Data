@@ -19,6 +19,9 @@ class MaskSettings:
     std_threshold: float = 6.0
     min_area_fraction: float = 0.002
     dilate_fraction: float = 0.01  # 膨胀半径占图像宽度的比例（1920 宽约 19 px）
+    # 被掩膜包围、面积不超过该比例的空洞视为夹爪本体（如贴在夹爪上的 ArUco 标签：
+    # 黑白边缘在抖动和 JPEG 下方差偏大而漏判）；更大的封闭区域可能是指间真实观察窗口，保留。
+    max_hole_area_fraction: float = 0.01
     min_frames: int = 6
 
 
@@ -58,12 +61,27 @@ def estimate_gripper_mask(frames_bgr, board_hulls=(), settings=MaskSettings()):
                           y + h >= small_size[1])
         if touches_border and area >= min_area:
             small_mask[labels == label] = 255
+    fill_enclosed_holes(small_mask, settings.max_hole_area_fraction)
     mask = cv2.resize(small_mask, (width, height), interpolation=cv2.INTER_NEAREST)
     dilate_px = int(round(settings.dilate_fraction * width))
     if dilate_px > 0:
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * dilate_px + 1, 2 * dilate_px + 1))
         mask = cv2.dilate(mask, kernel)
+    return mask
+
+
+def fill_enclosed_holes(mask, max_area_fraction):
+    """原地填充 mono8 掩膜中不与图像边界连通、面积不超过 max_area_fraction 的空洞。"""
+    holes = (mask == 0).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(holes, connectivity=4)
+    height, width = mask.shape
+    max_area = max_area_fraction * mask.size
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        touches_border = x == 0 or y == 0 or x + w >= width or y + h >= height
+        if not touches_border and area <= max_area:
+            mask[labels == label] = 255
     return mask
 
 
@@ -101,9 +119,24 @@ def board_polygon(spec, camera, camera_from_board, samples_per_edge=12):
     return pixels
 
 
+def min_cell_px(spec, camera, camera_from_board):
+    """板上最小特征（标签黑框边 / 棋盘方格边）投影后每格的像素数；不可投影时返回 0。"""
+    segments = spec.feature_segments()
+    points = segments.reshape(-1, 3) @ camera_from_board[:3, :3].T + camera_from_board[:3, 3]
+    pixels = camera.project(points).reshape(-1, 2, 2)
+    lengths = np.linalg.norm(pixels[:, 1] - pixels[:, 0], axis=1)
+    if not np.all(np.isfinite(lengths)):
+        return 0.0
+    return float(lengths.min()) / spec.cells_per_feature
+
+
 def check_board_view(spec, camera, camera_from_board, mask, *, margin_px=20,
-                     min_area_fraction=0.03):
-    """预测或复核某位姿下的板视图：全板在画面内、面积足够、不与夹爪掩膜相交。"""
+                     min_area_fraction=0.03, min_cell_px_required=0.0):
+    """预测或复核某位姿下的板视图：全板在画面内、面积与特征像素足够、不与夹爪掩膜相交。
+
+    min_cell_px_required > 0 时，要求最小特征每格至少这么多像素（小标签板远距离斜视时
+    无法解码）；为 0 时不检查。
+    """
     polygon = board_polygon(spec, camera, camera_from_board)
     if polygon is None:
         return OcclusionCheck(False, "板在相机后方")
@@ -114,6 +147,10 @@ def check_board_view(spec, camera, camera_from_board, mask, *, margin_px=20,
     area = cv2.contourArea(polygon.astype(np.float32))
     if area < min_area_fraction * camera.width * camera.height:
         return OcclusionCheck(False, f"板像面积过小 {area / (camera.width * camera.height):.1%}")
+    if min_cell_px_required > 0.0:
+        cell = min_cell_px(spec, camera, camera_from_board)
+        if cell < min_cell_px_required:
+            return OcclusionCheck(False, f"特征过小 {cell:.1f} px/格")
     if mask is None:
         return OcclusionCheck(True)
     board_region = np.zeros(mask.shape, dtype=np.uint8)

@@ -35,6 +35,7 @@ class SamplerSettings:
     max_tries: int = 200
     view_margin_px: int = 30
     min_board_area_fraction: float = 0.03
+    min_cell_px: float = 5.0  # 预测视图中最小特征每格像素下限（tag36h11 一条黑框边 8 格）
     joint_distance_weight: float = 0.05
     aim_direction: tuple = (0.0, 0.0, 1.0)  # 相机系单位向量：板中心应出现的视线方向
 
@@ -133,6 +134,19 @@ def aim_for_mask(camera, mask, center_weight=0.5):
     return (float(pixel[0]), float(pixel[1])), ray / np.linalg.norm(ray)
 
 
+def max_view_distance(spec, camera, tilt_deg, min_cell_px):
+    """板中心正对画面中心、倾角 tilt_deg 时满足 min_cell_px 的最大相机距离（米）。
+
+    针孔近似：边长 L 在距离 d 处约 fx·L·cos(tilt)/d 像素；鱼眼中心附近足够准确，
+    只用于启动时提示距离参数。
+    """
+    if min_cell_px <= 0.0:
+        return math.inf
+    feature_m = min(np.linalg.norm(b - a) for a, b in spec.feature_segments())
+    return (camera.K[0, 0] * feature_m * math.cos(math.radians(tilt_deg)) /
+            (spec.cells_per_feature * min_cell_px))
+
+
 def check_reachable(kinematics, base_from_flange, current_joints, settings):
     """IK 及安全过滤；返回 (关节, 原因)，不可行时关节为 None。"""
     position = base_from_flange[:3, 3]
@@ -163,7 +177,8 @@ def plan_next(kinematics, spec, camera, mask, context, current_joints, rng,
         view = check_board_view(
             spec, camera, invert(base_from_camera) @ context.base_from_board, mask,
             margin_px=settings.view_margin_px,
-            min_area_fraction=settings.min_board_area_fraction)
+            min_area_fraction=settings.min_board_area_fraction,
+            min_cell_px_required=settings.min_cell_px)
         if not view.ok:
             key = view.reason.split(" ")[0]
             reasons[key] = reasons.get(key, 0) + 1

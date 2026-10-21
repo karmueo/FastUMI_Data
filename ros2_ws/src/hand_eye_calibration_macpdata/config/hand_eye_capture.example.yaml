@@ -30,4 +30,5 @@ keyboard_hand_eye_capture:
     workspace_min: [-0.6, -0.5, 0.16]   # Link7 位置盒（base_link）
     workspace_max: [0.6, 0.5, 0.60]
     max_joint_step_rad: 1.2    # 单次 MoveJ 最大关节变化
+    min_cell_px: 5.0           # 规划时最小特征每格像素下限（tag36h11 黑框边 8 格；棋盘格 1 格 = 方格边）
     random_seed: -1

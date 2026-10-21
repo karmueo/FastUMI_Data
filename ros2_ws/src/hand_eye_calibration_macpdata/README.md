@@ -47,6 +47,7 @@ python -m pytest src/hand_eye_calibration_macpdata/test -q
 | 配置 | 板 | 说明 |
 |---|---|---|
 | `config/calibration/april_6x6.yaml` | AprilGrid 6×6，tag36h11，tagSize 55 mm | 推荐；局部被夹爪遮挡时仍可用剩余标签求位姿 |
+| `config/calibration/april_6x6_24mm.yaml` | AprilGrid 6×6，tag36h11，tagSize 24.1 mm，整板约 18 cm | 小板，须近距离采集，见下方说明 |
 | `config/calibration/checkerboard_11x8.yaml` | 棋盘格 11×8 内角点，30 mm | 必须整板可见 |
 | `config/calibration/checkerboard_11x8_45mm.yaml` | 棋盘格 11×8 内角点，45 mm | 板较大，需离远些 |
 
@@ -55,6 +56,22 @@ python -m pytest src/hand_eye_calibration_macpdata/test -q
 - AprilGrid 与 Kalibr、`fastumi_data` 一致：原点为 Tag0 左下角，x 向右、y 向上；
 - 棋盘格与 OpenCV 一致：原点为左上内角点，x 沿列、y 沿行向下。检测时用手性和外圈方格颜色统一角点顺序，
   因此内角点行列须一奇一偶（11×8 满足）。
+
+**小标签板（24 mm）**：tag36h11 一条黑框边 8 格，解码需要每格约 5 px 以上。腕部鱼眼 fx≈602 px，
+24.1 mm 标签在 0.45 m 处只有约 4 px/格，斜视更少，默认距离 0.25–0.45 m 的远端会检测失败。规划时
+`min_cell_px`（默认 5）会跳过预测特征过小的位姿；`distance_max_m` 超出板可解码距离时启动日志会给出建议值，
+`distance_min_m` 已超出时直接报错。仿真中该板在 0.20–0.30 m、倾角 10°–40° 全部可检测。
+实拍（0.30 m、约 6 px/格）原图只能解出约一半标签，检测器会在 2 倍放大图上重新解码补全；
+标签角点细化窗口按每格像素宽自适应，修正轮廓角点约 4 px 的内缩（实拍重投影约 0.3 px）。建议：
+
+```bash
+ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args \
+  -p board_config:=$PWD/../config/calibration/april_6x6_24mm.yaml \
+  -p distance_min_m:=0.28 -p distance_max_m:=0.35 -p roll_max_deg:=20.0 -p num_samples:=25 -p speed:=30
+```
+
+近距离时板更易与夹爪掩膜重叠、法兰离板更近：参考位姿取 0.25 m 左右，先用 `dry_run:=true`（需 `prior_path`）
+确认规划目标，并留意工作空间盒下限 `workspace_min` 与桌面的距离。
 
 ## 2. 采集
 
@@ -92,7 +109,8 @@ ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args \
 - Link7 在 `workspace_min/max` 盒内；
 - 关节离限位至少 0.1 rad；
 - 单次关节变化不超过 `max_joint_step_rad`；
-- 预测视图中整块板在画面内，且不与夹爪掩膜重叠。
+- 预测视图中整块板在画面内，且不与夹爪掩膜重叠；
+- 预测视图中最小特征（标签黑框边 / 棋盘方格边）不少于 `min_cell_px` 像素每格。
 
 **夹爪遮挡**：采样期间夹爪固定在 `gripper_openness`（默认全开），因此夹爪在图像中的区域固定。
 自举阶段由多视角帧中不随视角变化的、与画面边界相连的区域自动估计夹爪掩膜，也可用
@@ -153,6 +171,9 @@ ros2 run hand_eye_calibration_macpdata export_hand_eye_dataset \
   - `cam0.T_cam_hand`：与 `config/calibration/T_cam_end.yaml` 同格式，可直接替换；
   - `T_base_board`、重投影 RMS、每样本残差、剔除的样本、各方法初值、旋转多样性统计；
   - 与 `--prior` 的差值。
+- `T_cam_end.yaml`：与 `config/calibration/T_cam_end.yaml` 完全同格式（只含 `cam0.T_cam_hand`，注释中注明来源会话与 RMS），
+  确认结果可用后直接复制替换：
+  `cp <session_dir>/hand_eye_result/T_cam_end.yaml <仓库>/config/calibration/T_cam_end.yaml`。
 - `images/<i>.png`、`poses.csv`、`intrinsics.yaml`：把鱼眼图矫正为针孔图（新 K，D=0）的通用数据集，
   其中 `poses.csv` 为 ^base T_Link7，`x y z qx qy qz qw`。
 - `samples.tsv`、`README.txt`。

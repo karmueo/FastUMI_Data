@@ -105,9 +105,10 @@ def test_stale_feedback_blocks_motion(node_rig):
     node.movej_publisher.publish.assert_not_called()
 
 
-@pytest.mark.parametrize("board, pattern", [
-    ("aprilgrid", None), ("checkerboard", "2 8 11 0.03")])
-def test_full_simulated_session_writes_samples(tmp_path, board, pattern):
+@pytest.mark.parametrize("board, target_type, pattern", [
+    ("aprilgrid", "aprilgrid", None), ("aprilgrid_24mm", "aprilgrid", None),
+    ("checkerboard", "checkerboard", "2 8 11 0.03")])
+def test_full_simulated_session_writes_samples(tmp_path, board, target_type, pattern):
     session_dir, rig, samples, mask = run_session(tmp_path, board, num_samples=8)
     assert len(samples) == 8 and mask is not None
     assert (session_dir / "gripper_mask.png").is_file()
@@ -131,7 +132,7 @@ def test_full_simulated_session_writes_samples(tmp_path, board, pattern):
     assert stamps["meta"] == stamps["image"]
     assert counts["/joint_states"] > 0 and counts["/hand_eye/gripper_mask"] == 1
     assert session["hand_eye_pattern"] == pattern
-    assert session["board"]["target_type"] == board
+    assert session["board"]["target_type"] == target_type
 
 
 def test_undo_writes_rejection(node_rig):

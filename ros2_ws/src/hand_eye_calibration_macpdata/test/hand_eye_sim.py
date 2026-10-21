@@ -33,6 +33,7 @@ CAMERA = SRC / "fastumi_usb_camera/config/EndEffectorCalib.yaml"
 PRIOR = REPO / "config/calibration/T_cam_end.yaml"
 BOARDS = {
     "aprilgrid": REPO / "config/calibration/april_6x6.yaml",
+    "aprilgrid_24mm": REPO / "config/calibration/april_6x6_24mm.yaml",
     "checkerboard": REPO / "config/calibration/checkerboard_11x8.yaml",
 }
 # 与实机腕部相机一致的全分辨率：AprilGrid 斜视时 960 宽下小标签解码不稳。

@@ -23,7 +23,7 @@ from hand_eye_calibration_macpdata.estimate import load_prior  # noqa: E402
 from hand_eye_sim import PRIOR, run_session  # noqa: E402
 
 
-@pytest.fixture(scope="module", params=["aprilgrid", "checkerboard"])
+@pytest.fixture(scope="module", params=["aprilgrid", "aprilgrid_24mm", "checkerboard"])
 def session(request, tmp_path_factory):
     return request.param, run_session(
         tmp_path_factory.mktemp(request.param), request.param, num_samples=15)
@@ -44,7 +44,13 @@ def test_solves_ground_truth_and_writes_prior_format(session, tmp_path):
     # 仿真真值即先验，cam0.T_cam_hand 写法与 T_cam_end.yaml 一致，可被 load_prior 读回。
     assert result["delta_to_prior"]["translation_mm"] < 2.0
     assert load_prior(output / "hand_eye_result.yaml") == pytest.approx(estimate, abs=1e-9)
-    assert result["board"]["target_type"] == board
+    # T_cam_end.yaml 与仓库文件同结构，可直接替换。
+    cam_end = yaml.safe_load((output / "T_cam_end.yaml").read_text())
+    assert cam_end.keys() == yaml.safe_load(PRIOR.read_text()).keys() == {"cam0"}
+    assert np.array(cam_end["cam0"]["T_cam_hand"]) == pytest.approx(
+        np.array(result["cam0"]["T_cam_hand"]), abs=1e-15)
+    assert load_prior(output / "T_cam_end.yaml") == pytest.approx(estimate, abs=1e-9)
+    assert board.startswith(result["board"]["target_type"])
 
 
 def test_export_layout_and_formats(session, tmp_path):
@@ -52,6 +58,7 @@ def test_export_layout_and_formats(session, tmp_path):
     output = tmp_path / "dataset"
     summary = exporter.export(session_dir, output, solve=False)
     assert not (output / "hand_eye_result.yaml").exists()
+    assert not (output / "T_cam_end.yaml").exists()
     images = sorted(path.name for path in (output / "images").iterdir())
     assert images == sorted(f"{index}.png" for index in range(15))
     rows = (output / "poses.csv").read_text().strip().split("\n")
@@ -63,7 +70,7 @@ def test_export_layout_and_formats(session, tmp_path):
     assert len(parameters["K"]) == 9 and parameters["D"] == [0.0] * 5
     assert (parameters["width"], parameters["height"]) == (1920, 1080)
     readme = (output / "README.txt").read_text()
-    if board == "aprilgrid":
+    if board.startswith("aprilgrid"):
         assert "command" not in summary and "不支持 AprilGrid" in readme
     else:
         assert '--calibration-pattern "2 8 11 0.03"' in readme

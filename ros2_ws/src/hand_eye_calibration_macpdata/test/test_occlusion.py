@@ -8,7 +8,7 @@ import pytest
 from fastumi_bringup.transforms import invert
 from hand_eye_calibration_macpdata.board import CheckerboardSpec, load_fisheye_camera
 from hand_eye_calibration_macpdata.occlusion import (
-    check_board_view, estimate_gripper_mask, load_mask,
+    check_board_view, estimate_gripper_mask, fill_enclosed_holes, load_mask,
 )
 from hand_eye_calibration_macpdata.synthetic import gripper_occluder, look_at, render_board
 
@@ -72,3 +72,30 @@ def test_load_mask_checks_size(tmp_path):
     assert load_mask(path, 20, 10).max() == 255
     with pytest.raises(ValueError):
         load_mask(path, 30, 10)
+
+
+def test_flickering_tag_on_gripper_is_filled_into_mask(camera):
+    """夹爪上贴的标签黑白边缘在抖动/JPEG 下方差大，会在掩膜中留洞；被夹爪包围的小洞应填上。"""
+    base = gripper_occluder(camera.width, camera.height)
+    top, left = camera.height - int(camera.height * 0.28) + 50, int(camera.width * 0.3) + 23
+    rng = np.random.default_rng(7)
+    frames = []
+    for image in _views(camera, base):
+        flicker = rng.integers(20, 250, (50, 50), dtype=np.uint8)
+        image[top:top + 50, left:left + 50] = flicker[..., None]
+        frames.append(image)
+    mask = estimate_gripper_mask(frames)
+    assert np.all(mask[top:top + 50, left:left + 50] > 0)
+
+
+def test_fill_enclosed_holes_keeps_large_windows_and_border_regions():
+    mask = np.zeros((100, 200), dtype=np.uint8)
+    mask[20:80, 20:180] = 255
+    mask[30:36, 30:36] = 0      # 小洞（36 px）：填
+    mask[30:70, 100:170] = 0    # 大封闭区（2800 px，14%）：保留
+    mask[90:, :] = 255
+    mask[95:, 50:60] = 0        # 与边界连通：保留
+    filled = fill_enclosed_holes(mask.copy(), 0.01)
+    assert np.all(filled[30:36, 30:36] == 255)
+    assert np.all(filled[30:70, 100:170] == 0)
+    assert np.all(filled[95:, 50:60] == 0)

@@ -52,7 +52,8 @@ from hand_eye_calibration_macpdata.occlusion import (
     check_board_view, estimate_gripper_mask, load_mask,
 )
 from hand_eye_calibration_macpdata.sampler import (
-    PlanContext, SamplerSettings, aim_for_mask, bootstrap_targets, check_reachable, plan_next,
+    PlanContext, SamplerSettings, aim_for_mask, bootstrap_targets, check_reachable,
+    max_view_distance, plan_next,
 )
 
 
@@ -196,7 +197,9 @@ class HandEyeCapture(Node):
             workspace_min=tuple(parameter("workspace_min")),
             workspace_max=tuple(parameter("workspace_max")),
             max_joint_step_rad=parameter("max_joint_step_rad"),
+            min_cell_px=parameter("min_cell_px"),
         )
+        self._check_distance_range()
         self.rng = np.random.default_rng(
             None if parameter("random_seed") < 0 else parameter("random_seed"))
         self._update_aim()
@@ -258,6 +261,29 @@ class HandEyeCapture(Node):
             + ("（dry_run：只规划不运动）" if self.dry_run else ""))
         self.get_logger().info(HELP_TEXT)
 
+    def _check_distance_range(self):
+        """按板最小特征检查距离参数：全部不可解码时报错，部分不可解码时提示建议值。
+
+        小标签板（如 april_6x6_24mm）在默认 0.25–0.45 m 远端斜视时标签过小，规划会跳过
+        这些位姿；这里提前给出建议的 distance_max_m。
+        """
+        settings = self.settings
+        near_limit = max_view_distance(
+            self.spec, self.camera, settings.tilt_deg[0], settings.min_cell_px)
+        far_limit = max_view_distance(
+            self.spec, self.camera, settings.tilt_deg[1], settings.min_cell_px)
+        if settings.distance_m[0] > near_limit:
+            raise ValueError(
+                f"distance_min_m={settings.distance_m[0]:.2f} m 时板特征不足 "
+                f"{settings.min_cell_px:g} px/格，最小倾角下最远约 {near_limit:.2f} m；"
+                f"请减小 distance_min_m/distance_max_m")
+        if settings.distance_m[1] > far_limit:
+            self.get_logger().warning(
+                f"板最小特征在 distance_max_m={settings.distance_m[1]:.2f} m 时可能不足 "
+                f"{settings.min_cell_px:g} px/格（倾角 {settings.tilt_deg[0]:g}°/"
+                f"{settings.tilt_deg[1]:g}° 下约 {near_limit:.2f}/{far_limit:.2f} m 为上限），"
+                f"超出的位姿会被跳过；建议 -p distance_max_m:={far_limit:.2f}")
+
     def _declare_parameters(self):
         """声明所有 ROS 参数及默认值（长度米、角度度/弧度见名称）。"""
         defaults = {
@@ -288,6 +314,7 @@ class HandEyeCapture(Node):
             "workspace_min": [-0.6, -0.5, 0.16],
             "workspace_max": [0.6, 0.5, 0.60],
             "max_joint_step_rad": 1.2,
+            "min_cell_px": 5.0,
             "random_seed": -1,
         }
         for name, value in defaults.items():
@@ -450,7 +477,7 @@ class HandEyeCapture(Node):
             return None
         try:
             image = decode_image(message)
-            observation = self.detector.detect(image)
+            observation = self.detector.detect(image, self.mask)
         except ValueError as error:
             self.get_logger().warning(f"图像处理失败：{error}")
             return None

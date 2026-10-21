@@ -17,6 +17,8 @@ from fastumi_bringup.transforms import make_transform
 
 
 TAG_FAMILIES = {"tag36h11": cv2.aruco.DICT_APRILTAG_36h11}
+# 黑框边长方向的格数（含 1 格黑边），解码需要每格足够像素。
+TAG_CELLS = {"tag36h11": 8}
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,16 @@ class AprilGridSpec:
         points[:, 0] = column * self.pitch_m + offsets[corner, 0]
         points[:, 1] = row * self.pitch_m + offsets[corner, 1]
         return points
+
+    @property
+    def cells_per_feature(self):
+        """一条特征边（标签黑框边）跨越的格数，用于估算每格像素。"""
+        return TAG_CELLS[self.tag_family]
+
+    def feature_segments(self):
+        """全部标签黑框边的端点 ^board p，形状 (N, 2, 3)，单位米。"""
+        corners = self.object_points(np.arange(self.corner_count)).reshape(-1, 4, 3)
+        return np.stack([corners, np.roll(corners, -1, axis=1)], axis=2).reshape(-1, 2, 3)
 
     def outline_points(self):
         """必须完整可见的区域：全部标签的包围框四角（米）。"""
@@ -143,6 +155,16 @@ class CheckerboardSpec:
         points[:, 0] = column * self.col_spacing_m
         points[:, 1] = row * self.row_spacing_m
         return points
+
+    cells_per_feature = 1
+
+    def feature_segments(self):
+        """相邻内角点（即方格边）的端点 ^board p，形状 (N, 2, 3)，单位米。"""
+        grid = self.object_points(np.arange(self.corner_count)).reshape(
+            self.target_rows, self.target_cols, 3)
+        along_rows = np.stack([grid[:, :-1], grid[:, 1:]], axis=2).reshape(-1, 2, 3)
+        along_cols = np.stack([grid[:-1], grid[1:]], axis=2).reshape(-1, 2, 3)
+        return np.concatenate([along_rows, along_cols])
 
     def outline_points(self):
         """必须完整可见的区域：内角点包围框各向外扩一格（外圈方格也要可见才能检测）。"""
@@ -318,8 +340,10 @@ class AprilGridDetector(_FisheyePnP):
     """
 
     KALIBR_CORNER_INDICES = np.array([1, 0, 3, 2])
-    subpix_window = 3
-    max_shift_px = 2.0
+    min_subpix_half_window = 3
+    min_shift_px = 2.0
+    # 解码不全且标签每格小于该像素数时，放大 2 倍重新解码。
+    upscale_below_cell_px = 12.0
 
     def __init__(self, spec: AprilGridSpec, camera: FisheyeCamera):
         super().__init__(spec, camera)
@@ -332,39 +356,87 @@ class AprilGridDetector(_FisheyePnP):
         dictionary.maxCorrectionBits = 3
         self.detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
-    def detect(self, image_bgr):
-        """检测标签角点；超出板范围或重复的 ID 丢弃。"""
+    def detect(self, image_bgr, mask=None):
+        """检测标签角点；超出板范围或重复的 ID 丢弃。
+
+        小标签（实板 24 mm、约 6 px/格）在原图上常只能解出一半，此时在 2 倍放大图上
+        再解一次并按 ID 合并（原图结果优先）。mask 为夹爪掩膜（mono8，非零为夹爪）时，
+        中心落在掩膜内的标签丢弃：板不可能出现在夹爪上，那里的解码只能是夹爪上贴的
+        标签等误检。
+        """
         gray = self._check_size(image_bgr)
-        corners, tag_ids, _ = self.detector.detectMarkers(gray)
-        if tag_ids is None:
-            return self._finish(np.zeros(0, dtype=int), np.zeros((0, 2)), 0)
-        tag_ids = tag_ids.reshape(-1)
-        unique, counts = np.unique(tag_ids, return_counts=True)
-        duplicated = set(unique[counts > 1].tolist())
+        tags = self._outside_mask(self._decode(gray, 1), mask)
+        if len(tags) < self.spec.tag_count and (
+                not tags or np.median([self._cell_px(q) for q in tags.values()])
+                < self.upscale_below_cell_px):
+            upscaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            for tag_id, tag_corners in self._outside_mask(self._decode(upscaled, 2), mask).items():
+                tags.setdefault(tag_id, tag_corners)
         ids, pixels = [], []
-        for tag_id, tag_corners in sorted(zip(tag_ids.tolist(), corners), key=lambda item: item[0]):
-            if tag_id >= self.spec.tag_count or tag_id in duplicated:
-                continue
+        for tag_id in sorted(tags):
             ids.extend(4 * tag_id + np.arange(4))
-            pixels.append(np.asarray(tag_corners, dtype=np.float64).reshape(4, 2)[
-                self.KALIBR_CORNER_INDICES])
+            pixels.append(tags[tag_id])
         pixels = np.vstack(pixels) if pixels else np.zeros((0, 2))
         if len(pixels):
             pixels = self._refine_x_junctions(gray, pixels)
         return self._finish(ids, pixels, len(pixels) // 4)
 
+    def _decode(self, gray, scale):
+        """返回 {tag_id: (4,2) Kalibr 角点顺序的原图像素}；scale 为 gray 相对原图的放大倍数。"""
+        corners, tag_ids, _ = self.detector.detectMarkers(gray)
+        if tag_ids is None:
+            return {}
+        tag_ids = tag_ids.reshape(-1)
+        unique, counts = np.unique(tag_ids, return_counts=True)
+        duplicated = set(unique[counts > 1].tolist())
+        tags = {}
+        for tag_id, tag_corners in zip(tag_ids.tolist(), corners):
+            if tag_id >= self.spec.tag_count or tag_id in duplicated:
+                continue
+            pixels = np.asarray(tag_corners, dtype=np.float64).reshape(4, 2)[
+                self.KALIBR_CORNER_INDICES]
+            # cv2.resize 像素中心约定：原图 x = (放大图 x + 0.5) / scale - 0.5。
+            tags[tag_id] = (pixels + 0.5) / scale - 0.5
+        return tags
+
+    @staticmethod
+    def _outside_mask(tags, mask):
+        """去掉中心像素落在掩膜内（或图像外）的标签。"""
+        if mask is None:
+            return tags
+        height, width = mask.shape
+        kept = {}
+        for tag_id, tag_pixels in tags.items():
+            u, v = np.round(tag_pixels.mean(axis=0)).astype(int)
+            if 0 <= u < width and 0 <= v < height and mask[v, u] == 0:
+                kept[tag_id] = tag_pixels
+        return kept
+
+    def _cell_px(self, tag_pixels):
+        """标签平均边长 / 每边格数，即一格（码元）的像素宽。"""
+        edges = np.linalg.norm(tag_pixels - np.roll(tag_pixels, 1, axis=0), axis=1)
+        return float(np.mean(edges)) / self.spec.cells_per_feature
+
     def _refine_x_junctions(self, gray, pixels):
         """Kalibr 板标签角与间隙小黑方块构成 X 形交点，用 cornerSubPix 细化。
 
-        合成鱼眼图上角点误差由约 1 px 降至约 0.4 px；移动超过 max_shift_px 的点
-        （无小方块的板或模糊）保留轮廓拟合结果。
+        轮廓拟合的角点会向标签内缩：实板 24 mm 标签（约 6 px/格）实测每边约 4 px，
+        合成图约 1.5 px。半窗取一格像素宽（下限 3），使窗口能覆盖到真实交点，又不
+        越过黑边进入数据码元；移动超过 max(2 px, 半窗) 的点（模糊或无小方块）保留
+        轮廓结果。实拍 24 mm 板重投影 RMS 由约 2.7 px 降至约 0.3 px。
         """
-        refined = pixels.astype(np.float32).reshape(-1, 1, 2).copy()
-        cv2.cornerSubPix(gray, refined, (self.subpix_window, self.subpix_window), (-1, -1), (
-            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.01))
-        refined = refined.reshape(-1, 2).astype(np.float64)
-        shift = np.linalg.norm(refined - pixels, axis=1)
-        return np.where((shift <= self.max_shift_px)[:, None], refined, pixels)
+        refined = pixels.copy()
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 60, 0.005)
+        for start in range(0, len(pixels), 4):
+            tag = pixels[start:start + 4]
+            half = max(self.min_subpix_half_window, int(round(self._cell_px(tag))))
+            points = tag.astype(np.float32).reshape(-1, 1, 2).copy()
+            cv2.cornerSubPix(gray, points, (half, half), (-1, -1), criteria)
+            points = points.reshape(-1, 2).astype(np.float64)
+            shift = np.linalg.norm(points - tag, axis=1)
+            keep = shift <= max(self.min_shift_px, float(half))
+            refined[start:start + 4] = np.where(keep[:, None], points, tag)
+        return refined
 
 
 class CheckerboardDetector(_FisheyePnP):
@@ -423,8 +495,12 @@ class CheckerboardDetector(_FisheyePnP):
             grid = grid[::-1, ::-1]
         return grid.reshape(-1, 2)
 
-    def detect(self, image_bgr):
-        """仅接受整板检测；角点顺序统一后求位姿。"""
+    def detect(self, image_bgr, mask=None):
+        """仅接受整板检测；角点顺序统一后求位姿。
+
+        整板检测不会被局部误检混入，mask 仅为与 AprilGrid 接口一致而接受，不使用；
+        板与夹爪的重叠由调用方的遮挡检查处理。
+        """
         gray = self._check_size(image_bgr)
         corners = self._find(gray)
         if corners is not None:

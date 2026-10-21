@@ -26,6 +26,8 @@ hand_eye_calibration_macpdata.solve）。同时输出鱼眼矫正后的针孔数
     hand_eye_result.yaml：T_flange_cam（^Link7 T_cam，米）、与先验同格式的
         cam0.T_cam_hand（^cam T_Link7）、T_base_board、重投影 RMS、各方法初值、
         每样本残差、剔除样本与多样性统计。
+    T_cam_end.yaml：与 config/calibration/T_cam_end.yaml 完全同格式（仅 cam0.T_cam_hand），
+        可直接复制替换。
     images/<i>.png（鱼眼矫正为针孔，i 从 0 连续）、poses.csv（制表符分隔，无表头，
     x y z qx qy qz qw，^base T_Link7，米）、intrinsics.yaml（ros__parameters 下 K/D=0/
     width/height）、samples.tsv、gripper_mask.png（若有）、README.txt。
@@ -177,6 +179,26 @@ def _matrix(transform) -> list:
     return [[float(v) for v in row] for row in np.asarray(transform)]
 
 
+def cam_end_yaml(report: dict, source: str) -> str:
+    """生成与 config/calibration/T_cam_end.yaml 同格式的文本（cam0.T_cam_hand = ^cam T_Link7，米）。"""
+    rows = report["cam0"]["T_cam_hand"]
+    translation = np.asarray(report["T_flange_cam"])[:3, 3] * 1e3
+    lines = [
+        "# 手眼标定外参",
+        "# T_cam_hand：机械臂末端 → 相机坐标系，平移单位为米。",
+        f"# 来源：{source}（{report['board']['target_type']}，{report['samples_used']} 个样本，"
+        f"重投影 RMS {report['reprojection_rms_px']:.2f} px，"
+        f"旋转跨度 {report['diversity']['rotation_span_deg']:.1f}°）；",
+        f"# 对应 ^Link7 T_cam 平移 [{translation[0]:.2f}, {translation[1]:.2f}, "
+        f"{translation[2]:.2f}] mm。",
+        "cam0:",
+        "  T_cam_hand:",
+    ]
+    lines += ["    - [" + ", ".join(repr(float(value)) for value in row) + "]" for row in rows[:3]]
+    lines.append("    - [0, 0, 0, 1]")
+    return "\n".join(lines) + "\n"
+
+
 def solve_report(camera, spec, samples, observations, prior=None) -> dict:
     """求解并组装 hand_eye_result.yaml 内容；observations 与 samples 一一对应。"""
     views = [View(base_from_flange=_pose_matrix(sample.pose),
@@ -237,7 +259,7 @@ def export(source: Path, output: Path, *, balance=0.0, fov_scale=1.0, drop_outsi
         image = cv2.imdecode(np.frombuffer(bytes(sample.image.data), np.uint8), cv2.IMREAD_COLOR)
         if image is None or image.shape[1::-1] != size:
             raise ValueError(f"样本 {sample.index} 图像解码失败或尺寸不符")
-        observation = detector.detect(image)
+        observation = detector.detect(image, mask)
         if observation.camera_from_board is None:
             undetected.append(sample.index)
             continue
@@ -270,7 +292,8 @@ def export(source: Path, output: Path, *, balance=0.0, fov_scale=1.0, drop_outsi
     readme = [
         "眼在手上手眼标定导出（keyboard_hand_eye_capture 会话）。",
         "hand_eye_result.yaml：本脚本的求解结果（T_flange_cam = ^Link7 T_cam；"
-        "cam0.T_cam_hand 可直接替换 config/calibration/T_cam_end.yaml）。",
+        "cam0.T_cam_hand 可直接替换 config/calibration/T_cam_end.yaml）；"
+        "T_cam_end.yaml：与之完全同格式，可直接复制替换。",
         "images/ 已由鱼眼矫正为针孔（intrinsics.yaml 中 D=0）；"
         "poses.csv：^base T_Link7，x y z qx qy qz qw（米）。",
     ]
@@ -298,6 +321,9 @@ def export(source: Path, output: Path, *, balance=0.0, fov_scale=1.0, drop_outsi
         report = solve_report(camera, spec, exported, observations, prior)
         (output / "hand_eye_result.yaml").write_text(
             yaml.safe_dump(report, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        session_dir = source.parent if source.name == "bag" else source
+        (output / "T_cam_end.yaml").write_text(
+            cam_end_yaml(report, f"hand_eye/{session_dir.name}"), encoding="utf-8")
         summary["result"] = report
     return summary
 
@@ -344,6 +370,8 @@ def main(argv=None) -> int:
         for warning in result["warnings"]:
             print(f"警告：{warning}")
         print(f"结果：{args.output / 'hand_eye_result.yaml'}")
+        print(f"标定文件（与 config/calibration/T_cam_end.yaml 同格式）："
+              f"{args.output / 'T_cam_end.yaml'}")
     return 0
 
 
