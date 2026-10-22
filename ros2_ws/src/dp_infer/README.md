@@ -36,8 +36,8 @@ checkpoint、训练 URDF 和控制 URDF 均在启动前校验；指定的 checkp
 
 ## 启动
 
-以下命令用于 Jetson 上已有的 H.264 腕部相机配置。从仓库根目录开始，在两个终端
-使用相同的 `ROS_DOMAIN_ID`（均未设置时为 0）。`hardware.launch.py` 会让机械臂
+以下命令使用 JPEG 压缩腕部图像（`sensor_msgs/msg/CompressedImage`）。从仓库根目录开始，
+在两个终端使用相同的 `ROS_DOMAIN_ID`（均未设置时为 0）。`hardware.launch.py` 会让机械臂
 回位、夹爪张开，启动前确认运动区域无人和障碍物，并使急停可用。
 
 ### 第一步：启动相机、机械臂与夹爪（终端 A）
@@ -54,16 +54,15 @@ source install/setup.bash
 source hardware.local.env
 ros2 launch fastumi_bringup hardware.launch.py \
   wrist_video_device:="$WRIST_VIDEO_DEVICE" \
-  wrist_camera_mode:=h264 h264_encoder:="${H264_ENCODER:-hardware}" \
-  enable_decoder:=true start_recorder:=false \
+  wrist_camera_mode:=jpeg enable_decoder:=false start_recorder:=false \
   gripper_network_interface:="$GRIPPER_NETWORK_INTERFACE" \
   gripper_config_file:="$GRIPPER_CONFIG_FILE"
 ```
 
 保持终端 A 运行。这个入口启动 RM75 驱动并执行初始 MoveJ 回位，启动 Unitree
-夹爪及腕部相机；`enable_decoder:=true` 同时在本机发布
-`/wrist_camera/image_decoded`，不要再单独启动 `receive.launch.py`。本次不录制，
-因此设置 `start_recorder:=false`。等待日志确认回位成功；失败时统一启动会退出。
+夹爪及腕部相机；相机直接发布 JPEG 压缩话题
+`/wrist_camera/image_raw/compressed`，推理端设置 `image_type:=compressed`，无需启动解码节点。
+本次不录制，因此设置 `start_recorder:=false`。等待日志确认回位成功；失败时统一启动会退出。
 
 在终端 B 从仓库根目录加载同一 ROS 环境，依次检查反馈；`ros2 topic hz` 会持续
 运行，看到稳定帧率后按 Ctrl+C，再执行下一条：
@@ -71,7 +70,7 @@ ros2 launch fastumi_bringup hardware.launch.py \
 ```bash
 source /opt/ros/humble/setup.bash
 source ros2_ws/install/setup.bash
-ros2 topic hz /wrist_camera/image_decoded
+ros2 topic hz /wrist_camera/image_raw/compressed
 ros2 topic hz /joint_states
 ros2 topic hz /motion_control/gripper_state
 ros2 topic echo --once /rm_driver/udp_feedback_valid
@@ -94,7 +93,7 @@ checkpoint="$(realpath dataset/vr_target_umi/full_20260925_174814/checkpoints/la
 training_urdf="$(realpath dataset/vr_target_umi/rm_75.urdf)"
 ros2 launch dp_infer dp_infer.launch.py \
   checkpoint:="$checkpoint" urdf_path:="$training_urdf" \
-  image_type:=raw image_topic:=/wrist_camera/image_decoded \
+  image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed \
   num_inference_steps:=4 dry_run:=true
 ```
 
@@ -118,7 +117,7 @@ ros2 topic info --verbose /motion_control/gripper_command
 ```bash
 ros2 launch dp_infer dp_infer.launch.py \
   checkpoint:="$checkpoint" urdf_path:="$training_urdf" \
-  image_type:=raw image_topic:=/wrist_camera/image_decoded \
+  image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed \
   num_inference_steps:=4 dry_run:=false
 ```
 
@@ -199,13 +198,13 @@ Backspace 请求停止。回位响应超时后，须按 Backspace 并收到停�
 `--ros-args -p inference_parameter_node:=/节点名 -p set_inference_steps_service:=/服务名`。
 
 仅需推理时加 `start_controller:=false`。恢复 checkpoint 原始的 16 次去噪设置时加
-`num_inference_steps:=16`；launch 默认 8 次。非 H.264 相机模式应同时修改
-`image_type` 和 `image_topic`：JPEG 使用默认的 `compressed` 和
-`/wrist_camera/image_raw/compressed`，raw 使用 `raw` 和
-`/wrist_camera/image_raw`。H.264 若未通过硬件入口启用解码，须单独启动本地
+`num_inference_steps:=16`；launch 默认 8 次。上述 JPEG 模式使用 `compressed` 和
+`/wrist_camera/image_raw/compressed`。切换相机模式时须同步修改 `image_type` 和 `image_topic`：
+raw 使用 `raw` 和 `/wrist_camera/image_raw`；H.264 解码后使用 `raw` 和
+`/wrist_camera/image_decoded`。H.264 若未通过硬件入口启用解码，须单独启动本地
 `receive.launch.py`，并保持只有一个解码节点。限时方向诊断仍可按下文
 [限时实机方向试验](#限时实机方向试验) 使用 `live_guarded_trial.py`，该脚本会自行
-启动解码节点。改用该脚本前，应停止当前硬件入口并以 `enable_decoder:=false`
+启动解码节点。改用该脚本前，应停止当前硬件入口并以 `wrist_camera_mode:=h264 enable_decoder:=false`
 重新启动、等待回位成功，避免两个节点同时发布 `/wrist_camera/image_decoded`。
 
 运行期间可在已加载相同 ROS 环境的终端修改后续推理的去噪步数，无需重启：
