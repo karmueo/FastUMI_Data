@@ -22,6 +22,13 @@
   <exec_depend>fastumi_recorder</exec_depend>
   <exec_depend>fastumi_interfaces</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rm_75_config</exec_depend>
+  <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>moveit_ros_move_group</exec_depend>
+  <exec_depend>moveit_ros_visualization</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
   <exec_depend>unitree_gripper</exec_depend>
 
   <test_depend>python3-pytest</test_depend>

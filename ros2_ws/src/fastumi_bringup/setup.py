@@ -16,7 +16,7 @@ setup(
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE_NAME}"]),
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
-        (f"share/{PACKAGE_NAME}/config", glob("config/*.example")),
+        (f"share/{PACKAGE_NAME}/config", glob("config/*.example") + glob("config/*.yaml")),
         (f"share/{PACKAGE_NAME}/assets", glob("assets/*.urdf")),
     ],
     install_requires=["setuptools"],

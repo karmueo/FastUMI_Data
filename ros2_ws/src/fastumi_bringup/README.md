@@ -2,6 +2,7 @@
 
 本入口启动 RM75、Unitree 夹爪和末端相机，机械臂回位成功后提供 MCAP 录制服务。
 UMI 相机、Tracker、遥操主机和 RViz2 使用独立入口；缺少 UMI 或 Tracker 不影响本入口。
+RM75 的 RViz2/MoveIt2 显示见[RViz2 与 MoveIt2 显示](#rviz2-与-moveit2-显示)。
 
 ## 前提
 
@@ -26,9 +27,10 @@ git -C .. submodule update --init ros2_ws/src/ros2_rm_robot
 rosdep install --from-paths src/fastumi_usb_camera src/unitree_gripper \
   src/fastumi_bringup src/fastumi_recorder src/fastumi_interfaces \
   src/ros2_rm_robot/rm_ros_interfaces src/ros2_rm_robot/rm_description \
-  src/ros2_rm_robot/rm_driver src/ros2_rm_robot/rm_bringup --ignore-src -r -y
+  src/ros2_rm_robot/rm_driver src/ros2_rm_robot/rm_bringup \
+  src/ros2_rm_robot/rm_moveit2_config/rm_75_config --ignore-src -r -y
 python -m colcon build --symlink-install --packages-select \
-  fastumi_interfaces rm_ros_interfaces rm_description rm_driver rm_bringup \
+  fastumi_interfaces rm_ros_interfaces rm_description rm_75_config rm_driver rm_bringup \
   fastumi_usb_camera unitree_gripper fastumi_recorder fastumi_bringup \
   --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
 ```
@@ -205,6 +207,39 @@ ros2 service call /fastumi/arm/move_joints fastumi_interfaces/srv/MoveJoints \
 [`hand_eye_calibration_macpdata`](../hand_eye_calibration_macpdata/README.md)：按上文启动本入口后，
 在第二个交互终端运行 `ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture`。
 
+## RViz2 与 MoveIt2 显示
+
+`moveit_display.launch.py` 是独立的只读显示入口，可与 `hardware.launch.py` 同时运行：
+`robot_state_publisher` 根据 RM75 驱动发布的 `/joint_states`（joint1..joint7，弧度）发布 TF，
+RViz2 加载 `rm_75_config` 的 `moveit.rviz`，MotionPlanning 面板使用 SRDF 中的 `rm_group`。
+`move_group` 设置 `allow_trajectory_execution=false` 且不加载控制器，面板只能规划和预览，
+**Execute 不会向机械臂下发命令**；运动仍通过[急停与回位服务](#急停与回位服务)等现有通路完成。
+
+上文首次构建已包含 MoveIt2 依赖与 `rm_75_config`。从旧版工作区升级时，先重新执行
+上文的依赖安装命令，再补建显示相关包：
+
+```bash
+python -m colcon build --symlink-install --packages-select rm_description rm_75_config fastumi_bringup \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+```
+
+硬件 bringup 启动后，在带图形界面的终端加载相同环境并执行：
+
+```bash
+ros2 launch fastumi_bringup moveit_display.launch.py
+```
+
+远程会话没有 `DISPLAY` 时 RViz2 会直接退出，先执行 `export DISPLAY=:10.0`（按实际会话填写）。
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `start_rsp` | true | 启动 `robot_state_publisher`；其它入口已发布 `robot_description` 与 TF 时设为 false |
+| `start_move_group` | true | 启动只读 `move_group`；false 时 MotionPlanning 面板不可用，只能显示模型 |
+| `rviz_config` | `rm_75_config/config/moveit.rviz` | RViz2 配置文件 |
+
+未连接机械臂时，可另开终端运行 `ros2 run joint_state_publisher_gui joint_state_publisher_gui`
+提供 `/joint_states` 检查显示。
+
 ## 相机模式与画面查看
 
 默认采集 1920×1080@30 FPS；一次模式选择同时设置相机输出和 Recorder 输入。
@@ -292,7 +327,7 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 | 参数 | 默认值 | 含义 |
 |---|---|---|
 | `start_arm` / `start_gripper` / `start_wrist_camera` / `start_recorder` | true | 独立组件开关 |
-| `move_to_initial_pose` | true | 启动机械臂时执行一次回位；false 用于维护 |
+| `move_to_initial_pose` | true | 启动机械臂时执行一次回位；false 用于维护。目标关节角在 `config/initial_pose.yaml`（joint1..joint7，单位：度）中配置，修改后需重新构建本包 |
 | `start_arm_control` | true | 启动机械臂时同时启动急停/回位服务节点 |
 | `wrist_camera_mode` | jpeg | `raw`、`jpeg` 或 `h264`；同时选择相机发布和录制器输入 |
 | `enable_decoder` | false | 是否在 Jetson 本地把 H.264 解码到 `/wrist_camera/image_decoded` |
