@@ -296,7 +296,8 @@ python -m fastumi_rm75.rm75_placo_controller --ros-args \
   -p dry_run:=true
 ```
 
-最后一条命令显式启用 dry-run，不向机械臂发送运动指令。其他节点在 NumPy 1 终端
+最后一条命令显式启用 dry-run，不向机械臂发送运动指令；起始关节角取自
+`src/fastumi_bringup/config/initial_pose.yaml` 源文件，修改后重启节点即可，其他配置不保存角度副本。其他节点在 NumPy 1 终端
 运行；每个新终端都按 ROS、对应环境、`install/setup.bash` 的顺序加载。
 
 ## 独立 Kalibr 相机内参标定

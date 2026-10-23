@@ -29,10 +29,15 @@ def test_zero_pose_is_vertical_stack(arm):
     assert pose[:3, :3] == pytest.approx(np.eye(3), abs=1e-6)
 
 
-def test_initial_pose_points_flange_down(arm):
+def test_configured_initial_pose_is_valid_and_reachable(arm):
+    """起点可由 YAML 调整，须在关节限位内且可由附近种子求解。"""
+    assert arm.within_limits(INITIAL_JOINT_POSITIONS)
     pose = arm.forward(INITIAL_JOINT_POSITIONS)
-    assert pose[:3, 2] == pytest.approx([0.0, 0.0, -1.0], abs=1e-3)
-    assert pose[2, 3] == pytest.approx(0.337, abs=1e-3)
+    joints = arm.solve_ik(pose, np.asarray(INITIAL_JOINT_POSITIONS) + 0.01)
+    assert joints is not None
+    reached = arm.forward(joints)
+    assert np.linalg.norm(reached[:3, 3] - pose[:3, 3]) < 5e-4
+    assert rotation_angle(reached[:3, :3], pose[:3, :3]) < math.radians(0.1)
 
 
 def test_jacobian_matches_finite_difference(arm):

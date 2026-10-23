@@ -22,6 +22,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from dexgraspvla_infer.offline import load_samples
 
 
@@ -64,7 +65,7 @@ def main():
     camera_process = subprocess.Popen([str(native_build / "mock_camera"), str(frame_file), str(bgr.shape[0]), str(bgr.shape[1])],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     processes.append(camera_process)
-    home = np.deg2rad([0, 20, 0, 70, 0, 90, 90]).tolist()
+    home = list(load_initial_joint_positions())
     state, control, debug_times, sequences, metrics = {}, {}, [], [], []
     watch_running = [False]
 

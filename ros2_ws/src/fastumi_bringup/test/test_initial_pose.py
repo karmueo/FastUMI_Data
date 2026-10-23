@@ -9,6 +9,8 @@ import rclpy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
+
 
 @pytest.fixture
 def mover():
@@ -40,13 +42,14 @@ def test_home_sends_only_once(mover):
     mover.command_publisher.publish.assert_called_once()
     command = mover.command_publisher.publish.call_args.args[0]
     assert command.speed == 20 and command.block and command.dof == 7
+    assert list(command.joint) == pytest.approx(load_initial_joint_positions(), abs=1e-6)
     mover._result_callback(Bool(data=True))
     assert mover.finished and not mover.failed
 
 
 def test_already_home_no_command(mover):
     """已在目标容差内时立即完成，不发运动指令。"""
-    feedback(mover, [0.]*7)
+    feedback(mover, load_initial_joint_positions())
     mover._timer_callback()
     assert mover.finished and not mover.failed
     mover.command_publisher.publish.assert_not_called()

@@ -44,7 +44,9 @@ ros2 launch fastumi_bringup hardware.launch.py \
   wrist_camera_mode:=h264 enable_decoder:=true start_recorder:=false
 ```
 
-启动会使机械臂回位、夹爪张开。默认起点为 `[0, 20, 0, 70, 0, 90, 90]` 度。运行前停止其他机械臂及夹爪控制器。
+启动会使机械臂回位、夹爪张开。硬件与关节策略控制器均从
+[`initial_pose.yaml`](../fastumi_bringup/config/initial_pose.yaml) 源文件读取起点，修改后重启相关节点。
+运行前停止其他机械臂及夹爪控制器。
 
 ## 3. 启动推理：终端二
 
@@ -89,6 +91,6 @@ ros2 run dp_infer keyboard_control
 - `checkpoint:=...`：覆盖模型权重路径。
 - `camera_timeout_s`：在策略配置中设置，默认 0.5 秒；相机断流或动作轨迹耗尽均会停车。
 - [dexgraspvla.yaml](config/dexgraspvla.yaml)：感知和策略参数。
-- [rm75_joint_controller.yaml](../fastumi_rm75/config/rm75_joint_controller.yaml)：起点、工作区、速度限制和反馈超时。
+- [rm75_joint_controller.yaml](../fastumi_rm75/config/rm75_joint_controller.yaml)：起点容差、工作区、速度限制和反馈超时；起始关节角只在 `initial_pose.yaml` 中配置。
 
 软件链路已完成联合验证，实机完整搬放及移动盘子的任务效果仍需验收。

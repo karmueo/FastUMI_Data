@@ -1,5 +1,4 @@
 # RM75 初始关节目标，按 joint1..joint7 排列，单位：度。
 # 由 fastumi_bringup.initial_pose 读取并转换为弧度；启动回位、回位服务、键盘回位与推理 launch 共用。
-# 运行时读取 install/share 下的副本，修改后需重新 colcon build fastumi_bringup。
-initial_joint_positions_deg: [0, 20, 0, 70, 0, 90, 90]
-#initial_joint_positions_deg: [90, 60, 5, 120, 90, -85, 90]
+# 所有入口仅从此源文件读取；修改后重启相关节点即可，无需重建配置副本。
+initial_joint_positions_deg: [90, 60, 5, 120, 90, -90, 90]

@@ -1,7 +1,7 @@
 """RM75 初始关节目标，按 joint1 至 joint7 排列，单位为弧度。
 
-数值来自 config/initial_pose.yaml（单位为度），优先读取安装后的 share 目录，
-包未安装时回退到源码目录。
+数值只来自工作区 src/fastumi_bringup/config/initial_pose.yaml（单位为度）。
+安装后的节点也定位该源文件，避免读取过期的 install/share 副本。
 """
 
 import math
@@ -15,15 +15,12 @@ JOINT_COUNT = 7
 
 
 def default_config_path():
-    """返回安装后的配置路径；找不到时返回源码目录中的配置。"""
-    try:
-        from ament_index_python.packages import get_package_share_directory
-        installed = Path(get_package_share_directory('fastumi_bringup')) / 'config' / CONFIG_NAME
-        if installed.is_file():
-            return installed
-    except Exception:
-        pass
-    return Path(__file__).resolve().parents[1] / 'config' / CONFIG_NAME
+    """从源码或 install 中定位工作区唯一的起始姿态配置；缺失即报错。"""
+    for parent in Path(__file__).resolve().parents:
+        source = parent / 'src' / 'fastumi_bringup' / 'config' / CONFIG_NAME
+        if source.is_file():
+            return source
+    raise FileNotFoundError('找不到工作区 src/fastumi_bringup/config/initial_pose.yaml')
 
 
 def load_initial_joint_positions(path=None):

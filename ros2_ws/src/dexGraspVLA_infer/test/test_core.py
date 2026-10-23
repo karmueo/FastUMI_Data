@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from dexgraspvla_infer.benchmark import evaluate
 from dexgraspvla_infer.core import ObservationBuffer, denormalize_actions, normalization_bounds, normalize_state
 
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[4]
 
 def test_state_and_action_normalization_roundtrip():
     lower, upper = normalization_bounds(ROOT / "model/DexGraspVLA/assets/rm75/rm_75.urdf")
-    state = np.r_[np.deg2rad([0, 20, 0, 70, 0, 90, 90]), 0.4]
+    state = np.r_[load_initial_joint_positions(), 0.4]
     normalized = normalize_state(state, lower, upper)
     restored = denormalize_actions(np.tile(normalized, (64, 1)), lower, upper)
     np.testing.assert_allclose(restored, np.tile(state, (64, 1)), atol=1e-6)
