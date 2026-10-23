@@ -4,8 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from launch import LaunchContext
-from launch.actions import DeclareLaunchArgument, EmitEvent
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction
 from launch.utilities import perform_substitutions
+import launch_ros.actions
 import pytest
 
 
@@ -312,3 +313,72 @@ def test_fixed_camera_disabled_switch(monkeypatch, tmp_path):
     actions = _fixed_actions(mod, monkeypatch, tmp_path, start_fixed_camera='false',
                              fixed_video_device='/dev/v4l/by-path/x-video-index0')
     assert actions[1][1]['fixed_image_topic'] == ''
+
+
+def test_wrist_alignment_overlay_is_forwarded(monkeypatch, tmp_path):
+    """安装对齐叠加默认关闭，开启与透明度透传给末端相机 launch。"""
+    mod = module()
+    device = tmp_path / 'camera-video-index0'
+    device.touch()
+    monkeypatch.setattr(mod, 'is_physical_video_device_path', lambda _: True)
+    monkeypatch.setattr(
+        mod, '_include', lambda package, launch, arguments=None: (package, arguments))
+    ctx = context(
+        mod, start_arm='false', start_gripper='false', start_recorder='false',
+        wrist_video_device=str(device))
+    camera = mod._launch_hardware(ctx)[0]
+    assert camera[1]['alignment_overlay'].perform(ctx) == 'false'
+    ctx.launch_configurations.update(wrist_alignment_overlay='true', wrist_alignment_alpha='0.3')
+    assert camera[1]['alignment_overlay'].perform(ctx) == 'true'
+    assert camera[1]['alignment_alpha'].perform(ctx) == '0.3'
+
+
+@pytest.mark.parametrize('mode', ['raw', 'jpeg', 'h264'])
+def test_wrist_alignment_does_not_enable_fixed_camera_overlay(monkeypatch, tmp_path, mode):
+    """执行两次真实 include 的参数声明，防止腕部叠加开关泄漏到固定相机。"""
+    nodes = []
+
+    def capture_node(ctx, **settings):
+        """只记录节点声明，不启动相机、解码器或其他硬件。"""
+        settings['namespace'] = settings['namespace'].perform(ctx) \
+            if 'namespace' in settings else ''
+        nodes.append(settings)
+
+    monkeypatch.setattr(
+        launch_ros.actions, 'Node',
+        lambda **settings: OpaqueFunction(function=capture_node, kwargs=settings))
+    mod = module()
+    camera_share = Path(__file__).resolve().parents[2] / 'fastumi_usb_camera'
+    package_share = mod.get_package_share_directory
+    monkeypatch.setattr(
+        mod, 'get_package_share_directory',
+        lambda name: str(camera_share) if name == 'fastumi_usb_camera' else package_share(name))
+    monkeypatch.setattr(mod, 'is_physical_video_device_path', lambda _: True)
+    wrist, fixed = tmp_path / 'wrist-video-index0', tmp_path / 'fixed-video-index0'
+    wrist.touch()
+    fixed.touch()
+    # 相机 launch 自身仍验证物理端口格式；这里只替代路径验证，不打开设备。
+    monkeypatch.setattr('fastumi_usb_camera.capture.is_physical_video_device_path', lambda _: True)
+    ctx = context(
+        mod, start_arm='false', start_gripper='false', start_recorder='false',
+        wrist_video_device=str(wrist), fixed_video_device=str(fixed),
+        wrist_camera_mode=mode, enable_decoder='true' if mode == 'h264' else 'false',
+        wrist_alignment_overlay='true', wrist_alignment_alpha='0.3')
+
+    def visit(entity):
+        """按 launch 顺序执行声明和作用域动作，替代真正的进程启动。"""
+        for child in entity.visit(ctx) or []:
+            visit(child)
+
+    for action in mod._launch_hardware(ctx):
+        visit(action)
+    overlays = [node for node in nodes if node['executable'] == 'alignment_overlay_node']
+    assert len(overlays) == 1
+    assert overlays[0]['namespace'] == 'wrist_camera'
+    assert overlays[0]['parameters'][0]['alpha'] == 0.3
+    assert overlays[0]['parameters'][0]['input_topic'] == {
+        'raw': 'image_raw', 'jpeg': 'image_raw/compressed',
+        'h264': '/wrist_camera/image_decoded',
+    }[mode]
+    fixed_nodes = [node for node in nodes if node['namespace'] == 'fixed_camera']
+    assert [node['executable'] for node in fixed_nodes] == ['usb_camera_node']

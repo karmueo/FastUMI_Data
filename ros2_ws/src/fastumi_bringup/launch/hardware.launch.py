@@ -98,6 +98,7 @@ def _fixed_camera(context, publish_reliability):
         'topic': '/fixed_camera/image_raw',
         'decoded_topic': '/fixed_camera/image_decoded',
         'publish_reliability': publish_reliability,
+        'alignment_overlay': 'false',
     })
 
 
@@ -163,6 +164,9 @@ def _launch_hardware(context):
             'topic': '/wrist_camera/image_raw',
             'decoded_topic': '/wrist_camera/image_decoded',
             'publish_reliability': publish_reliability,
+            # 安装对齐：叠加 UMI 夹爪 mask，发布 /wrist_camera/image_alignment/compressed。
+            'alignment_overlay': LaunchConfiguration('wrist_alignment_overlay'),
+            'alignment_alpha': LaunchConfiguration('wrist_alignment_alpha'),
         }
         if mode == 'h264':
             camera_arguments['h264_encoder'] = LaunchConfiguration('h264_encoder')
@@ -226,6 +230,7 @@ def generate_launch_description():
         camera_publish_reliability='reliable', camera_record_reliability='reliable',
         camera_record_depth='30',
         shutdown_save_timeout='120.0', record_policy_topics='true',
+        wrist_alignment_overlay='false', wrist_alignment_alpha='0.5',
     )
     return LaunchDescription([
         *[DeclareLaunchArgument(key, default_value=value) for key, value in defaults.items()],

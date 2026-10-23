@@ -9,6 +9,9 @@ from launch.events import Shutdown
 from launch.logging import get_logger
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.utilities import make_namespace_absolute, prefix_namespace
+from launch_ros.utilities.to_parameters_list import is_node_name_matched
+import yaml
 
 from fastumi_usb_camera.capture import is_physical_video_device_path
 
@@ -51,7 +54,11 @@ def _camera_node(context):
     if compressed and compressed not in ("true", "false"):
         raise ValueError("publish_compressed 只能是 true 或 false")
 
+    overlay = _alignment_overlay_settings(context)
+
     if enable_ffmpeg == "true":
+        if overlay is not None and enable_decoder != "true":
+            raise ValueError("alignment_overlay=true 在 FFmpeg 模式下需要 enable_decoder=true")
         if device_uid:
             raise ValueError("device_uid 仅支持 Python 相机模式")
         if video_device:
@@ -97,6 +104,11 @@ def _camera_node(context):
                     "output_topic": decoded_topic,
                 }],
             ))
+            if overlay is not None:
+                # 解码后的原始图像叠加；输出与 Python 模式同名，位于相机话题的父命名空间。
+                parent = topic.rsplit("/", 1)[0] or ""
+                nodes.append(_alignment_overlay_node(
+                    overlay, decoded_topic, False, f"{parent}/image_alignment/compressed"))
         return nodes
 
     if compressed:
@@ -112,7 +124,7 @@ def _camera_node(context):
     ):
         # 显式指定 VID/PID 时关闭 YAML 中的默认视频设备路径。
         overrides["video_device"] = ""
-    return [Node(
+    nodes = [Node(
         package="fastumi_usb_camera",
         executable="usb_camera_node",
         name="usb_camera_node",
@@ -120,6 +132,71 @@ def _camera_node(context):
         output="screen",
         parameters=[config, overrides],
     )]
+    if overlay is not None:
+        # publish_compressed 未显式给出时沿用相机配置文件中的值。
+        is_compressed = compressed == "true" if compressed else \
+            _configured_publish_compressed(context, config)
+        nodes.append(_alignment_overlay_node(
+            overlay, "image_raw/compressed" if is_compressed else "image_raw",
+            is_compressed, "image_alignment/compressed"))
+    return nodes
+
+
+def _matching_parameters(document, node_fqn, prefix=""):
+    """按 YAML 顺序合并匹配完整节点名的参数，支持嵌套命名空间与 *、** 通配符。"""
+    parameters = {}
+    for name, value in document.items():
+        if name == "ros__parameters":
+            if is_node_name_matched(prefix, node_fqn):
+                parameters.update(value)
+        elif isinstance(value, dict):
+            parameters.update(_matching_parameters(
+                value, node_fqn, f"{prefix}/{name.strip('/')}"))
+    return parameters
+
+
+def _configured_publish_compressed(context, config):
+    """与相机 Node 一致地展开命名空间；未配置输出模式时沿用节点默认 raw。"""
+    namespace = make_namespace_absolute(prefix_namespace(
+        context.launch_configurations.get("ros_namespace"),
+        LaunchConfiguration("namespace").perform(context)))
+    node_fqn = prefix_namespace(namespace, "usb_camera_node")
+    with open(config, encoding="utf-8") as stream:
+        document = yaml.safe_load(stream) or {}
+    return bool(_matching_parameters(document, node_fqn).get("publish_compressed", False))
+
+
+def _alignment_overlay_settings(context):
+    """解析安装对齐叠加参数；未开启时返回 None。"""
+    enabled = LaunchConfiguration("alignment_overlay").perform(context).strip().lower()
+    if enabled not in ("true", "false"):
+        raise ValueError("alignment_overlay 只能是 true 或 false")
+    if enabled == "false":
+        return None
+    mask = Path(LaunchConfiguration("alignment_mask").perform(context))
+    if not mask.is_file():
+        raise ValueError(f"alignment_mask 文件不存在: {mask}")
+    alpha = float(LaunchConfiguration("alignment_alpha").perform(context))
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alignment_alpha 必须在 [0, 1] 内")
+    return {"mask_file": str(mask), "alpha": alpha}
+
+
+def _alignment_overlay_node(overlay, input_topic, compressed, output_topic):
+    """叠加节点只订阅相机输出，不影响原始话题、录制和推理输入。"""
+    return Node(
+        package="fastumi_usb_camera",
+        executable="alignment_overlay_node",
+        name="alignment_overlay",
+        namespace=LaunchConfiguration("namespace"),
+        output="screen",
+        parameters=[{
+            **overlay,
+            "input_topic": input_topic,
+            "compressed": compressed,
+            "output_topic": output_topic,
+        }],
+    )
 
 
 def _shutdown_on_camera_exit(event, context):
@@ -147,6 +224,11 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("publish_reliability", default_value="reliable"),
         DeclareLaunchArgument("topic", default_value="/usb_camera/image_raw"),
         DeclareLaunchArgument("decoded_topic", default_value="/usb_camera/image_decoded"),
+        # 末端相机安装对齐：把 UMI 夹爪 mask 按透明度叠加后发布到 image_alignment/compressed。
+        DeclareLaunchArgument("alignment_overlay", default_value="false"),
+        DeclareLaunchArgument(
+            "alignment_mask", default_value=str(default_config.with_name("umi_gripper_mask.png"))),
+        DeclareLaunchArgument("alignment_alpha", default_value="0.5"),
     ]
     arguments.extend(
         DeclareLaunchArgument(name, default_value="")

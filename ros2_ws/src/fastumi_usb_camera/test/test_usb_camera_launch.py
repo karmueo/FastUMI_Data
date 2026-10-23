@@ -8,6 +8,10 @@ from launch import LaunchContext
 from launch.actions import DeclareLaunchArgument, EmitEvent
 from launch.utilities import perform_substitutions
 import pytest
+import rclpy
+from rclpy.context import Context
+from rclpy.node import Node as RosNode
+import yaml
 
 
 LAUNCH_FILE = Path(__file__).resolve().parents[1] / "launch" / "usb_camera.launch.py"
@@ -239,3 +243,126 @@ def test_invalid_boolean_launch_value_fails(monkeypatch, name):
     module = _load_launch()
     with pytest.raises(ValueError, match=name):
         _selected_node(monkeypatch, module, **{name: "yes"})
+
+
+def _all_nodes(monkeypatch, module, **changes):
+    """返回 launch 生成的全部 Node 声明。"""
+    monkeypatch.setattr(module, "Node", lambda **kwargs: kwargs)
+    return module._camera_node(_context(module, **changes))
+
+
+def test_alignment_overlay_is_off_by_default_and_follows_output_mode(monkeypatch, tmp_path):
+    """叠加节点默认不启动；开启后输入随 raw/JPEG 输出切换，输出为独立话题。"""
+    module = _load_launch()
+    mask = tmp_path / "mask.png"
+    mask.write_bytes(b"png")
+    assert len(_all_nodes(monkeypatch, module)) == 1
+    raw = _all_nodes(monkeypatch, module, alignment_overlay="TRUE",
+                     alignment_mask=str(mask), publish_compressed="false")
+    assert raw[1]["executable"] == "alignment_overlay_node"
+    assert raw[1]["parameters"][0] == {
+        "mask_file": str(mask), "alpha": 0.5, "input_topic": "image_raw",
+        "compressed": False, "output_topic": "image_alignment/compressed"}
+    jpeg = _all_nodes(monkeypatch, module, alignment_overlay="true",
+                      alignment_mask=str(mask), publish_compressed="true",
+                      alignment_alpha="0.3")
+    assert jpeg[1]["parameters"][0]["input_topic"] == "image_raw/compressed"
+    assert jpeg[1]["parameters"][0]["compressed"] is True
+    assert jpeg[1]["parameters"][0]["alpha"] == 0.3
+    # 未显式给出 publish_compressed 时沿用相机配置文件。
+    config = tmp_path / "camera.yaml"
+    config.write_text("/**:\n  ros__parameters:\n    publish_compressed: true\n")
+    inherited = _all_nodes(monkeypatch, module, alignment_overlay="true",
+                           alignment_mask=str(mask), config=str(config))
+    assert inherited[1]["parameters"][0]["compressed"] is True
+
+
+def test_alignment_overlay_rejects_invalid_settings(monkeypatch, tmp_path):
+    """mask 缺失、透明度越界、开关非法或 FFmpeg 未解码时启动报错。"""
+    module = _load_launch()
+    mask = tmp_path / "mask.png"
+    mask.write_bytes(b"png")
+    with pytest.raises(ValueError, match="alignment_mask"):
+        _all_nodes(monkeypatch, module, alignment_overlay="true",
+                   alignment_mask=str(tmp_path / "missing.png"))
+    with pytest.raises(ValueError, match="alignment_alpha"):
+        _all_nodes(monkeypatch, module, alignment_overlay="true",
+                   alignment_mask=str(mask), alignment_alpha="1.5")
+    with pytest.raises(ValueError, match="alignment_overlay"):
+        _all_nodes(monkeypatch, module, alignment_overlay="yes")
+    with pytest.raises(ValueError, match="enable_decoder"):
+        _all_nodes(monkeypatch, module, alignment_overlay="true",
+                   alignment_mask=str(mask), enable_ffmpeg="true")
+    ffmpeg = _all_nodes(monkeypatch, module, alignment_overlay="true",
+                        alignment_mask=str(mask), enable_ffmpeg="true", enable_decoder="true",
+                        topic="/wrist_camera/image_raw",
+                        decoded_topic="/wrist_camera/image_decoded")
+    assert ffmpeg[-1]["parameters"][0]["input_topic"] == "/wrist_camera/image_decoded"
+    assert ffmpeg[-1]["parameters"][0]["output_topic"] == \
+        "/wrist_camera/image_alignment/compressed"
+
+
+@pytest.mark.parametrize("document, namespace, base_namespace, actual_namespace", [
+    ({"other_node": {"ros__parameters": {"publish_compressed": False}},
+      "/**": {"ros__parameters": {"publish_compressed": True}}},
+     "usb_camera", "", "/usb_camera"),
+    ({"other_node": {"ros__parameters": {"publish_compressed": False}},
+      "/wrist_camera/usb_camera_node": {"ros__parameters": {"publish_compressed": True}}},
+     "wrist_camera", "", "/wrist_camera"),
+    ({"other_node": {"ros__parameters": {"publish_compressed": False}},
+      "robot": {"wrist_camera": {
+          "usb_camera_node": {"ros__parameters": {"publish_compressed": True}}}}},
+     "wrist_camera", "/robot", "/robot/wrist_camera"),
+    ({"other_node": {"ros__parameters": {"publish_compressed": False}},
+      "/robot/*/usb_camera_node": {"ros__parameters": {"publish_compressed": True}}},
+     "wrist_camera", "/robot", "/robot/wrist_camera"),
+    ({"other_node": {"ros__parameters": {"publish_compressed": False}},
+      "/robot/**": {"ros__parameters": {"publish_compressed": True}}},
+     "wrist_camera", "/robot", "/robot/wrist_camera"),
+    ({"/robot/usb_camera_node": {"ros__parameters": {"publish_compressed": True}}},
+     "wrist_camera", "/robot", "/robot/wrist_camera"),
+    ({"/**": {"ros__parameters": {"publish_compressed": True}},
+      "/wrist_camera/usb_camera_node": {"ros__parameters": {"publish_compressed": False}}},
+     "wrist_camera", "", "/wrist_camera"),
+    ({"/wrist_camera/usb_camera_node": {"ros__parameters": {"publish_compressed": False}},
+      "/**": {"ros__parameters": {"publish_compressed": True}}},
+     "wrist_camera", "", "/wrist_camera"),
+    ({"other_node": {"ros__parameters": {"publish_compressed": False}},
+      "/wrist_camera/usb_camera_node": {"ros__parameters": {"publish_compressed": True}}},
+     "/wrist_camera", "/robot", "/wrist_camera"),
+], ids=["unrelated-first", "fully-qualified", "nested-namespace", "single-wildcard",
+        "recursive-wildcard", "no-match", "exact-last", "wildcard-last", "absolute-namespace"])
+@pytest.mark.parametrize("override", ["", "true", "false"],
+                         ids=["from-config", "force-jpeg", "force-raw"])
+def test_alignment_input_matches_native_ros_parameter_resolution(
+        monkeypatch, tmp_path, document, namespace, base_namespace, actual_namespace, override):
+    """用原生 ROS 参数解析结果校验叠加话题，覆盖命名空间、通配符与覆盖顺序。"""
+    module = _load_launch()
+    config = tmp_path / "camera.yaml"
+    config.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    mask = tmp_path / "mask.png"
+    mask.write_bytes(b"png")
+    ctx = _context(
+        module, config=str(config), namespace=namespace, ros_namespace=base_namespace,
+        alignment_overlay="true", alignment_mask=str(mask), publish_compressed=override)
+    monkeypatch.setattr(module, "Node", lambda **settings: settings)
+    camera, overlay = module._camera_node(ctx)
+
+    ros_context = Context()
+    rclpy.init(args=[], context=ros_context)
+    node = None
+    try:
+        # 普通 ROS 节点仅解析相机收到的参数文件与覆盖值，不打开硬件。
+        node = RosNode(
+            "usb_camera_node", namespace=actual_namespace, context=ros_context,
+            cli_args=["--ros-args", "--params-file", str(config)],
+            parameter_overrides=[rclpy.parameter.Parameter(name, value=value)
+                                 for name, value in camera["parameters"][1].items()])
+        expected = node.declare_parameter("publish_compressed", False).value
+        settings = overlay["parameters"][0]
+        assert settings["compressed"] is expected
+        assert settings["input_topic"] == ("image_raw/compressed" if expected else "image_raw")
+    finally:
+        if node is not None:
+            node.destroy_node()
+        ros_context.shutdown()

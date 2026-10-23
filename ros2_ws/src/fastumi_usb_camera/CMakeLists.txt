@@ -22,7 +22,10 @@ pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app
 ament_python_install_package(${PROJECT_NAME})
 configure_file(scripts/usb_camera_node.in
   ${CMAKE_CURRENT_BINARY_DIR}/usb_camera_node @ONLY)
+configure_file(scripts/alignment_overlay_node.in
+  ${CMAKE_CURRENT_BINARY_DIR}/alignment_overlay_node @ONLY)
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/usb_camera_node
+  ${CMAKE_CURRENT_BINARY_DIR}/alignment_overlay_node
   DESTINATION lib/${PROJECT_NAME})
 
 add_library(${PROJECT_NAME}_core INTERFACE)

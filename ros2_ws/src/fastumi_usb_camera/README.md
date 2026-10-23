@@ -225,6 +225,70 @@ Keep Last(1)。发送端每秒记录所选后端、采集、覆盖、无订阅�
 采集、发布、覆盖、不完整和解码失败帧数；出现坏帧时限频告警。连续 5 秒无完整帧、
 相机断开或采集线程异常时，节点退出并释放相机。
 
+## 末端相机安装对齐（UMI 夹爪 mask 叠加）
+
+策略是在 UMI 相机视角下训练的。末端相机相对夹爪的安装位姿应尽量与 UMI 相机一致，
+否则画面不同，手指位置也会偏（见 dp_infer README 的"Link7 部署修正"）。
+设置 `alignment_overlay:=true` 后，launch 会额外启动 `alignment_overlay_node`：
+
+- 它只订阅相机输出，不改原始话题，录制和推理不受影响。
+- 它把 UMI 夹爪参考图按 `alignment_alpha` 透明度叠加到实时画面，限频 10 Hz，
+  发布到相机命名空间下的 `image_alignment/compressed`。
+- 画面元素：
+  - 绿线：参考 mask 轮廓；
+  - 红框：UMI 手指码参考位置；
+  - 黄框：实拍手指码；
+  - 左上角：两枚码的平均角点误差（像素），节点日志每 2 秒也打印一次。
+
+参考 mask 是 [`config/umi_gripper_mask.png`](config/umi_gripper_mask.png)（BGRA，alpha 为 mask），
+码角点在同名 `.yaml`，人工检查用 `_preview.jpg`。它们由仓库根目录的
+`extract_umi_gripper_mask.py` 从训练 HDF5 中夹爪全开（开度 ≥ 0.9）的帧生成：
+
+- 逐像素中位数加 MAD 分割出静止的夹爪本体和橙色指面；
+- 再沿鱼眼射线，从 UMI 内参（`config/calibration/UmiCalib.yaml`）重投影到末端相机内参
+  （`EndEffectorCalib.yaml`）下。
+
+所以两台相机主点不同不影响对齐：mask 与实拍重合，就表示相机相对夹爪的位姿一致。
+换了训练数据或重标定内参后，按下面的命令重新生成：
+
+```bash
+# 仓库根目录，ros2_ws/.venv-numpy1
+python extract_umi_gripper_mask.py --training-dataset dataset/processed/jingbao_v1
+```
+
+也可以通过 `alignment_mask:=<png>` 指定别的 mask。单通道灰度 PNG 按品红着色。
+尺寸必须与相机图像一致，否则节点报错退出。
+
+对齐步骤：
+
+1. 启动带叠加的硬件链路。
+   ```bash
+   ros2 launch fastumi_bringup hardware.launch.py ... wrist_alignment_overlay:=true wrist_alignment_alpha:=0.5
+   ```
+   单独启动相机时用 `usb_camera.launch.py ... alignment_overlay:=true`。
+   H.264 模式下必须同时设置 `enable_decoder:=true`。
+2. 让夹爪全开，与生成 mask 时的开度一致。
+   ```bash
+   ros2 topic pub --once /motion_control/gripper_command std_msgs/msg/Float32 "{data: 1.0}"
+   ```
+3. 打开叠加画面。
+   ```bash
+   ros2 run rqt_image_view rqt_image_view /wrist_camera/image_alignment/compressed
+   ```
+4. 调整相机：
+   - 先调俯仰和左右偏转，让两枚黄框分别落进红框；
+   - 再调前后距离，让黄框大小与红框一致，同时实拍指尖与绿线轮廓重合；
+   - 目标是两枚码的误差都降到几个像素以内。
+5. 调完后，相机相对 Link7 的位姿已经变了，必须：
+   - 重做手眼标定；
+   - 按 dp_infer README 重新生成 `link7_correction.yaml`。
+   否则旧的修正会把手指推到错误位置。
+   即使相机相对夹爪完全对齐，仍有
+   `C = inv(T_Cd_Link7_training) @ T_Cd_Link7_deploy`。
+   只有训练与部署使用相同的手眼外参时，C 才应接近单位阵；重做手眼后，
+   训练标签仍使用旧外参，需用 `--deploy-hand-eye <新 T_cam_end.yaml>` 生成修正，
+   不能把 C 接近单位阵作为对齐验收标准。
+
 ## 验证
 
 ```bash

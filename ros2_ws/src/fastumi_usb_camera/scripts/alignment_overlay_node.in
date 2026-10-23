@@ -1,0 +1,8 @@
+#!@Python3_EXECUTABLE@
+"""Run the alignment overlay node from a CMake-installed entry point."""
+
+from fastumi_usb_camera.alignment_overlay_node import main
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,35 @@
+# 由 extract_umi_gripper_mask.py 生成：UMI 夹爪 mask 重投影到末端相机像素系，
+# tag_corners_px 为手指码角点（id → 左上起顺时针 4 点，像素）。
+umi_gripper_mask:
+  image: umi_gripper_mask.png
+  size:
+  - 1920
+  - 1080
+  tag_corners_px:
+    0:
+    - - 550.24
+      - 977.12
+    - - 648.4
+      - 976.13
+    - - 586.3
+      - 1059.26
+    - - 472.07
+      - 1058.29
+    1:
+    - - 1324.65
+      - 962.11
+    - - 1421.81
+      - 957.09
+    - - 1502.98
+      - 1035.24
+    - - 1390.76
+      - 1043.23
+  tag_detections:
+    0: 298
+    1: 300
+  frames: 300
+  min_gripper: 0.9
+  umi_camera: /home/scl/work/FastUMI_Data/config/calibration/UmiCalib.yaml
+  robot_camera: /home/scl/work/FastUMI_Data/ros2_ws/src/fastumi_usb_camera/config/EndEffectorCalib.yaml
+  training_dataset: dataset/processed/jingbao_v1
+  episodes: 101

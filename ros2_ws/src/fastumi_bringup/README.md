@@ -348,6 +348,7 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 | `image_topic` / `image_transport` | 由 `wrist_camera_mode` 决定 | 使用本地相机时，显式覆盖必须匹配所选模式；关闭本地相机时可指定外部源 |
 | `shutdown_save_timeout` | 120 秒 | Ctrl+C 等待保存的上限 |
 | `record_policy_topics` | true | 同时录制 dp_infer 的 `/fastumi/policy/action_sequence`、`/fastumi/policy/gripper_close_allowed` 与 `/fastumi/policy/gripper_state`；无推理时为空话题，离线转换忽略 |
+| `wrist_alignment_overlay` / `wrist_alignment_alpha` | false / 0.5 | 末端相机安装对齐：叠加 UMI 夹爪 mask，发布 `/wrist_camera/image_alignment/compressed`，见 fastumi_usb_camera README |
 
 维护时可关闭对应 `start_*` 开关，或用 `move_to_initial_pose:=false` 跳过启动回位。
 机械臂独立入口为 `ros2 launch rm_driver rm_75_driver.launch.py`；相机与夹爪独立入口见
