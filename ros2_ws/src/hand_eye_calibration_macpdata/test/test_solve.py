@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from fastumi_bringup.kinematics import ArmKinematics
 from fastumi_bringup.transforms import (
     axis_angle_matrix, invert, make_transform, rotation_angle,
@@ -13,6 +12,7 @@ from fastumi_bringup.transforms import (
 from hand_eye_calibration_macpdata.board import AprilGridSpec, load_fisheye_camera
 from hand_eye_calibration_macpdata.estimate import load_prior
 from hand_eye_calibration_macpdata.solve import View, solve_hand_eye
+from hand_eye_sim import CALIBRATION_JOINTS
 
 
 SRC = Path(__file__).resolve().parents[2]
@@ -23,7 +23,7 @@ def _views(rng, count, noise_px):
     arm = ArmKinematics.from_urdf(SRC / "fastumi_rm75/assets/rm_75_kinematic.urdf")
     camera = load_fisheye_camera(SRC / "fastumi_usb_camera/config/EndEffectorCalib.yaml")
     flange_from_camera = load_prior(SRC.parents[1] / "config/calibration/T_cam_end.yaml")
-    reference = arm.forward(np.array(INITIAL_JOINT_POSITIONS)) @ flange_from_camera
+    reference = arm.forward(np.array(CALIBRATION_JOINTS)) @ flange_from_camera
     rotation = reference[:3, :3] @ np.diag([1.0, -1.0, -1.0])
     center = reference[:3, 3] + 0.35 * reference[:3, 2]
     base_from_board = make_transform(rotation, center - rotation @ SPEC.center_point())

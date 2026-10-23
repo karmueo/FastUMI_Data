@@ -8,6 +8,7 @@ keyboard_hand_eye_capture:
     urdf_path: ""              # 空 = fastumi_bringup/assets/rm_75_kinematic.urdf（base_link→Link7）
     prior_path: ""             # 可选外参先验，如 config/calibration/T_cam_end.yaml
     prior_convention: cam_from_flange   # T_cam_hand 为 ^cam T_flange（导出求解的 hand_eye_result.yaml 同格式）
+    reference_pose_path: ""    # 可选参考位姿文件（reference_joints_deg，度）；按两次 g 前往。按 r 时会写出 <会话>/reference_pose.yaml
     gripper_mask_path: ""      # 可选人工夹爪掩膜 PNG（非零 = 夹爪）；空则自举时自动估计
     image_topic: /wrist_camera/image_raw/compressed
     dataset_root: ""           # 空 = $DATASET_ROOT 或录制器默认根目录；输出到 <root>/hand_eye/session_*

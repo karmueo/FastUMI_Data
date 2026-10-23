@@ -8,7 +8,11 @@ config/calibration/april_6x6.yaml、checkerboard_11x8.yaml。
         -p board_config:=/abs/FastUMI_Data/config/calibration/april_6x6.yaml
 
 按键：r 设参考位姿 | a 开始/继续自动采集 | 空格 急停并暂停 | c 当前位姿补采 |
-      u 撤销上一样本 | m 重新估计夹爪掩膜 | h 回参考位姿 | q 保存并退出
+      u 撤销上一样本 | m 重新估计夹爪掩膜 | h 回参考位姿 | g 去参考位姿文件位姿（两次确认）|
+      q 保存并退出
+
+参考位姿：按 r 后关节角（度）写入会话目录 reference_pose.yaml；下次以
+-p reference_pose_path:=<该文件> 启动，按两次 g 用 MoveJ 移到该位姿，静止后自动设为参考位姿。
 
 流程：r 记录能看到整块板的参考位姿 → a 先在参考位姿附近做 8 个小幅自举运动（估计夹爪
 掩膜和粗外参）→ 按“看向标定板”策略随机规划位姿，静止后采样，直到 num_samples 个。
@@ -38,6 +42,7 @@ from rclpy.serialization import serialize_message
 from rm_ros_interfaces.msg import Movej
 from sensor_msgs.msg import CompressedImage, Image, JointState
 from std_msgs.msg import Bool, Empty, Float32, String
+import yaml
 
 from fastumi_bringup.kinematics import JOINT_NAMES, ArmKinematics
 from fastumi_bringup.terminal import TerminalKeyReader
@@ -63,6 +68,9 @@ GRIPPER_TOLERANCE = 0.05
 STATIONARY_TOLERANCE_RAD = 1e-4
 MASK_FRAME_BUFFER = 12
 STOP_RESULT_GRACE_SECONDS = 3.0
+# g 键两次按下的最大间隔（秒）：第一次只打印目标，第二次才运动。
+GOTO_CONFIRM_SECONDS = 5.0
+REFERENCE_POSE_NAME = "reference_pose.yaml"
 # 自举后粗外参下板位姿离散度超过该值时提示外参不可信（毫米）。
 BOARD_SPREAD_WARNING_MM = 30.0
 
@@ -78,7 +86,7 @@ SAMPLE_TOPICS = {
 }
 
 HELP_TEXT = ("按键：r 设参考位姿 | a 开始/继续自动采集 | 空格 急停暂停 | c 补采 | "
-             "u 撤销 | m 重估掩膜 | h 回参考位姿 | q 保存退出")
+             "u 撤销 | m 重估掩膜 | h 回参考位姿 | g 去参考位姿文件位姿（按两次确认）| q 保存退出")
 
 
 @dataclass
@@ -95,7 +103,7 @@ class Capture:
 
 @dataclass
 class Motion:
-    """进行中的 MoveJ：purpose 为 bootstrap / sample / manual / home。"""
+    """进行中的 MoveJ：purpose 为 bootstrap / sample / manual / home / goto_reference。"""
 
     joints: np.ndarray
     sent_at: float
@@ -128,6 +136,27 @@ def as_compressed(message, image_bgr):
     if not ok:
         raise ValueError("PNG 编码失败")
     return CompressedImage(header=message.header, format="png", data=encoded.tobytes())
+
+
+def load_reference_pose(path):
+    """读取参考位姿文件中 reference_joints_deg（joint1..joint7，度），返回弧度数组。"""
+    with open(path, encoding="utf-8") as stream:
+        data = yaml.safe_load(stream) or {}
+    degrees = data.get("reference_joints_deg") if isinstance(data, dict) else None
+    if not isinstance(degrees, list) or len(degrees) != len(JOINT_NAMES):
+        raise ValueError(f"{path}: reference_joints_deg 必须是 {len(JOINT_NAMES)} 个数值")
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               and math.isfinite(value) for value in degrees):
+        raise ValueError(f"{path}: reference_joints_deg 必须全部为有限数值")
+    return np.radians(np.array(degrees, dtype=float))
+
+
+def reference_pose_yaml(joints, comment):
+    """生成参考位姿文件文本；joints 为弧度，写出为度。"""
+    degrees = ", ".join(f"{math.degrees(value):.3f}" for value in joints)
+    return (f"# 手眼标定参考位姿：joint1..joint7（度），用于 -p reference_pose_path:=<本文件>\n"
+            f"# {comment}\n"
+            f"reference_joints_deg: [{degrees}]\n")
 
 
 def _share_file(package, relative, parameter_name):
@@ -168,6 +197,11 @@ class HandEyeCapture(Node):
             "fastumi_bringup", "assets/rm_75_kinematic.urdf", "urdf_path")
         self.urdf_path = urdf_path
         self.kinematics = ArmKinematics.from_urdf(urdf_path)
+        self.reference_target = None
+        if parameter("reference_pose_path"):
+            self.reference_target = load_reference_pose(parameter("reference_pose_path"))
+            if not self.kinematics.within_limits(self.reference_target):
+                raise ValueError(f"{parameter('reference_pose_path')}: 参考位姿超出 URDF 关节限位")
 
         self.prior = None
         if parameter("prior_path"):
@@ -226,6 +260,8 @@ class HandEyeCapture(Node):
         self.capture_purpose = None
         self.settled_at = None
         self.reference = None
+        self.goto_confirm_at = None  # 第一次按 g 的时间（time.monotonic）
+        self.pending_reference = False  # goto_reference 到位后，静止时自动设参考
         self.bootstrap_queue = []
         self.bootstrap_captures = []
         self.mask_frames = deque(maxlen=MASK_FRAME_BUFFER)
@@ -292,6 +328,7 @@ class HandEyeCapture(Node):
             "urdf_path": "",
             "prior_path": "",
             "prior_convention": "cam_from_flange",
+            "reference_pose_path": "",
             "gripper_mask_path": "",
             "image_topic": "/wrist_camera/image_raw/compressed",
             "dataset_root": "",
@@ -364,6 +401,8 @@ class HandEyeCapture(Node):
             if motion.purpose in ("bootstrap", "sample", "manual"):
                 self.capture_purpose = motion.purpose
                 self.settled_at = None
+            elif motion.purpose == "goto_reference":
+                self.pending_reference = True
             return
         if self.phase == "paused":
             self.get_logger().warning("运动已被急停中断")
@@ -433,8 +472,8 @@ class HandEyeCapture(Node):
         self.get_logger().info(f"{purpose} MoveJ {self.speed}%: [{degrees}]")
         return True
 
-    def _open_writer(self):
-        """首次需要写入时创建会话目录和 MCAP，并写入会话配置。"""
+    def _open_writer(self, reference_joints=None):
+        """首次需要写入时创建会话目录和 MCAP，并写入会话配置（含首个参考位姿关节角，弧度）。"""
         if self.writer is not None:
             return
         from fastumi_recorder.bag_writer import ProcessBagWriter
@@ -454,6 +493,8 @@ class HandEyeCapture(Node):
             "prior_flange_from_camera": None if self.prior is None else self.prior.tolist(),
             "gripper_openness": self.gripper_openness,
             "speed": self.speed,
+            "reference_joints": None if reference_joints is None else
+            [float(value) for value in reference_joints],
         }
         self._write("session", String(data=json.dumps(session, ensure_ascii=False)),
                     self.get_clock().now().nanoseconds)
@@ -717,6 +758,10 @@ class HandEyeCapture(Node):
         if self.phase in ("locked", "paused", "idle", "done"):
             if self.capture_purpose == "manual" and self.motion is None:
                 self._process_capture()
+            elif (self.pending_reference and self.phase != "locked" and self.motion is None
+                  and self._stationary_for(self.settle_seconds)):
+                self.pending_reference = False
+                self._set_reference()
             return
         if self.motion is not None:
             return
@@ -807,7 +852,8 @@ class HandEyeCapture(Node):
             self.get_logger().warning("节点已锁定，仅响应 q；请检查机械臂后重启")
             return
         handlers = {"r": self._set_reference, "a": self._start_auto, "c": self._manual_capture,
-                    "u": self._undo, "m": self._remask, "h": self._go_home}
+                    "u": self._undo, "m": self._remask, "h": self._go_home,
+                    "g": self._goto_reference}
         handler = handlers.get(key)
         if handler is not None:
             handler()
@@ -821,7 +867,8 @@ class HandEyeCapture(Node):
         return False
 
     def _emergency_pause(self):
-        """立即下发 move_stop 并暂停自动流程。"""
+        """取消待确认运动，立即下发 move_stop 并暂停自动流程。"""
+        self.goto_confirm_at = None
         if not self.dry_run:
             self.stop_publisher.publish(Empty())
         if self.motion is not None:
@@ -852,7 +899,7 @@ class HandEyeCapture(Node):
             self.get_logger().warning(
                 f"当前视野未检测到板（角点 {capture.observation.corner_count}），请调整位姿")
             return
-        self._open_writer()
+        self._open_writer(capture.joints)
         self.reference = {"joints": capture.joints, "base_from_flange": capture.base_from_flange,
                           "capture": capture}
         self.mask_frames.append(capture)
@@ -860,9 +907,14 @@ class HandEyeCapture(Node):
             self.pose_pool.append((capture.base_from_flange,
                                    capture.observation.camera_from_board))
         distance = capture.observation.camera_from_board[2, 3]
+        pose_path = self.session_dir / REFERENCE_POSE_NAME
+        pose_path.write_text(reference_pose_yaml(
+            capture.joints, f"来源 {self.session_dir.name}，板距相机约 {distance:.2f} m"),
+            encoding="utf-8")
         self.get_logger().info(
             f"参考位姿已设定：角点 {capture.observation.corner_count}/{self.spec.corner_count}，"
-            f"板距相机约 {distance:.2f} m；按 a 开始")
+            f"板距相机约 {distance:.2f} m；按 a 开始。关节角已保存，下次可用 "
+            f"-p reference_pose_path:={pose_path}")
 
     def _start_auto(self):
         """首次进入自举阶段；暂停后继续原阶段。"""
@@ -937,6 +989,30 @@ class HandEyeCapture(Node):
         if self.phase in ("bootstrap", "auto"):
             self.phase = "paused"
         self._send_move(self.reference["joints"], "home")
+
+    def _goto_reference(self):
+        """MoveJ 到 reference_pose_path 的位姿：第一次按只打印目标，GOTO_CONFIRM_SECONDS 内再按才运动。"""
+        if self._busy():
+            return
+        if self.reference_target is None:
+            self.get_logger().warning("未提供 reference_pose_path，无法前往参考位姿")
+            return
+        if self.joints is None:
+            self.get_logger().warning("没有关节反馈，无法前往参考位姿")
+            return
+        now = time.monotonic()
+        if self.goto_confirm_at is None or now - self.goto_confirm_at > GOTO_CONFIRM_SECONDS:
+            self.goto_confirm_at = now
+            degrees = ", ".join(f"{math.degrees(value):.1f}" for value in self.reference_target)
+            step = math.degrees(float(np.max(np.abs(self.reference_target - self.joints))))
+            self.get_logger().warning(
+                f"前往参考位姿 [{degrees}]°，最大关节变化 {step:.1f}°，速度 {self.speed}%；"
+                f"确认路径无碰撞后 {GOTO_CONFIRM_SECONDS:g} s 内再按 g 执行")
+            return
+        self.goto_confirm_at = None
+        if self.phase in ("bootstrap", "auto"):
+            self.phase = "paused"
+        self._send_move(self.reference_target, "goto_reference")
 
     def _quit(self):
         """停止运动、关闭 MCAP 并打印导出命令。"""

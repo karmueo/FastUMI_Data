@@ -67,10 +67,13 @@ python -m pytest src/hand_eye_calibration_macpdata/test -q
 ```bash
 ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args \
   -p board_config:=$PWD/../config/calibration/april_6x6_24mm.yaml \
-  -p distance_min_m:=0.28 -p distance_max_m:=0.35 -p roll_max_deg:=20.0 -p num_samples:=25 -p speed:=30
+  -p distance_min_m:=0.28 -p distance_max_m:=0.35 -p tilt_max_deg:=35.0 -p roll_max_deg:=20.0 \
+  -p num_samples:=25 -p speed:=30 \
+  -p reference_pose_path:=../config/calibration/hand_eye_reference_pose.yaml
 ```
 
-近距离时板更易与夹爪掩膜重叠、法兰离板更近：参考位姿取 0.25 m 左右，先用 `dry_run:=true`（需 `prior_path`）
+实测 0.20–0.28 m 时整块板常超出画面，规划找不到可行位姿；上面参数下 25 个样本可采满。
+近距离时板更易与夹爪掩膜重叠、法兰离板更近：参考位姿取板距相机 0.3 m 左右，先用 `dry_run:=true`（需 `prior_path`）
 确认规划目标，并留意工作空间盒下限 `workspace_min` 与桌面的距离。
 
 ## 2. 采集
@@ -84,8 +87,15 @@ source /opt/ros/humble/setup.bash
 source .venv-numpy1/bin/activate
 source install/setup.bash
 ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args \
-  -p board_config:=$PWD/../config/calibration/april_6x6.yaml -p num_samples:=25 -p speed:=15
+  -p board_config:=$PWD/../config/calibration/april_6x6_24mm.yaml \
+  -p distance_min_m:=0.28 -p distance_max_m:=0.35 -p tilt_max_deg:=35.0 -p roll_max_deg:=20.0 \
+  -p num_samples:=25 -p speed:=30 \
+  -p reference_pose_path:=../config/calibration/hand_eye_reference_pose.yaml
 ```
+
+以上为 24 mm 板的实测参数；`reference_pose_path` 相对于当前目录（`ros2_ws`）解析，文件说明见下方
+“参考位姿与 bringup 初始位姿不同时”。用 55 mm 板时去掉距离、倾角、滚转参数（使用默认值），
+`board_config` 改为 `april_6x6.yaml`。从数采位姿首次按 `g` 前往参考位姿时建议先用 `speed:=10`。
 
 | 键 | 作用 |
 |---|---|
@@ -96,9 +106,26 @@ ros2 run hand_eye_calibration_macpdata keyboard_hand_eye_capture --ros-args \
 | `u` | 撤销上一个样本（导出时剔除） |
 | `m` | 用最近 12 个静止帧重新估计夹爪掩膜 |
 | `h` | 回到参考位姿 |
+| `g` | 前往 `reference_pose_path` 文件中的参考位姿：第一次按只打印目标关节和最大关节变化，5 s 内再按才下发 MoveJ；到位静止后自动设为参考位姿（相当于按 `r`），再按 `a` 开始 |
 | `q` | 停止、关闭 MCAP 并打印导出命令 |
 
-参考位姿可先用 `ros2 run fastumi_bringup keyboard_home` 回位，再用示教器或拖动示教调整到能看清整块板的位置。
+**参考位姿与 bringup 初始位姿不同时**：`hardware.launch.py` 回到的是数采初始位姿
+（`fastumi_bringup/config/initial_pose.yaml`），不一定能看到标定板，不要为标定去改它。做法：
+
+1. 首次：用示教器或拖动示教把机械臂调到能看清整块板的位置，按 `r`。节点会把参考关节角（度）写到
+   `<session_dir>/reference_pose.yaml`，并在日志中打印复用参数。可把该文件复制为
+   `config/calibration/hand_eye_reference_pose.yaml` 长期使用。仓库中该文件已设为此前标定所用位姿：
+
+   ```yaml
+   reference_joints_deg: [0, 20, 0, 70, 0, 90, 90]
+   ```
+
+2. 以后：在 `ros2_ws` 中启动时加 `-p reference_pose_path:=../config/calibration/hand_eye_reference_pose.yaml`，
+   按两次 `g` 到位并自动设参考位姿，再按 `a`。
+
+`g` 用 MoveJ 在关节空间直接插值，从数采位姿过去可能是大幅运动，不受 `max_joint_step_rad` 限制，
+只检查 URDF 限位和反馈新鲜度。首次使用请用 `speed:=10` 观察路径，确认不会扫到标定板或桌面；
+`dry_run:=true` 时只打印目标。标定板或支架移动后，需重新按第 1 步记录。
 
 **位姿规划**：相机位置在以板中心为球心的球冠上随机采样（距板 0.25–0.45 m，相对板法线倾斜
 10°–40°，绕视线滚转 ±45°），板中心成像在瞄准像素附近。无夹爪掩膜时瞄准像素为画面中心；

@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 import yaml
 
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from fastumi_bringup.kinematics import ArmKinematics
 from fastumi_bringup.transforms import (
     invert, make_transform, rotation_angle,
@@ -22,6 +21,7 @@ from hand_eye_calibration_macpdata.sampler import (
     PlanContext, SamplerSettings, aim_for_mask, bootstrap_targets, plan_next,
     sample_camera_pose,
 )
+from hand_eye_sim import CALIBRATION_JOINTS
 
 
 SRC = Path(__file__).resolve().parents[2]
@@ -35,7 +35,7 @@ def scene():
     arm = ArmKinematics.from_urdf(SRC / "fastumi_rm75/assets/rm_75_kinematic.urdf")
     camera = load_fisheye_camera(SRC / "fastumi_usb_camera/config/EndEffectorCalib.yaml")
     flange_from_camera = load_prior(PRIOR)
-    joints = np.array(INITIAL_JOINT_POSITIONS)
+    joints = np.array(CALIBRATION_JOINTS)
     base_from_camera = arm.forward(joints) @ flange_from_camera
     center = base_from_camera[:3, 3] + 0.35 * base_from_camera[:3, 2]
     rotation = base_from_camera[:3, :3]

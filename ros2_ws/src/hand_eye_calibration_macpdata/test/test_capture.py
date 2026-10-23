@@ -4,6 +4,7 @@ import json
 import sys
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import rclpy
 from rclpy.serialization import deserialize_message
@@ -11,8 +12,14 @@ import rosbag2_py
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, String
 
-from hand_eye_calibration_macpdata.capture import main
-from hand_eye_sim import feed, make_node, run_session, run_until, warm_up
+from hand_eye_calibration_macpdata import capture as capture_module
+from hand_eye_calibration_macpdata.capture import (
+    REFERENCE_POSE_NAME, load_reference_pose, main, reference_pose_yaml,
+)
+from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
+from hand_eye_sim import (
+    CALIBRATION_JOINTS, feed, make_node, run_session, run_until, warm_up,
+)
 
 
 @pytest.fixture
@@ -162,3 +169,115 @@ def test_feed_helper_reports_results(node_rig):
     rig.pending_result = True
     feed(node, rig)
     assert not rig.pending_result
+
+
+def test_reference_pose_file_round_trip(node_rig):
+    """按 r 后写出 reference_pose.yaml，读回与参考关节一致（度保留 3 位小数）。"""
+    node, rig = node_rig
+    warm_up(node, rig)
+    node.handle_key("r")
+    path = node.session_dir / REFERENCE_POSE_NAME
+    assert path.is_file()
+    assert load_reference_pose(path) == pytest.approx(node.reference["joints"], abs=1e-4)
+
+
+def test_load_reference_pose_rejects_bad_files(tmp_path):
+    path = tmp_path / "pose.yaml"
+    for text in ("reference_joints_deg: [1, 2, 3]\n", "other: 1\n",
+                 "reference_joints_deg: [1, 2, 3, 4, 5, 6, .nan]\n"):
+        path.write_text(text)
+        with pytest.raises(ValueError):
+            load_reference_pose(path)
+    path.write_text(reference_pose_yaml(np.radians([1, 2, 3, 4, 5, 6, 7]), "测试"))
+    assert np.degrees(load_reference_pose(path)) == pytest.approx([1, 2, 3, 4, 5, 6, 7])
+
+
+def test_reference_pose_outside_limits_is_rejected(ros_context, tmp_path):
+    path = tmp_path / "pose.yaml"
+    path.write_text("reference_joints_deg: [0, 0, 0, 0, 0, 0, 400]\n")
+    with pytest.raises(ValueError, match="限位"):
+        make_node(tmp_path, reference_pose_path=str(path))
+
+
+def test_goto_reference_requires_path(node_rig):
+    node, rig = node_rig
+    warm_up(node, rig)
+    node.handle_key("g")
+    node.handle_key("g")
+    node.movej_publisher.publish.assert_not_called()
+
+
+@pytest.fixture
+def goto_rig(ros_context, tmp_path):
+    """参考位姿文件为标定位姿；机械臂从 bringup 数采初始位姿出发（看不到板）。"""
+    path = tmp_path / "pose.yaml"
+    path.write_text(reference_pose_yaml(CALIBRATION_JOINTS, "测试"))
+    node, rig = make_node(tmp_path, reference_pose_path=str(path))
+    rig.joints = np.array(INITIAL_JOINT_POSITIONS, dtype=float)
+    yield node, rig, load_reference_pose(path)
+    node.close()
+    node.destroy_node()
+
+
+def test_goto_reference_needs_confirmation_then_sets_reference(goto_rig):
+    node, rig, target = goto_rig
+    warm_up(node, rig)
+    node.handle_key("g")
+    node.movej_publisher.publish.assert_not_called()
+    node.handle_key("g")
+    node.movej_publisher.publish.assert_called_once()
+    command = node.movej_publisher.publish.call_args.args[0]
+    assert list(command.joint) == pytest.approx(target, abs=1e-6)  # Movej 为 float32
+    assert node.motion.purpose == "goto_reference"
+    assert run_until(node, rig, lambda: node.reference is not None, timeout=10.0)
+    assert node.reference["joints"] == pytest.approx(target, abs=1e-6)
+    assert node.phase == "idle" and node.movej_publisher.publish.call_count == 1
+
+
+def test_goto_reference_confirmation_expires(goto_rig):
+    node, rig, _ = goto_rig
+    warm_up(node, rig)
+    node.handle_key("g")
+    node.goto_confirm_at -= capture_module.GOTO_CONFIRM_SECONDS + 0.1
+    node.handle_key("g")  # 超时：重新进入确认
+    node.movej_publisher.publish.assert_not_called()
+    node.handle_key("g")
+    node.movej_publisher.publish.assert_called_once()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_space_cancels_goto_reference_confirmation(goto_rig, dry_run):
+    """g → 空格取消确认；之后必须重新按两次 g 才能下发参考位姿运动。"""
+    node, rig, _ = goto_rig
+    warm_up(node, rig)
+    node.dry_run = dry_run
+    node.handle_key("g")
+    assert node.goto_confirm_at is not None
+    node.handle_key(" ")
+    assert node.goto_confirm_at is None and node.phase == "paused"
+
+    node.handle_key("g")
+    node.movej_publisher.publish.assert_not_called()
+    assert node.goto_confirm_at is not None and node.motion is None
+    node.handle_key("g")
+    assert node.goto_confirm_at is None
+    if dry_run:
+        node.movej_publisher.publish.assert_not_called()
+        node.stop_publisher.publish.assert_not_called()
+    else:
+        node.movej_publisher.publish.assert_called_once()
+        node.stop_publisher.publish.assert_called_once()
+        assert node.motion.purpose == "goto_reference"
+
+
+def test_space_stops_goto_reference(goto_rig):
+    node, rig, _ = goto_rig
+    warm_up(node, rig)
+    node.handle_key("g")
+    node.handle_key("g")
+    rig.pending_result = False  # 驱动尚未回报
+    node.handle_key(" ")
+    node.stop_publisher.publish.assert_called_once()
+    assert node.phase == "paused" and node.motion.purpose == "stopped"
+    node._result_callback(Bool(data=False))
+    assert node.phase == "paused" and not node.pending_reference

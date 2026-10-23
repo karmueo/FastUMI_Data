@@ -1,7 +1,7 @@
 """手眼采集节点的无硬件仿真：假 RM75 + 鱼眼合成图 + 固定夹爪遮挡。
 
 供 test_capture.py 和 test_export_dataset.py 共用。
-真值：^Link7 T_cam 取仓库 T_cam_end.yaml，板放在初始位姿相机光轴前方 0.33 m。
+真值：^Link7 T_cam 取仓库 T_cam_end.yaml，板放在 CALIBRATION_JOINTS 位姿相机光轴前方 0.33 m。
 板型取仓库 config/calibration 下的 Kalibr YAML，通过 run_session(board=...) 选择。
 """
 
@@ -17,7 +17,6 @@ from sensor_msgs.msg import CompressedImage, JointState
 from std_msgs.msg import Bool, Float32
 import yaml
 
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from fastumi_bringup.kinematics import JOINT_NAMES, ArmKinematics
 from fastumi_bringup.transforms import invert, make_transform
 from hand_eye_calibration_macpdata.board import AprilGridSpec, load_board_spec, load_fisheye_camera
@@ -36,6 +35,9 @@ BOARDS = {
     "aprilgrid_24mm": REPO / "config/calibration/april_6x6_24mm.yaml",
     "checkerboard": REPO / "config/calibration/checkerboard_11x8.yaml",
 }
+# 标定参考位姿（弧度，joint1..joint7）：实机在该位姿下能看到整块板。与 fastumi_bringup 的
+# 数采初始位姿（initial_pose.yaml）无关，后者变化不影响仿真。
+CALIBRATION_JOINTS = tuple(np.radians([0.0, 20.0, 0.0, 70.0, 0.0, 90.0, 90.0]))
 # 与实机腕部相机一致的全分辨率：AprilGrid 斜视时 960 宽下小标签解码不稳。
 WIDTH, HEIGHT = 1920, 1080
 
@@ -48,7 +50,7 @@ class SimulatedRig:
         self.kinematics = ArmKinematics.from_urdf(URDF)
         self.camera = load_fisheye_camera(CAMERA).scaled(WIDTH, HEIGHT)
         self.flange_from_camera = load_prior(PRIOR)
-        self.joints = np.array(INITIAL_JOINT_POSITIONS, dtype=float)
+        self.joints = np.array(CALIBRATION_JOINTS, dtype=float)
         base_from_camera = self.kinematics.forward(self.joints) @ self.flange_from_camera
         # 板正面朝向参考相机，中心在光轴前方 0.33 m，略偏上避开夹爪。棋盘格（OpenCV 约定）
         # 相机在板 -z 侧，板系与相机系同向；AprilGrid（Kalibr 约定）相机在 +z 侧，绕 x 翻转。
