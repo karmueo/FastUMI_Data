@@ -15,6 +15,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <urdf/model.h>
+#include <yaml-cpp/yaml.h>
 
 namespace dp_infer_tensorrt {
 namespace {
@@ -343,6 +344,44 @@ void validate_sequence(ActionSequence &sequence) {
         if (i && sequence.quaternions[i-1].dot(q) < 0) q.coeffs() *= -1;
         sequence.gripper_openness[i] = std::clamp(sequence.gripper_openness[i], 0.0, 1.0);
     }
+}
+Eigen::Matrix4d load_link7_correction(const std::filesystem::path &path) {
+    if (path.empty()) return Eigen::Matrix4d::Identity();
+    YAML::Node rows;
+    try { rows = YAML::LoadFile(path.string())["link7_correction"]["T_virtual_link7"]; }
+    catch (const YAML::Exception &error) { throw std::invalid_argument("Cannot read link7 correction: " + std::string(error.what())); }
+    require(rows && rows.IsSequence() && rows.size() == 4, "link7 correction must be a finite 4x4 matrix");
+    Eigen::Matrix4d matrix;
+    for (int r = 0; r < 4; ++r) {
+        require(rows[r].IsSequence() && rows[r].size() == 4, "link7 correction must be a finite 4x4 matrix");
+        for (int c = 0; c < 4; ++c) {
+            try { matrix(r,c) = rows[r][c].as<double>(); }
+            catch (const YAML::Exception &) { throw std::invalid_argument("link7 correction must be a finite 4x4 matrix"); }
+        }
+    }
+    require(matrix.allFinite(), "link7 correction must be a finite 4x4 matrix");
+    Eigen::Matrix3d rotation = matrix.block<3,3>(0,0);
+    bool last_row = (matrix.row(3) - Eigen::RowVector4d(0,0,0,1)).cwiseAbs().maxCoeff() <= 1e-8;
+    bool orthonormal = ((rotation * rotation.transpose()) - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff() <= 1e-6;
+    require(last_row && orthonormal && rotation.determinant() > 0, "link7 correction must be a rigid transform");
+    // 文件按 9 位小数保存，用 SVD 取最近旋转重新正交化，避免累积缩放。
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(rotation, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::Matrix4d corrected = Eigen::Matrix4d::Identity();
+    corrected.block<3,3>(0,0) = svd.matrixU() * svd.matrixV().transpose();
+    corrected.block<3,1>(0,3) = matrix.block<3,1>(0,3);
+    return corrected;
+}
+void correct_sequence(ActionSequence &sequence, const Eigen::Matrix4d &correction) {
+    if (correction == Eigen::Matrix4d::Identity()) return;
+    for (int i = 0; i < HORIZON; ++i) {
+        Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
+        pose.block<3,3>(0,0) = sequence.quaternions[i].normalized().toRotationMatrix();
+        pose.block<3,1>(0,3) = sequence.positions[i];
+        pose = pose * correction;
+        sequence.positions[i] = pose.block<3,1>(0,3);
+        sequence.quaternions[i] = Eigen::Quaterniond(Eigen::Matrix3d(pose.block<3,3>(0,0)));
+    }
+    validate_sequence(sequence);
 }
 ActionSequence decode_actions(const RawAction &actions, const InferenceContext &context) {
     ActionSequence sequence;

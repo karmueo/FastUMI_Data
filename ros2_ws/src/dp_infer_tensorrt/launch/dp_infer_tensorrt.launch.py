@@ -52,12 +52,19 @@ def _start(context):
         model_manifest = str(_path_argument(context, "model_manifest"))
     training_urdf = _path_argument(context, "urdf_path")
     config_file = _path_argument(context, "config_file")
+    # 空字符串关闭 Link7 部署修正；非空时必须是已有文件。
+    correction_file = ""
+    if LaunchConfiguration("link7_correction_file").perform(context).strip():
+        correction_file = str(_path_argument(context, "link7_correction_file"))
     enabled = LaunchConfiguration("start_controller").perform(context).lower()
     if enabled not in ("true", "false"):
         raise ValueError("start_controller must be true or false")
     dry_run = LaunchConfiguration("dry_run").perform(context).lower()
     if dry_run not in ("true", "false"):
         raise ValueError("dry_run must be true or false")
+    record = LaunchConfiguration("record").perform(context).lower()
+    if record not in ("true", "false"):
+        raise ValueError("record must be true or false")
     close_approval = LaunchConfiguration("require_close_approval").perform(context).lower()
     if close_approval not in ("true", "false"):
         raise ValueError("require_close_approval must be true or false")
@@ -89,7 +96,10 @@ def _start(context):
     parameters = {**overrides, "engine_dir": str(engine_dir),
                   "model_manifest": model_manifest, "urdf_path": str(training_urdf),
                   "require_controller_reset": enabled == "true", "task_control_enabled": True,
-                  "controller_reset_service": LaunchConfiguration("controller_reset_service").perform(context)}
+                  "controller_reset_service": LaunchConfiguration("controller_reset_service").perform(context),
+                  "link7_correction_file": correction_file, "record_task": record == "true",
+                  "record_dir_name": LaunchConfiguration("record_dir_name").perform(context),
+                  "record_name": LaunchConfiguration("record_name").perform(context)}
     inference = Node(package="dp_infer_tensorrt", executable="dp_infer_tensorrt_node",
                      output="screen", parameters=[str(config_file), parameters])
     actions = [
@@ -150,10 +160,14 @@ def generate_launch_description():
     defaults = {
         "engine_dir": "", "model_manifest": "", "urdf_path": "",
         "config_file": str(share / "config/dp_infer_tensorrt.yaml"),
+        # 与 dp_infer 共用 compute_link7_correction.py 生成的文件；重装相机或重做手眼标定后须重新生成。
+        "link7_correction_file": str(
+            Path(get_package_share_directory("dp_infer")) / "config/link7_correction.yaml"),
         "controller_python": "",
         "control_urdf_path": "", "start_controller": "true", "dry_run": "false",
         "require_close_approval": "false",
         "grasp_latch": "true", "policy_gripper_topic": "/fastumi/policy/gripper_state",
+        "record": "false", "record_dir_name": "dp_infer", "record_name": "rollout",
         "device": "cuda:0", "precision": "fp16", "num_inference_steps": "8",
         "image_topic": "/wrist_camera/image_raw/compressed",
         "image_type": "compressed", "joint_topic": "/joint_states",

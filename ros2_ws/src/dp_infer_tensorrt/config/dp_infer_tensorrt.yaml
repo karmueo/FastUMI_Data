@@ -9,6 +9,9 @@ dp_infer_tensorrt:
     precision: fp16
     # 训练时使用的 URDF 文件路径；必须显式指定，用于校验模型并计算 Link7 位姿。
     urdf_path: ""
+    # Link7 部署修正文件（compute_link7_correction.py 生成）；空字符串表示不修正。
+    # 组合 launch 默认传入 dp_infer 随包安装的 config/link7_correction.yaml。
+    link7_correction_file: ""
     # 模型推理设备；例如 cuda:0 表示第一块 CUDA GPU。
     device: cuda:0
     # 每次预测的扩散去噪步数；组合启动可用同名 launch 参数覆盖。
@@ -38,6 +41,17 @@ dp_infer_tensorrt:
     controller_return_service: /fastumi/rm75/placo/return_to_start
     # 控制器重置服务名，类型为 fastumi_interfaces/ResetPolicyController。
     controller_reset_service: /fastumi/rm75/placo/reset_episode
+    # 开始/停止任务时联动 fastumi_recorder 录制；录制失败只告警，不阻止任务。
+    record_task: false
+    # 录制保存到 <dataset_root>/<record_dir_name>/<record_name>/episode_N/bag。
+    record_dir_name: dp_infer
+    record_name: rollout
+    recording_start_service: /fastumi/recording/start
+    recording_stop_service: /fastumi/recording/stop
+    recording_cancel_service: /fastumi/recording/cancel
+    recording_cancel_request_service: /fastumi/recording/cancel_request
+    # 停止/取消失败后只读查询请求终态，确认结束才清除旧录制身份。
+    recording_get_request_service: /fastumi/recording/get_request
     # 等待控制器重置响应的最长时间，单位秒；超时视为未确认。
     controller_reset_timeout_s: 1.0
     # 是否必须收到控制器重置成功确认后才允许新 episode 发布预测。

@@ -34,6 +34,7 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 find_package(OpenSSL REQUIRED)
 find_package(jsoncpp REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 find_path(TENSORRT_INCLUDE_DIR NvInfer.h PATH_SUFFIXES aarch64-linux-gnu REQUIRED)
 find_library(TENSORRT_LIBRARY nvinfer REQUIRED)
@@ -43,7 +44,7 @@ target_include_directories(dp_infer_tensorrt_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include> ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(dp_infer_tensorrt_core PUBLIC Eigen3::Eigen jsoncpp_lib ${OpenCV_LIBS}
-  OpenSSL::Crypto ${orocos_kdl_LIBRARIES})
+  OpenSSL::Crypto ${orocos_kdl_LIBRARIES} PRIVATE yaml-cpp)
 ament_target_dependencies(dp_infer_tensorrt_core PUBLIC urdf kdl_parser)
 
 add_library(dp_infer_tensorrt_runtime SHARED src/runtime.cpp src/ddim.cu)
@@ -76,11 +77,13 @@ if(BUILD_TESTING)
   find_package(rosgraph_msgs REQUIRED)
   ament_add_gtest(test_core test/test_core.cpp)
   target_link_libraries(test_core dp_infer_tensorrt_core)
-  target_compile_definitions(test_core PRIVATE TEST_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../fastumi_rm75/assets/rm_75_kinematic.urdf")
+  target_compile_definitions(test_core PRIVATE TEST_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../fastumi_rm75/assets/rm_75_kinematic.urdf"
+    TEST_LINK7_CORRECTION_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../dp_infer/config/link7_correction.yaml")
   ament_add_gtest(test_node test/test_node.cpp ENV ROS_DOMAIN_ID=179 ROS_LOCALHOST_ONLY=1 TIMEOUT 90)
   target_link_libraries(test_node dp_infer_tensorrt_ros)
   ament_target_dependencies(test_node rosgraph_msgs)
-  target_compile_definitions(test_node PRIVATE TEST_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../fastumi_rm75/assets/rm_75_kinematic.urdf")
+  target_compile_definitions(test_node PRIVATE TEST_URDF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../fastumi_rm75/assets/rm_75_kinematic.urdf"
+    TEST_LINK7_CORRECTION_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../dp_infer/config/link7_correction.yaml")
   add_library(test_postprocessors SHARED test/test_postprocessors.cpp)
   target_link_libraries(test_postprocessors dp_infer_tensorrt_core)
   ament_target_dependencies(test_postprocessors pluginlib)
@@ -89,6 +92,6 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_targets(dp_infer_tensorrt_targets HAS_LIBRARY_TARGET)
-ament_export_dependencies(Eigen3 jsoncpp OpenCV OpenSSL urdf kdl_parser orocos_kdl
+ament_export_dependencies(Eigen3 jsoncpp yaml-cpp OpenCV OpenSSL urdf kdl_parser orocos_kdl
   rclcpp rcl_interfaces fastumi_interfaces sensor_msgs std_msgs std_srvs geometry_msgs builtin_interfaces pluginlib)
 ament_package(CONFIG_EXTRAS cmake/jsoncpp_compat.cmake)

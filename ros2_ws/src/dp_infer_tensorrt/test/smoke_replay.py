@@ -199,9 +199,10 @@ def run(args):
                 if process.poll() is not None:
                     raise RuntimeError(f"Launch exited; see {launch_log}")
                 # 同时等待推理端和控制器；只看到推理订阅时控制器可能尚未发现反馈。
+                # 启动控制器时推理端改订阅控制器换算后的夹爪话题，原始夹爪只有控制器订阅。
                 if (images.get_subscription_count() >= 1
                         and joints.get_subscription_count() >= 2
-                        and gripper.get_subscription_count() >= 2):
+                        and gripper.get_subscription_count() >= 1):
                     break
                 time.sleep(0.1)
             else:

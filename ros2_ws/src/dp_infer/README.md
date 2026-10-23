@@ -262,7 +262,7 @@ Backspace 停止或空格回位时，控制器确认停机后调用 `/fastumi/re
 （`record_policy_topics:=true`）还录制 `/fastumi/policy/action_sequence` 和
 `/fastumi/policy/gripper_close_allowed`、`/fastumi/policy/gripper_state`。用 `ros2 bag info <episode_N>/bag` 检查话题和消息数。
 推理进程异常退出时录制不会自动停止，直到再次停止任务或关闭硬件入口（录制器退出时自动保存）。
-`dp_infer_tensorrt` 目前不支持此联动。
+`dp_infer_tensorrt` 支持同样的联动（`record:=true`）。
 
 ## 消息与时间
 
@@ -309,7 +309,7 @@ RM75 相机相对手指多俯视约 15°，手指码处偏约 24 mm，指尖偏�
 两侧一致变换保证原地保持的动作恰好指向实测 Link7，启动时不跳变。组合 launch 默认传入随包安装的
 `config/link7_correction.yaml`，启动日志打印修正角度和平移；传 `link7_correction_file:=''`
 关闭（节点参数为空即单位阵）。修正只对齐手指位置，图像视角差异仍在。
-`dp_infer_tensorrt` 尚未实现该修正。
+`dp_infer_tensorrt` 实现了相同的修正，默认读取本包安装的同一文件。
 
 修正文件由仓库根的 `compute_link7_correction.py` 生成（`ros2_ws/.venv-numpy1`，已 source Humble）：
 训练侧取 HDF5 原图，实机侧取含腕部压缩图像的 rollout 录制，各自用鱼眼内参求手指码位姿后平均。

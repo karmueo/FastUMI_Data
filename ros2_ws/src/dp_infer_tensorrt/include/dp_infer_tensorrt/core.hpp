@@ -100,6 +100,12 @@ Observations build_observations(const std::array<Observation, 2> &history,
                                 const Eigen::Matrix4d &start_pose);
 ActionSequence decode_actions(const RawAction &actions, const InferenceContext &context);
 void validate_sequence(ActionSequence &sequence);
+/// 读取 Link7 部署修正 C（真实 Link7 在策略虚拟 Link7 系中的 [4,4] 位姿，米）。
+/// 训练标签按 UMI 相机≡RM75 相机生成；发布目标取“策略 Link7·C”，策略位姿观测取“FK Link7·C⁻¹”。
+/// 空路径返回单位阵；文件由仓库根 compute_link7_correction.py 生成，与 dp_infer 共用。
+Eigen::Matrix4d load_link7_correction(const std::filesystem::path &path);
+/// 把策略虚拟 Link7 目标右乘 C 得到真实 Link7 目标；单位阵时不改动。
+void correct_sequence(ActionSequence &sequence, const Eigen::Matrix4d &correction);
 Json::Value read_json(const std::filesystem::path &path);
 void write_json(const std::filesystem::path &path, const Json::Value &value);
 std::string sha256_file(const std::filesystem::path &path);

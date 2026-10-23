@@ -1,5 +1,6 @@
 // 确定性回归：几何期望值独立于实现，RM75 FK 数值取自现有 Python 实现。
 #include "dp_infer_tensorrt/core.hpp"
+#include <fstream>
 #include <gtest/gtest.h>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -136,4 +137,45 @@ TEST(Ddim, LeadingStepsAndUnsupportedContract) {
     EXPECT_THROW(scheduler.steps(0),std::invalid_argument);
     EXPECT_THROW(scheduler.steps(51),std::invalid_argument);
     config["thresholding"] = true; EXPECT_THROW(DdimScheduler{config},std::invalid_argument);
+}
+TEST(Link7Correction, LoadsPackagedFileAndRejectsNonRigid) {
+    EXPECT_TRUE(load_link7_correction("").isApprox(Eigen::Matrix4d::Identity()));
+    auto correction = load_link7_correction(TEST_LINK7_CORRECTION_PATH);
+    Eigen::Matrix3d rotation = correction.block<3,3>(0,0);
+    EXPECT_NEAR((rotation*rotation.transpose()-Eigen::Matrix3d::Identity()).norm(),0,1e-12);
+    EXPECT_NEAR(Eigen::AngleAxisd(rotation).angle()*180/std::acos(-1.0),16.697,1e-3);
+    EXPECT_NEAR(correction(1,3),.011070425,1e-12);
+    auto temporary = std::filesystem::temp_directory_path()/"dp_infer_tensorrt_bad_correction.yaml";
+    auto write = [&temporary](const std::string &rows) {
+        std::ofstream(temporary) << "link7_correction:\n  T_virtual_link7: " << rows << "\n";
+    };
+    write("[[2,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]");
+    EXPECT_THROW(load_link7_correction(temporary),std::invalid_argument);
+    write("[[1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]");
+    EXPECT_THROW(load_link7_correction(temporary),std::invalid_argument);
+    write("[[1,0,0,0],[0,1,0,0],[0,0,1,.nan],[0,0,0,1]]");
+    EXPECT_THROW(load_link7_correction(temporary),std::invalid_argument);
+    write("[[1,0,0,0],[0,1,0,0],[0,0,1,0]]");
+    EXPECT_THROW(load_link7_correction(temporary),std::invalid_argument);
+    std::filesystem::remove(temporary);
+}
+TEST(Link7Correction, RightMultipliesEveryTarget) {
+    InferenceContext context;
+    context.reference_pose.block<3,3>(0,0) = Eigen::AngleAxisd(.3,Eigen::Vector3d(1,2,3).normalized()).toRotationMatrix();
+    context.reference_pose.block<3,1>(0,3) = Eigen::Vector3d(.4,-.2,.6);
+    auto sequence = decode_actions(identity_action(),context),unchanged = sequence;
+    correct_sequence(unchanged,Eigen::Matrix4d::Identity());
+    EXPECT_EQ(unchanged.positions[0],sequence.positions[0]);
+    auto correction = load_link7_correction(TEST_LINK7_CORRECTION_PATH);
+    correct_sequence(sequence,correction);
+    Eigen::Matrix4d expected = context.reference_pose*correction;
+    for (int i = 0; i < HORIZON; ++i) {
+        EXPECT_NEAR((sequence.positions[i]-expected.block<3,1>(0,3)).norm(),0,1e-12);
+        EXPECT_NEAR((sequence.quaternions[i].toRotationMatrix()-expected.block<3,3>(0,0)).norm(),0,1e-12);
+        EXPECT_DOUBLE_EQ(sequence.gripper_openness[i],.4f);
+    }
+    // 参考值取自 Python dp_infer.core.load_link7_correction + correct_sequence 的同一输入。
+    EXPECT_NEAR((sequence.positions[0]-Eigen::Vector3d(0.397804490292514,-0.188431487284209,0.593526201091968)).norm(),0,1e-9);
+    EXPECT_NEAR(std::abs(sequence.quaternions[0].dot(
+        Eigen::Quaterniond(0.973142694370592,0.183557393620864,0.090543548964803,0.105365294955778))),1,1e-12);
 }

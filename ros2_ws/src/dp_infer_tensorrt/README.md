@@ -36,14 +36,16 @@ cd ..
 ```bash
 source /opt/ros/humble/setup.bash
 source ros2_ws/install/setup.bash
-TRT_ENGINE_DIR="$PWD/dataset/h5dy_data/rm75_umi/runs/0929_2/tensorrt/latest"
-TRT_TRAINING_URDF="$PWD/dataset/rm75_umi/jingbao_merge.zarr/rm_75.urdf"
+TRT_ENGINE_DIR="$PWD/dataset/h5dy_data/rm75_umi/runs/1021/tensorrt/latest"
+TRT_TRAINING_URDF="$PWD/dataset/processed/jingbao_v1/snapshots/urdf/rm_75.urdf"
 sha256sum "$TRT_TRAINING_URDF"
 ```
 
 `engine_dir` 须含 `manifest.json`。`model_manifest` 留空时自动定位同次导出的 `onnx/latest/manifest.json`，也可显式指定。部署无需 checkpoint 或 `.onnx` 图文件。依据：[launch](launch/dp_infer_tensorrt.launch.py)、[runtime](src/runtime.cpp)。
 
-训练 URDF 的 SHA-256 必须匹配模型 manifest。示例摘要为 `1f5b0a109ef5e8b25e090447cc4f69824754029fa1d9c7f12a3278f35161c1c3`，旧 `dataset/vr_target_umi/rm_75.urdf` 不能用于此模型。确认匹配后继续。
+训练 URDF 的 SHA-256 必须匹配模型 manifest（`onnx/latest/manifest.json` 的 `contract.urdf_sha256`）。1021 模型的摘要为 `c37545834f0d6a4719548e51337a258be0c3b95bb6b79467d835875a205bb056`；此前 0929_2 模型使用的 `dataset/rm75_umi/jingbao_merge.zarr/rm_75.urdf`（`1f5b0a10…`）不能用于此模型。确认匹配后继续。
+
+1021 模型由 `jingbao_v1` 训练，与 [`link7_correction.yaml`](../dp_infer/config/link7_correction.yaml) 的 `training_dataset` 相同，组合 launch 默认启用该修正，见 [Link7 部署修正](#link7-部署修正)。
 
 ### 3. 准备反馈并启动推理
 
@@ -89,6 +91,10 @@ ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
 | `model_manifest` | `""` | 模型元数据 JSON。留空时定位到 `engine_dir` 的上两级目录下 `onnx/<engine_dir 的目录名>/manifest.json`；显式指定时须为现有文件。 |
 | `urdf_path` | `""` | 必填，训练 URDF 文件；SHA-256 须匹配模型 manifest，用于 Link7 正运动学。 |
 | `config_file` | `<dp_infer_tensorrt 包共享目录>/config/dp_infer_tensorrt.yaml` | 推理节点参数文件，须存在；同步、超时、推理频率等参数在此配置。 |
+| `link7_correction_file` | `<dp_infer 包共享目录>/config/link7_correction.yaml` | Link7 部署修正文件，与 `dp_infer` 共用；传 `''` 关闭（单位阵），非空时须为现有文件。见 [Link7 部署修正](#link7-部署修正)。 |
+| `record` | `false` | `true` 时开始/停止任务联动 `fastumi_recorder` 录制，见 [推理过程录制](#推理过程录制)。仅接受 `true` / `false`。 |
+| `record_dir_name` | `dp_infer` | 录制目录名，保存到 `<dataset_root>/<record_dir_name>/<record_name>/episode_N/bag`。 |
+| `record_name` | `rollout` | 录制名称，见 `record_dir_name`。 |
 | `start_controller` | `true` | 是否同时启动 Placo 控制器；`false` 仅启动推理，仍需调用开始任务服务。仅接受 `true` / `false`。 |
 | `dry_run` | `false` | 控制器设为 `true` 时只发布调试关节目标，不发布机械臂和夹爪运动命令；仅启动控制器时有效。 |
 | `controller_python` | `""` | 控制器 Python 解释器。留空时从已安装控制器包及其祖先目录查找 `.venv-numpy2/bin/python`；仅启动控制器时使用。 |
@@ -183,9 +189,33 @@ ros2 run dp_infer keyboard_control
 
 工具默认查找步数服务所属的唯一推理节点；固定参数读取目标可在命令后附加 `--ros-args -p inference_parameter_node:=/dp_infer_tensorrt`。若推理 launch 修改了步数服务名，键盘命令也须附加 `--ros-args -p set_inference_steps_service:=/实际服务名`，多个推理后端应使用不同服务名。升级键盘工具后重新构建 `dp_infer` 并加载工作区环境。
 
+## 与 dp_infer 同步的部署行为
+
+### Link7 部署修正
+
+与 [dp_infer 的 Link7 部署修正](../dp_infer/README.md#link7-部署修正umi-与-rm75-相机安装差异) 相同：设 `C` 为真实 Link7 在策略虚拟 Link7 系中的位姿（`T_virtual_link7`，米），则
+
+- `/joint_states` 的 FK 位姿右乘 `C⁻¹` 后进入观测（含 episode 起点）；策略、后处理插件都在虚拟 Link7 系中运行；
+- 发布前目标右乘 `C`，`/fastumi/policy/action_sequence` 仍为真实 `base_link -> Link7`。
+
+两侧使用同一个变换，原地保持的动作恰好指向实测 Link7，因此启动时不会跳变。启动日志 `TensorRT DP ready: ... link7_correction=X deg / Y mm` 会打印修正量，当前文件约为 16.70° / 13.4 mm。读取时校验文件是否为有限刚体变换，并用 SVD 重新正交化旋转，与 Python `load_link7_correction` 等价。[`compute_link7_correction.py`](../../../compute_link7_correction.py) 写入的是 `dp_infer` 包内的文件；重新生成后须重新构建 `dp_infer`，安装目录中的副本才会更新。
+
+### 推理过程录制
+
+硬件入口用 `start_recorder:=true` 启动录制器，组合 launch 加 `record:=true`。完整流程与返回消息格式见 [dp_infer 推理过程录制](../dp_infer/README.md#推理过程录制)。C++ 节点按相同顺序调用 `/fastumi/recording/{start,stop,cancel,cancel_request}`：
+
+- 开始：先收尾上一轮未确认的录制，再开始录制，最后请求控制器开始。控制器拒绝时取消本轮录制；录制开始应答超时时，按请求 UUID 撤销。
+- 停止：控制器确认停机后再停止录制。录制停止应答返回前，任务保持 `stopping`。
+
+录制失败只在 Trigger 响应消息末尾附加说明，不阻止任务。停止或取消失败后，节点通过 `/fastumi/recording/get_request` 只读查询同一请求；确认 `failed`、`completed` 或 `cancelled` 终态后清除旧身份，后续任务可重新录制。查询失败、未找到请求或仍在录制/保存时保留身份，后续继续重试；原始失败说明仍保留在响应中。查询服务名可通过节点参数 `recording_get_request_service` 配置。每次录制服务调用的超时为 5 s。与 Python 版不同的一点：录制器未运行（服务未就绪）时，C++ 节点不会发出开始请求，也不保留请求身份。
+
+### 异步闭合许可检测
+
+球体检测在独立线程中运行，同一时间只保留一个在途检测，不阻塞图像、关节和夹爪回调。检测结果回到 executor 线程后，会重新检查 episode、任务状态和图像采集时间；重置、停止或坏图像会使此前的在途检测失效。模型图像预处理、两帧历史和输入时限不变。
+
 ## 验证
 
-以下步骤按需执行，均从仓库根目录开始；真实引擎与回放验证需先完成操作步骤 2。本次仅整理文档，未执行构建、测试或硬件步骤。
+以下步骤按需执行，均从仓库根目录开始；真实引擎与回放验证需先完成操作步骤 2。2026-10-23 同步 dp_infer 后，用 1021 模型复测了第 1 步和第 3 步：raw 与 compressed 回放均通过，机械臂和夹爪命令为 0。1021 导出目录没有 `reports/precision_arrays.npz`，所以第 2 步未执行。
 
 ### 1. C++ 确定性测试
 
@@ -256,6 +286,7 @@ ros2 run dp_infer_tensorrt dp_infer_tensorrt_node --ros-args \
 | 视觉闭合许可 | `std_msgs/Bool` | `/fastumi/policy/gripper_close_allowed` |
 | 开始／停止／回位／重置 | `std_srvs/Trigger` | `/fastumi/policy/{start_task,stop_task,return_to_start,reset_episode}` |
 | 去噪次数 | `fastumi_interfaces/SetNumInferenceSteps` | `/fastumi/policy/set_inference_steps` |
+| 录制联动（客户端，`record_task` 开启时） | `fastumi_interfaces/{StartRecording,StopRecording,CancelRecording,CancelRecordingRequest,GetRecordingRequest}` | `/fastumi/recording/{start,stop,cancel,cancel_request,get_request}` |
 
 输入使用 sensor-data QoS，输出 reliable、深度 10。七轴关节名须齐全且无重复，顺序不限；夹爪无 header，使用 ROS 接收时间。节点按图像时间匹配关节与夹爪，取间隔约 1/30 秒的两帧观测。
 
