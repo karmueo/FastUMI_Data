@@ -3,27 +3,27 @@
 # 重装相机、重做手眼标定或更换训练数据后须重新生成。
 link7_correction:
   T_virtual_link7:
-  - - 0.999997735
-    - 0.000856627
-    - -0.001948484
-    - -0.002157779
-  - - -0.001328853
-    - 0.966373937
-    - -0.257137412
-    - 0.005453291
-  - - 0.001662693
-    - 0.257139418
-    - 0.966372886
-    - -0.009218881
+  - - 0.999924457
+    - 0.000974724
+    - -0.012252803
+    - 0.001671096
+  - - -0.004451
+    - 0.957910178
+    - -0.287033586
+    - 0.011070425
+  - - 0.011457306
+    - 0.28706644
+    - 0.957842153
+    - -0.007430609
   - - 0.0
     - 0.0
     - 0.0
     - 1.0
-  rotation_deg: 14.901
+  rotation_deg: 16.697
   translation_mm:
-  - -2.16
-  - 5.45
-  - -9.22
+  - 1.67
+  - 11.07
+  - -7.43
   T_Cu_F:
   - - 0.99981333
     - -0.005961803
@@ -42,40 +42,36 @@ link7_correction:
     - 0.0
     - 1.0
   T_Cd_F:
-  - - 0.999844447
-    - -0.008155547
-    - -0.015638707
-    - -0.00150996
-  - - -0.017502994
-    - -0.349496173
-    - -0.93677429
-    - 0.036055267
-  - - 0.002174239
-    - 0.936902296
-    - -0.349584555
-    - 0.084448685
+  - - 0.999715646
+    - -0.021478548
+    - -0.010358559
+    - -0.002032132
+  - - -0.012333142
+    - -0.093938987
+    - -0.995501562
+    - 0.061830648
+  - - 0.020408856
+    - 0.995346241
+    - -0.094177173
+    - 0.088738906
   - - 0.0
     - 0.0
     - 0.0
     - 1.0
   T_Cd_Link7_training_sha256: 807340cbf9e664a3205e0d22f99faac0c44799711418e486b63e8d0a8f6ddb33
-  T_Cd_Link7_deploy_sha256: 807340cbf9e664a3205e0d22f99faac0c44799711418e486b63e8d0a8f6ddb33
+  T_Cd_Link7_deploy_sha256: efeadb5303867659711ab4ca3586d2a2c9e726f897bad6b684fc2a816f4c54a9
   samples:
     umi_frames: 271
     umi_translation_std_mm: 0.69
     umi_rotation_rms_deg: 0.37
-    robot_frames: 298
-    robot_translation_std_mm: 0.39
-    robot_rotation_rms_deg: 0.84
+    robot_frames: 25
+    robot_translation_std_mm: 0.42
+    robot_rotation_rms_deg: 0.36
   sources:
     training_dataset: dataset/processed/jingbao_v1
     rollout_bags:
-    - dataset/h5dy_data/dp_infer/rollout/episode_3/bag
-    - dataset/h5dy_data/dp_infer/rollout/episode_4/bag
-    - dataset/h5dy_data/dp_infer/rollout/episode_5/bag
-    - dataset/h5dy_data/dp_infer/rollout/episode_6/bag
-    - dataset/h5dy_data/dp_infer/rollout/episode_7/bag
-    - dataset/h5dy_data/dp_infer/rollout/episode_8/bag
+    - dataset/h5dy_data/hand_eye/session_20261023_143638/bag
+    rollout_topic: /hand_eye/sample_image
     umi_camera: config/calibration/UmiCalib.yaml
     robot_camera: ros2_ws/src/fastumi_usb_camera/config/EndEffectorCalib.yaml
-    deploy_hand_eye: training T_Cd_Link7
+    deploy_hand_eye: config/calibration/T_cam_end.yaml

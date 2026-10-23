@@ -19,7 +19,8 @@ F 的定义在 ``T_Cu_F · T_F_Cd`` 中相互抵消，只要两种夹爪上手�
         --rollout-bag dataset/h5dy_data/dp_infer/rollout/episode_8/bag \\
         --output ros2_ws/src/dp_infer/config/link7_correction.yaml
 
-rollout 录制须包含 ``/wrist_camera/image_raw/compressed``，且手指两枚码完整可见。
+rollout 录制须包含腕部原始鱼眼压缩图像（默认 ``/wrist_camera/image_raw/compressed``，手眼标定会话用
+``--rollout-topic /hand_eye/sample_image``），且手指两枚码完整可见。
 """
 
 from __future__ import annotations
@@ -157,7 +158,7 @@ def training_frames(dataset: Path, detector: FingerTagDetector,
 
 
 def rollout_frames(bags: list[Path], detector: FingerTagDetector,
-                   frame_stride: int) -> list[np.ndarray]:
+                   frame_stride: int, topic: str = IMAGE_TOPIC) -> list[np.ndarray]:
     """从实机录制的压缩腕部图像采样 T_Cd_F。"""
     import rosbag2_py
     from rclpy.serialization import deserialize_message
@@ -168,7 +169,7 @@ def rollout_frames(bags: list[Path], detector: FingerTagDetector,
         reader = rosbag2_py.SequentialReader()
         reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id="mcap"),
                     rosbag2_py.ConverterOptions("cdr", "cdr"))
-        reader.set_filter(rosbag2_py.StorageFilter(topics=[IMAGE_TOPIC]))
+        reader.set_filter(rosbag2_py.StorageFilter(topics=[topic]))
         count = 0
         while reader.has_next():
             _, raw, _ = reader.read_next()
@@ -218,6 +219,8 @@ def parse_args(argv=None):
                         help="convert_hardware_mcap 输出目录，含 records/**/episodes/*.hdf5")
     parser.add_argument("--rollout-bag", type=Path, action="append", required=True,
                         help="实机录制 MCAP 目录，可重复指定")
+    parser.add_argument("--rollout-topic", default=IMAGE_TOPIC,
+                        help="腕部原始鱼眼 CompressedImage 话题；手眼录制用 /hand_eye/sample_image")
     parser.add_argument("--umi-camera", type=Path, default=Path("config/calibration/UmiCalib.yaml"))
     parser.add_argument("--robot-camera", type=Path,
                         default=Path("ros2_ws/src/fastumi_usb_camera/config/EndEffectorCalib.yaml"))
@@ -236,7 +239,8 @@ def main(argv=None):
     robot = FingerTagDetector(*load_fisheye_camera(args.robot_camera))
     umi_frames, T_Cd_Link7_training = training_frames(
         args.training_dataset, umi, args.episode_stride, args.frame_stride)
-    robot_frames = rollout_frames(args.rollout_bag, robot, args.rollout_frame_stride)
+    robot_frames = rollout_frames(args.rollout_bag, robot, args.rollout_frame_stride,
+                                  args.rollout_topic)
     T_Cu_F, umi_std, umi_rms = mean_frame(umi_frames)
     T_Cd_F, robot_std, robot_rms = mean_frame(robot_frames)
     T_Cd_Link7_deploy = (load_hand_eye(args.deploy_hand_eye) if args.deploy_hand_eye
@@ -251,6 +255,7 @@ def main(argv=None):
     sources = {
         "training_dataset": str(args.training_dataset),
         "rollout_bags": [str(path) for path in args.rollout_bag],
+        "rollout_topic": args.rollout_topic,
         "umi_camera": str(args.umi_camera), "robot_camera": str(args.robot_camera),
         "deploy_hand_eye": str(args.deploy_hand_eye or "training T_Cd_Link7"),
     }

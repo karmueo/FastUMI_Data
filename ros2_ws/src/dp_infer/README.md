@@ -322,9 +322,41 @@ python compute_link7_correction.py \
   --output ros2_ws/src/dp_infer/config/link7_correction.yaml
 ```
 
-`--rollout-bag` 可重复指定；重做手眼标定后用 `--deploy-hand-eye <新 T_cam_end.yaml>` 区分训练与部署手眼。
-**重装相机、重做手眼标定或更换训练数据后必须重新生成**，并重新构建 `dp_infer`；
-旧文件会把手指推到错误位置。
+`--rollout-bag` 可以重复指定。重做手眼标定后，要用 `--deploy-hand-eye <新 T_cam_end.yaml>`
+把训练手眼和部署手眼区分开。
+
+不必另录 rollout：手眼标定会话的录制已经带有腕部原图，可以直接用：
+`--rollout-bag <hand_eye 会话>/bag --rollout-topic /hand_eye/sample_image --rollout-frame-stride 1`。
+相机重装后的录制必须是同一安装下的，例如：
+
+```bash
+python compute_link7_correction.py \
+  --training-dataset dataset/processed/jingbao_v1 \
+  --rollout-bag dataset/h5dy_data/hand_eye/session_20261023_143638/bag \
+  --rollout-topic /hand_eye/sample_image --rollout-frame-stride 1 \
+  --deploy-hand-eye config/calibration/T_cam_end.yaml \
+  --output ros2_ws/src/dp_infer/config/link7_correction.yaml
+```
+
+C 的大小可以拆成两部分来看：
+
+- **相机安装差**：由 `T_Cu_F · T_F_Cd` 给出。相机按 UMI mask 对齐后，这部分应该很小。
+- **训练手眼与部署手眼之差**：训练标签沿用转换数据时的旧 `T_Cd_Link7`，所以重装相机后 C 并不会接近单位阵。
+
+当前文件生成于 2026-10-23 相机重装之后：
+
+- 两台相机相对手指只差 1.0°、约 3.5 mm；
+- C 为 16.7°，几乎全部来自新旧手眼之差（16.9°）。
+
+只有用新手眼重新转换训练数据并重训之后，C 才会接近单位阵。
+
+**以下情况必须重新生成，并重新构建 `dp_infer`**：
+
+- 重装相机；
+- 重做手眼标定；
+- 更换训练数据。
+
+否则旧文件会把手指推到错误位置。
 
 训练 URDF 必须匹配 checkpoint 内嵌 SHA-256；组合启动还验证训练 URDF 与控制器
 精简 URDF 的关节链、轴和限位相同。若受信任的旧 checkpoint 未内嵌摘要，可在
