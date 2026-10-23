@@ -25,7 +25,8 @@ SERVICE_NAMES = {
 }
 OPERATION_LABELS = {"start": "开始任务", "stop": "停止任务", "home": "回到初始状态"}
 KEY_OPERATIONS = {" ": "home", "\r": "start", "\n": "start", "\x7f": "stop", "\b": "stop"}
-RESPONSE_TIMEOUT_SECONDS = {"start": 5.0, "stop": 5.0, "home": 170.0}
+# 开始可包含旧录制收尾、开始超时撤销和控制器确认；停止包含控制器与录制器两次调用。
+RESPONSE_TIMEOUT_SECONDS = {"start": 30.0, "stop": 10.0, "home": 170.0}
 STEPS_RESPONSE_TIMEOUT_SECONDS = 5.0
 STEP_KEYS = {"\x1b[C": "right", "\x1bOC": "right",
              "\x1b[D": "left", "\x1bOD": "left"}

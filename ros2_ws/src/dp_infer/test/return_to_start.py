@@ -15,13 +15,14 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty, Float32
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 
-HOME = np.deg2rad([0, 20, 0, 70, 0, 90, 90])
+HOME = np.asarray(load_initial_joint_positions())
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 8))
 MAX_HOME_START_ERROR_DEG = 45.0
 MAX_HOME_PATH_DISPLACEMENT_M = 0.20
 MAX_HOME_PATH_RISE_M = 0.025
-MIN_HOME_PATH_Z_M = 0.20
+MIN_HOME_PATH_Z_M = 0.14  # 与关节控制器一致，包含 YAML 当前起点。
 
 
 def validate_homing_start(joints, forward=None):
@@ -161,10 +162,7 @@ def main():
             raise TimeoutError("gripper did not reach openness 0.95")
         monitor.destroy_publisher(monitor.gripper_publisher)
         monitor.gripper_publisher = None
-        command = [
-            str(home_python), str(home_script), "--ros-args", "-p",
-            "initial_joint_positions:=" + json.dumps(HOME.tolist()),
-        ]
+        command = [str(home_python), str(home_script)]
         with args.output.with_suffix(".home.log").open("w") as log:
             home_process = subprocess.Popen(command, cwd=root, env=os.environ.copy(),
                                             stdout=log, stderr=subprocess.STDOUT,

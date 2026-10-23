@@ -79,7 +79,7 @@ ros2 topic echo --once /motion_control/gripper_state
 ```
 
 确认图像持续更新、七轴反馈有效且已回到
-`[0°, 20°, 0°, 70°, 0°, 90°, 90°]` 附近（话题数值为弧度），驱动有效状态为
+[`initial_pose.yaml`](../fastumi_bringup/config/initial_pose.yaml) 指定的起点附近（话题数值为弧度），驱动有效状态为
 `true`，夹爪实测开度不低于 0.95（1 为张开）。两终端若设置了不同的
 `ROS_DOMAIN_ID`，这些话题无法互相发现。
 
@@ -143,8 +143,8 @@ ros2 topic echo --once /rm_driver/udp_feedback_valid
 本例没有传入 `max_start_displacement_m` 和 `max_start_rise_m`；两者默认 `0`，
 表示不增加相对起点的位移和上升限界，仍受当前
 [`rm75_placo_controller.yaml`](../fastumi_rm75/config/rm75_placo_controller.yaml)
-中的 `Link7` 工作区、关节限位和起始状态门控约束。当前工作区配置与过去的
-限时试验不同，不能把以往试验范围当作本次运动边界。
+中的关节限位和起始状态门控约束。该配置不设 `Link7` 工作区，位置保护由 RM75
+示教器上的虚拟墙负责，实机运行前须确认虚拟墙已启用。
 
 **当前 checkpoint 尚未通过接触或抓取验收。**直接组合启动不会像下方的
 `live_guarded_trial.py` 那样按时间、实测起点位移或球体丢失自动终止试验；
@@ -155,7 +155,7 @@ ros2 topic echo --once /rm_driver/udp_feedback_valid
 ### 下一轮测试与其他模式
 
 实机控制器要求每个新 episode 从
-`[0°, 20°, 0°, 70°, 0°, 90°, 90°]` 附近稳定 0.5 秒开始，夹爪开度至少
+`initial_pose.yaml` 指定的起点附近稳定 0.5 秒开始，夹爪开度至少
 0.95。任务停止后可在原 launch 中执行回位，再开始下一轮。回位会同时发送夹爪全开与
 RM75 MoveJ。回位前确认运动路径安全，并暂停独立键盘回位节点及其他运动命令发送端：
 
@@ -223,7 +223,46 @@ ROS 参数；正在执行的推理仍使用原步数，下一次提交的推理�
 `controller_python`、`control_urdf_path` 可覆盖非标准部署路径；
 `device`、`joint_topic`、`gripper_topic`、`output_topic`、`postprocessors` 也可覆盖。
 `max_start_displacement_m`、`max_start_rise_m` 可设置控制器命令发布前的起点限界。
+`require_close_approval` 控制视觉闭合门控，默认 `false`（直接执行策略夹爪目标），
+传 `require_close_approval:=true` 启用。
+`grasp_latch` 控制控制器的闭合锁定，默认 `true`（见 `fastumi_rm75` README“闭合锁定与夹爪刻度映射”）。
+`link7_correction_file` 默认为随包 `config/link7_correction.yaml`，置空关闭（见“Link7 部署修正”）。
+启动控制器时，`gripper_topic` 只作为控制器的宇树原始反馈输入；推理节点改为订阅控制器换算到训练刻度的
+`policy_gripper_topic`（默认 `/fastumi/policy/gripper_state`）。`start_controller:=false` 时推理直接订阅 `gripper_topic`。
 详细同步和超时参数在安装的 `share/dp_infer/config/dp_infer.yaml` 中。
+
+### 推理过程录制
+
+排查实机问题时可让每轮任务自动录制。终端 A 的硬件入口改用 `start_recorder:=true`
+（JPEG 模式下 `enable_decoder` 仍须为 `false`），终端 B 的组合 launch 加 `record:=true`：
+
+```bash
+ros2 launch fastumi_bringup hardware.launch.py \
+  wrist_video_device:="$WRIST_VIDEO_DEVICE" \
+  wrist_camera_mode:=jpeg enable_decoder:=false start_recorder:=true \
+  gripper_network_interface:="$GRIPPER_NETWORK_INTERFACE" \
+  gripper_config_file:="$GRIPPER_CONFIG_FILE"
+```
+
+```bash
+ros2 launch dp_infer dp_infer.launch.py checkpoint:="$checkpoint" urdf_path:="$training_urdf" image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed num_inference_steps:=4 dry_run:=false record:=true
+```
+
+回车开始任务时，推理节点先调用 `/fastumi/recording/start`，再请求控制器开始；
+Backspace 停止或空格回位时，控制器确认停机后调用 `/fastumi/recording/stop`，录制器在后台
+保存。键盘终端的返回消息会附带 `recording <UUID> started/saving`；录制器未运行或输入不新鲜时
+附带 `recording not started: 原因`，任务仍照常开始。控制器拒绝开始时丢弃该段录制。
+开始应答超时会按请求 UUID 撤销该录制；撤销或停止未确认时保留身份，后续停止或开始任务会重试收尾。
+旧录制收尾未确认时不会将其标记为新任务的录制，返回消息会明确提示未开启新录制。
+录制停止应答返回前任务保持 `stopping`，此时拒绝新的开始请求。键盘等待开始、停止应答的上限分别为 30 秒和 10 秒。
+
+每轮保存到 `<dataset_root>/<record_dir_name>/<record_name>/episode_N/bag`，默认
+`dataset/h5dy_data/dp_infer/rollout/`，可用 `record_dir_name:=`、`record_name:=` 覆盖。
+除关节反馈、`/rm_driver/movej_canfd_cmd`、夹爪状态与指令、腕部相机外，硬件入口默认
+（`record_policy_topics:=true`）还录制 `/fastumi/policy/action_sequence` 和
+`/fastumi/policy/gripper_close_allowed`、`/fastumi/policy/gripper_state`。用 `ros2 bag info <episode_N>/bag` 检查话题和消息数。
+推理进程异常退出时录制不会自动停止，直到再次停止任务或关闭硬件入口（录制器退出时自动保存）。
+`dp_infer_tensorrt` 目前不支持此联动。
 
 ## 消息与时间
 
@@ -231,7 +270,7 @@ ROS 参数；正在执行的推理仍使用原步数，下一次提交的推理�
 | --- | --- | --- |
 | 输入 | `/wrist_camera/image_raw/compressed` | `sensor_msgs/CompressedImage` |
 | 输入 | `/joint_states` | `sensor_msgs/JointState`，七轴为弧度 |
-| 输入 | `/motion_control/gripper_state` | `std_msgs/Float32`，0 闭合、1 张开 |
+| 输入 | `/fastumi/policy/gripper_state`（仅推理时为 `/motion_control/gripper_state`） | `std_msgs/Float32`，训练刻度，0 闭合、1 张开 |
 | 输出 | `/fastumi/policy/action_sequence` | `fastumi_interfaces/PolicyActionSequence` |
 | 闭合许可 | `/fastumi/policy/gripper_close_allowed` | `std_msgs/Bool` |
 
@@ -244,14 +283,48 @@ ROS 参数；正在执行的推理仍使用原步数，下一次提交的推理�
 确认失败时服务返回失败，推理保持暂停。每次开始使用新的 episode 和起始位姿。
 仅推理模式无需控制器确认。闭合许可仅使用采集时间在输入超时范围内的图像。
 控制器按目标时间插值，在反馈超时、
-IK 失败或序列结束时停止。闭合许可由腕部原始图像中的白色球体及蓝橙标记定位；
-球心距夹爪中心不超过图像宽度的 6.25%、许可消息新鲜且首次策略开始至少 1.5 秒
-时才允许进一步闭合。图像异常、检测失败或许可超时则保持夹爪当前开度，但仍可张开。
+IK 失败或序列结束时停止。推理节点始终发布闭合许可，但控制器只在
+`require_close_approval:=true` 时使用（默认关闭）。闭合许可由腕部原始图像中的白色
+球体及蓝橙标记定位；启用门控时，球心距夹爪中心不超过图像宽度的 6.25%、许可消息
+新鲜且首次策略开始至少 1.5 秒时才允许进一步闭合。图像异常、检测失败或许可超时
+则保持夹爪当前开度，但仍可张开。
 这项视觉规则针对当前球与相机，换目标或标定后须重新验证。
 球体检测在独立线程中运行，只保留一个在途检测，不阻塞图像、关节及夹爪回调。
 检测结果回到 ROS 回调后重新检查图像采集时间、任务状态和 episode；重置、
 停止或坏图像会使此前的在途许可失效。模型图像预处理、30 Hz 两帧历史和
 200 ms 输入时限保持不变。
+
+### Link7 部署修正（UMI 与 RM75 相机安装差异）
+
+训练标签按“UMI 相机≡RM75 腕部相机”生成虚拟 Link7：`P = T_W_Cu · T_Cd_Link7`。两台相机相对
+手指的安装不同时，RM75 复现了 UMI 相机位姿，手指却不在训练时的位置。实测（手指 ArUco 码 PnP）
+RM75 相机相对手指多俯视约 15°，手指码处偏约 24 mm，指尖偏约 4–6 cm。
+
+修正为常量刚体变换 `C = T_Link7_Cd(训练) · T_Cu_F · T_F_Cd · T_Cd_Link7(部署)`，
+即真实 Link7 在策略虚拟 Link7 系中的位姿。推理节点：
+
+- `/joint_states` 的 FK 位姿右乘 `C⁻¹` 后进入观测（含 episode 起点），策略内部与后处理器都在虚拟 Link7 系；
+- 发布前目标右乘 `C`，`/fastumi/policy/action_sequence` 仍为真实 `base_link -> Link7`。
+
+两侧一致变换保证原地保持的动作恰好指向实测 Link7，启动时不跳变。组合 launch 默认传入随包安装的
+`config/link7_correction.yaml`，启动日志打印修正角度和平移；传 `link7_correction_file:=''`
+关闭（节点参数为空即单位阵）。修正只对齐手指位置，图像视角差异仍在。
+`dp_infer_tensorrt` 尚未实现该修正。
+
+修正文件由仓库根的 `compute_link7_correction.py` 生成（`ros2_ws/.venv-numpy1`，已 source Humble）：
+训练侧取 HDF5 原图，实机侧取含腕部压缩图像的 rollout 录制，各自用鱼眼内参求手指码位姿后平均。
+
+```bash
+cd ~/work/FastUMI_Data
+python compute_link7_correction.py \
+  --training-dataset dataset/processed/jingbao_v1 \
+  --rollout-bag dataset/h5dy_data/dp_infer/rollout/episode_8/bag \
+  --output ros2_ws/src/dp_infer/config/link7_correction.yaml
+```
+
+`--rollout-bag` 可重复指定；重做手眼标定后用 `--deploy-hand-eye <新 T_cam_end.yaml>` 区分训练与部署手眼。
+**重装相机、重做手眼标定或更换训练数据后必须重新生成**，并重新构建 `dp_infer`；
+旧文件会把手指推到错误位置。
 
 训练 URDF 必须匹配 checkpoint 内嵌 SHA-256；组合启动还验证训练 URDF 与控制器
 精简 URDF 的关节链、轴和限位相同。若受信任的旧 checkpoint 未内嵌摘要，可在

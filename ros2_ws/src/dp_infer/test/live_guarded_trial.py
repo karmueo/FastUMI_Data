@@ -23,10 +23,11 @@ from std_msgs.msg import Bool, Empty, Float32
 from std_srvs.srv import Trigger
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from dp_infer.visual_guard import ball_center_bgr
 
 
-HOME_JOINTS = np.deg2rad([0, 20, 0, 70, 0, 90, 90])
+HOME_JOINTS = np.asarray(load_initial_joint_positions())
 JOINT_NAMES = tuple(f"joint{i}" for i in range(1, 8))
 
 

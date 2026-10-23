@@ -5,6 +5,9 @@ dp_infer:
     checkpoint: ""
     # 训练时使用的 URDF 文件路径；必须显式指定，用于校验模型并计算 Link7 位姿。
     urdf_path: ""
+    # Link7 部署修正文件（compute_link7_correction.py 生成）；空字符串表示不修正。
+    # 组合 launch 默认传入随包安装的 config/link7_correction.yaml。
+    link7_correction_file: ""
     # 旧 checkpoint 未内嵌训练 URDF 摘要时使用的 SHA-256 十六进制值；通常留空。
     expected_urdf_sha256: ""
     # 模型推理设备；例如 cuda:0 表示第一块 CUDA GPU。

@@ -1,0 +1,81 @@
+# Link7 部署修正 C = T_Link7_Cd(训练)·T_Cu_F·T_F_Cd·T_Cd_Link7(部署)，由 compute_link7_correction.py 生成。
+# dp_infer：发布目标 = 策略 Link7 · C，策略位姿观测 = FK Link7 · C⁻¹；平移单位米。
+# 重装相机、重做手眼标定或更换训练数据后须重新生成。
+link7_correction:
+  T_virtual_link7:
+  - - 0.999997735
+    - 0.000856627
+    - -0.001948484
+    - -0.002157779
+  - - -0.001328853
+    - 0.966373937
+    - -0.257137412
+    - 0.005453291
+  - - 0.001662693
+    - 0.257139418
+    - 0.966372886
+    - -0.009218881
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  rotation_deg: 14.901
+  translation_mm:
+  - -2.16
+  - 5.45
+  - -9.22
+  T_Cu_F:
+  - - 0.99981333
+    - -0.005961803
+    - -0.018378315
+    - 0.000886256
+  - - -0.018869459
+    - -0.096827419
+    - -0.995122301
+    - 0.059904153
+  - - 0.004153199
+    - 0.99528333
+    - -0.09692184
+    - 0.08612932
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  T_Cd_F:
+  - - 0.999844447
+    - -0.008155547
+    - -0.015638707
+    - -0.00150996
+  - - -0.017502994
+    - -0.349496173
+    - -0.93677429
+    - 0.036055267
+  - - 0.002174239
+    - 0.936902296
+    - -0.349584555
+    - 0.084448685
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  T_Cd_Link7_training_sha256: 807340cbf9e664a3205e0d22f99faac0c44799711418e486b63e8d0a8f6ddb33
+  T_Cd_Link7_deploy_sha256: 807340cbf9e664a3205e0d22f99faac0c44799711418e486b63e8d0a8f6ddb33
+  samples:
+    umi_frames: 271
+    umi_translation_std_mm: 0.69
+    umi_rotation_rms_deg: 0.37
+    robot_frames: 298
+    robot_translation_std_mm: 0.39
+    robot_rotation_rms_deg: 0.84
+  sources:
+    training_dataset: dataset/processed/jingbao_v1
+    rollout_bags:
+    - dataset/h5dy_data/dp_infer/rollout/episode_3/bag
+    - dataset/h5dy_data/dp_infer/rollout/episode_4/bag
+    - dataset/h5dy_data/dp_infer/rollout/episode_5/bag
+    - dataset/h5dy_data/dp_infer/rollout/episode_6/bag
+    - dataset/h5dy_data/dp_infer/rollout/episode_7/bag
+    - dataset/h5dy_data/dp_infer/rollout/episode_8/bag
+    umi_camera: config/calibration/UmiCalib.yaml
+    robot_camera: ros2_ws/src/fastumi_usb_camera/config/EndEffectorCalib.yaml
+    deploy_hand_eye: training T_Cd_Link7

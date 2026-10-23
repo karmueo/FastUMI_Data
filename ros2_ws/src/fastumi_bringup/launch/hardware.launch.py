@@ -18,7 +18,6 @@ from launch_ros.actions import Node
 from fastumi_usb_camera.capture import (
     is_physical_video_device_path, usb_location_from_physical_port,
 )
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 
 
 CAMERA_MODES = {
@@ -102,6 +101,14 @@ def _fixed_camera(context, publish_reliability):
     })
 
 
+# dp_infer 推理时的模型预测、视觉闭合许可与训练刻度夹爪反馈；普通采集无发布者，只留下空话题。
+POLICY_RECORD_TOPICS = ','.join((
+    '/fastumi/policy/action_sequence:fastumi_interfaces/msg/PolicyActionSequence',
+    '/fastumi/policy/gripper_close_allowed:std_msgs/msg/Bool',
+    '/fastumi/policy/gripper_state:std_msgs/msg/Float32',
+))
+
+
 def _launch_hardware(context):
     """先验证设备配置，再启动硬件；UMI 不属于此启动入口。"""
     mode = LaunchConfiguration('wrist_camera_mode').perform(context).strip().lower()
@@ -178,7 +185,8 @@ def _launch_hardware(context):
         recorder_arguments.update(
             image_topic=image_topic, image_transport=image_transport,
             image_reliability=record_reliability, image_qos_depth=record_depth,
-            fixed_image_topic=fixed_topic)
+            fixed_image_topic=fixed_topic,
+            extra_topics=POLICY_RECORD_TOPICS if _enabled(context, 'record_policy_topics') else '')
         recorder = _include('fastumi_recorder', 'recorder.launch.py', recorder_arguments)
     if _enabled(context, 'start_arm'):
         actions.append(_include('rm_driver', 'rm_75_driver.launch.py'))
@@ -187,7 +195,7 @@ def _launch_hardware(context):
                                 output='screen'))
         if _enabled(context, 'move_to_initial_pose'):
             home = Node(package='rm_bringup', executable='rm_75_initial_pose',
-                        output='screen', parameters=[{'initial_joint_positions': list(INITIAL_JOINT_POSITIONS)}])
+                        output='screen')
             actions.extend([
                 RegisterEventHandler(OnProcessExit(
                     target_action=home,
@@ -217,7 +225,7 @@ def generate_launch_description():
         image_topic='', image_transport='',
         camera_publish_reliability='reliable', camera_record_reliability='reliable',
         camera_record_depth='30',
-        shutdown_save_timeout='120.0',
+        shutdown_save_timeout='120.0', record_policy_topics='true',
     )
     return LaunchDescription([
         *[DeclareLaunchArgument(key, default_value=value) for key, value in defaults.items()],

@@ -12,8 +12,8 @@ from scipy.spatial.transform import Rotation
 from dp_infer.core import (
     InferenceContext, OBS_SHAPES, Observation, build_observations,
     PolicyEngine,
-    compressed_image_to_rgb, decode_actions, image_to_rgb, letterbox_rgb,
-    ordered_joints,
+    compressed_image_to_rgb, correct_sequence, decode_actions, image_to_rgb, letterbox_rgb,
+    load_link7_correction, ordered_joints,
     validate_contract, validate_urdf,
 )
 from dp_infer.synchronizer import ObservationBuffer
@@ -172,3 +172,46 @@ def test_checkpoint_and_urdf_contract(tmp_path):
     path.write_text("<robot name='changed'/>")
     with pytest.raises(ValueError, match="SHA-256"):
         validate_urdf(path, config)
+
+
+def _correction():
+    """约 15° 绕 x、厘米级平移的刚体修正，与实测量级一致。"""
+    matrix = np.eye(4)
+    matrix[:3, :3] = Rotation.from_euler("x", 14.9, degrees=True).as_matrix()
+    matrix[:3, 3] = [-0.002, 0.0055, -0.0092]
+    return matrix
+
+
+def test_link7_correction_file_round_trip_and_rejects_non_rigid(tmp_path):
+    """空路径为单位阵；文件按 9 位小数保存后重新正交化；非刚体被拒绝。"""
+    np.testing.assert_array_equal(load_link7_correction(""), np.eye(4))
+    path = tmp_path / "link7_correction.yaml"
+    matrix = _correction()
+    path.write_text(f"link7_correction:\n  T_virtual_link7: {np.round(matrix, 9).tolist()}\n")
+    loaded = load_link7_correction(path)
+    np.testing.assert_allclose(loaded, matrix, atol=1e-8)
+    np.testing.assert_allclose(loaded[:3, :3] @ loaded[:3, :3].T, np.eye(3), atol=1e-12)
+    scaled = matrix.copy()
+    scaled[:3, :3] *= 1.01
+    path.write_text(f"link7_correction:\n  T_virtual_link7: {scaled.tolist()}\n")
+    with pytest.raises(ValueError, match="rigid"):
+        load_link7_correction(path)
+
+
+def test_corrected_hold_action_targets_the_measured_link7_pose():
+    """观测右乘 C⁻¹ 后，原地保持的策略动作经右乘 C 发布，目标恰为实测 Link7，不会跳变。"""
+    correction = _correction()
+    measured = np.eye(4)
+    measured[:3, :3] = Rotation.from_euler("xyz", [170, 10, -30], degrees=True).as_matrix()
+    measured[:3, 3] = [0.3, 0.2, 0.15]
+    virtual = measured @ np.linalg.inv(correction)
+    hold = np.tile(np.r_[np.zeros(3), [1, 0, 0, 0, 1, 0], 0.9], (16, 1))
+    sequence = correct_sequence(
+        decode_actions(hold, InferenceContext(virtual, 1, 0, 1)), correction)
+    np.testing.assert_allclose(sequence.positions, np.tile(measured[:3, 3], (16, 1)), atol=1e-9)
+    expected = Rotation.from_matrix(measured[:3, :3])
+    for quaternion in sequence.quaternions:
+        assert (Rotation.from_quat(quaternion) * expected.inv()).magnitude() < 1e-9
+    np.testing.assert_allclose(sequence.gripper_openness, 0.9)
+    identity = decode_actions(hold, InferenceContext(measured, 1, 0, 1))
+    assert correct_sequence(identity, np.eye(4)) is identity

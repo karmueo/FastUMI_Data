@@ -10,6 +10,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
+from rosidl_runtime_py.utilities import get_message
 from nav_msgs.msg import Odometry
 from ffmpeg_image_transport_msgs.msg import FFMPEGPacket
 from sensor_msgs.msg import CompressedImage, Image, JointState
@@ -26,6 +27,25 @@ from fastumi_recorder.engine import DEFAULT_TOPICS, IMAGE_TYPES, RecorderEngine
 
 
 PREFIX = '/fastumi/recording'
+
+
+def parse_extra_topics(value):
+    """解析逗号分隔的 `话题:包/msg/类型` 列表，返回 (话题, 类型) 元组；空串表示不录额外话题。"""
+    entries = []
+    for item in str(value).split(','):
+        item = item.strip()
+        if not item:
+            continue
+        topic, separator, message_type = item.rpartition(':')
+        topic, message_type = topic.strip(), message_type.strip()
+        if not separator or not topic.startswith('/') or message_type.count('/') != 2:
+            raise ValueError(f'extra_topics 项必须为 /话题:包/msg/类型: {item}')
+        try:
+            get_message(message_type)  # 类型不存在时在启动阶段报错。
+        except (AttributeError, ImportError, ValueError) as error:
+            raise ValueError(f'extra_topics 消息类型不可用: {message_type}') from error
+        entries.append((topic, message_type))
+    return entries
 
 
 def info_message(info):
@@ -48,7 +68,7 @@ class RecorderNode(Node):
             tracker_odom_topic='/vive_tracker/odom',
             image_topic='/wrist_camera/image_raw/ffmpeg', image_transport='ffmpeg',
             image_reliability='reliable', image_qos_depth=30,
-            fixed_image_topic='',
+            fixed_image_topic='', extra_topics='',
         )
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -81,6 +101,13 @@ class RecorderNode(Node):
             fixed_topic = str(values['fixed_image_topic']).strip()
             if fixed_topic:
                 topics['fixed_image'] = (fixed_topic, IMAGE_TYPES['jpeg'])
+        # 额外话题只原样写入 MCAP（如策略输出），不参与开始录制的就绪判定。
+        known = {topic for topic, _ in topics.values()}
+        for index, (topic, message_type) in enumerate(parse_extra_topics(values['extra_topics'])):
+            if topic in known:
+                raise ValueError(f'extra_topics 与已录制话题重复: {topic}')
+            known.add(topic)
+            topics[f'extra_{index}'] = (topic, message_type)
         self.engine = RecorderEngine(
             root or default_dataset_root(), dir_name=values['dir_name'], name=values['name'],
             record_camera=values['record_camera'], image_transport=image_transport, topics=topics,
@@ -129,6 +156,12 @@ class RecorderNode(Node):
                                      if image_reliability == 'reliable'
                                      else ReliabilityPolicy.BEST_EFFORT),
                         durability=DurabilityPolicy.VOLATILE))
+        for stream, (topic, message_type) in topics.items():
+            if stream.startswith('extra_'):
+                self.create_subscription(
+                    get_message(message_type), topic,
+                    lambda message, stream=stream: self.engine.record(
+                        stream, message, self._now_ns()), 10)
         self.create_timer(0.5, self.publish_status)
         self.create_timer(0.05, self._publish_change)
         self.publish_status()

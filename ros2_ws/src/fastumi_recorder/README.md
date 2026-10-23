@@ -22,6 +22,7 @@ ros2 run fastumi_recorder recorder --ros-args \
 | `gripper_action_topic` | `/motion_control/gripper_command` | `std_msgs/msg/Float32` |
 | `tracker_odom_topic` | `/vive_tracker/odom` | `nav_msgs/msg/Odometry` |
 | `image_topic` | `/wrist_camera/image_raw/ffmpeg` | 由 `image_transport` 选择 |
+| `extra_topics` | 空 | 逗号分隔的 `话题:包/msg/类型`（如 `/fastumi/policy/action_sequence:fastumi_interfaces/msg/PolicyActionSequence`），原样写入同一 MCAP，不参与就绪判定；离线转换忽略这些话题 |
 | `fixed_image_topic` | 空 | 固定相机 `CompressedImage`（JPEG）话题；非空时与末端图像一同门控并写入同一 MCAP，`record_camera=false` 时忽略 |
 
 `image_transport` 支持 `raw`（`Image`）、`jpeg`（`CompressedImage`）和 `ffmpeg`（`FFMPEGPacket`）。`record_camera:=false` 时不订阅图像。Tracker、动作话题可以缺席；开始录制要求最近 `input_freshness` 秒内收到有效关节状态、夹爪状态和启用的图像输入，默认 2 秒。校验只用于就绪判定，录制期间收到的消息按原始 CDR 内容写入，不裁剪、不重编码、不合成样本。消息自带的 header 时间戳保持不变；bag 时间戳为 Jetson 收到消息时的 ROS 时间。两机间需要正确同步系统时钟。

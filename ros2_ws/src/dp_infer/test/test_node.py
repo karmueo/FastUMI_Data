@@ -15,7 +15,9 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import CompressedImage
-from fastumi_interfaces.srv import ResetPolicyController, SetNumInferenceSteps
+from fastumi_interfaces.srv import (
+    CancelRecordingRequest, ResetPolicyController, SetNumInferenceSteps, StartRecording,
+)
 from std_srvs.srv import Trigger
 
 from dp_infer.core import InferenceContext, decode_actions
@@ -72,6 +74,37 @@ def test_default_interfaces_and_message_stamp(node):
     assert message.episode_id == 5 and message.sequence_id == 17
     assert len(message.poses) == len(message.gripper_openness) == len(message.time_from_start) == 16
     assert stamp_ns(message.time_from_start[-1]) == 500_000_000
+
+
+def test_link7_correction_applies_to_joint_observation_and_published_targets(node):
+    """FK 位姿右乘 C⁻¹ 进入观测缓存，发布目标右乘 C；默认无修正文件时为单位阵。"""
+    from scipy.spatial.transform import Rotation
+    from sensor_msgs.msg import JointState
+
+    instance, messages = node
+    np.testing.assert_array_equal(instance.link7_correction, np.eye(4))
+    correction = np.eye(4)
+    correction[:3, :3] = Rotation.from_euler("x", 15, degrees=True).as_matrix()
+    correction[:3, 3] = [0.0, 0.005, -0.01]
+    instance.link7_correction = correction
+    instance.link7_correction_inverse = np.linalg.inv(correction)
+    angles = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    joints = JointState(name=[f"joint{i}" for i in range(1, 8)], position=angles)
+    joints.header.stamp.sec = 1
+    instance.on_joint(joints)
+    np.testing.assert_allclose(
+        instance.buffer.joints[-1][1], instance.fk.forward(angles) @ np.linalg.inv(correction))
+    context = InferenceContext(np.eye(4), instance.get_clock().now().nanoseconds, 0, 4)
+    instance.active_context = context
+    instance.future = Future()
+    instance.future.set_result(_prediction(context))
+    instance.tick()
+    pose = messages[-1].poses[0]
+    np.testing.assert_allclose(
+        [pose.position.x, pose.position.y, pose.position.z], correction[:3, 3], atol=1e-9)
+    published = Rotation.from_quat(
+        [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
+    assert (published * Rotation.from_matrix(correction[:3, :3]).inv()).magnitude() < 1e-9
 
 
 def test_set_inference_steps_service_validates_and_syncs_parameter(node):
@@ -529,3 +562,399 @@ def test_managed_public_services_coordinate_with_controller(node):
         executor.shutdown()
         caller.destroy_node()
         controller.destroy_node()
+
+
+def _recording_node(node, start_result=(True, "ok", "rec-1"), controller_ok=True):
+    """开启任务录制，并用假服务记录录制器与控制器的调用顺序。"""
+    instance, _ = node
+    instance._task_control_enabled = True
+    instance._require_controller_reset = True
+    instance._record_task = True
+    instance.task_state = "idle"
+    _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+    calls = []
+
+    async def recording_call(operation, **_identities):
+        calls.append(("recording", operation, instance._recording_id))
+        return start_result if operation == "start" else (True, "STOP_ACCEPTED", "rec-1")
+
+    async def controller_call(client, _timeout):
+        calls.append(("controller", client))
+        if client is instance.controller_start_client:
+            return controller_ok, "started" if controller_ok else "rejected"
+        return True, "stopped"
+
+    instance._recording_call = recording_call
+    instance._controller_call = controller_call
+    return instance, calls
+
+
+def test_task_recording_starts_before_controller_and_stops_after(node):
+    instance, calls = _recording_node(node)
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert start.success and "recording rec-1 started" in start.message
+    assert calls == [("recording", "start", ""),
+                     ("controller", instance.controller_start_client)]
+    calls.clear()
+    stop = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert stop.success and "recording rec-1 saving" in stop.message
+    assert calls == [("controller", instance.controller_reset_client),
+                     ("recording", "stop", "rec-1")]
+    assert instance._recording_id == ""
+
+
+def test_task_recording_failure_only_warns(node):
+    instance, calls = _recording_node(node, start_result=(False, "Recording service is unavailable", ""))
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert start.success and instance.task_state == "running"
+    assert "recording not started: Recording service is unavailable" in start.message
+    stop = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert stop.success and "recording" not in stop.message
+    assert [call for call in calls if call[0] == "recording"] == [("recording", "start", "")]
+
+
+def test_task_recording_cancelled_when_controller_rejects_start(node):
+    instance, calls = _recording_node(node, controller_ok=False)
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert not start.success and instance.task_state == "idle"
+    assert "recording rec-1 cancelled" in start.message
+    assert calls[-1] == ("recording", "cancel", "rec-1")
+    assert instance._recording_id == ""
+
+
+def test_task_recording_disabled_by_default(node):
+    instance, calls = _recording_node(node)
+    instance._record_task = False
+    assert asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response())).success
+    assert asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response())).success
+    assert all(call[0] == "controller" for call in calls)
+
+
+def test_recording_start_timeout_cancels_the_durable_request(node):
+    """开始应答丢失时按同一 UUID 撤销，防止留下没有 recording_id 的后台录制。"""
+    instance, _ = _recording_node(node)
+    instance._recording_call = DpInferenceNode._recording_call.__get__(instance)
+    requests = []
+
+    async def service_call(client, request, _timeout, _label):
+        requests.append(request)
+        if client is instance.recording_clients["start"]:
+            assert instance._recording_request_id == request.request_id
+            return None, "Recording service timed out"
+        assert client is instance.recording_clients["cancel_request"]
+        return CancelRecordingRequest.Response(
+            success=True, state="cancelled", recording_id="late-rec", message="CANCELLED"), ""
+
+    instance._service_call = service_call
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert start.success and "recording not started" in start.message
+    assert requests[0].request_id == requests[1].request_id
+    assert instance._recording_id == instance._recording_request_id == ""
+    assert asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response())).success
+    assert len(requests) == 2
+
+
+def test_unconfirmed_recording_start_can_be_cancelled_on_later_stop(node):
+    """开始与撤销都暂时不可用时保留 UUID，下一次停止重试同一个请求。"""
+    instance, _ = _recording_node(node)
+    instance._recording_call = DpInferenceNode._recording_call.__get__(instance)
+    available = False
+    request_ids = []
+
+    async def service_call(client, request, _timeout, _label):
+        request_ids.append(request.request_id)
+        if not available:
+            return None, "Recording service is unavailable"
+        assert client is instance.recording_clients["cancel_request"]
+        return CancelRecordingRequest.Response(success=True, state="cancelled"), ""
+
+    instance._service_call = service_call
+    assert asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response())).success
+    pending_id = instance._recording_request_id
+    assert pending_id and not instance._recording_id
+    available = True
+    assert asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response())).success
+    assert request_ids == [pending_id, pending_id, pending_id]
+    assert instance._recording_request_id == instance._recording_id == ""
+
+
+@pytest.mark.parametrize("terminal_state", ["failed", "completed"])
+def test_terminal_recording_request_needs_no_further_cleanup(node, terminal_state):
+    """录制器已持久化失败或完成状态时，即使 cancel 返回 false 也无活动录制。"""
+    instance, _ = node
+    instance._recording_request_id = "old-request"
+
+    async def service_call(*_args):
+        return CancelRecordingRequest.Response(success=False, state=terminal_state), ""
+
+    instance._service_call = service_call
+    assert "cancelled" in asyncio.run(instance._finish_recording("stop"))
+    assert not instance._recording_request_id
+
+
+def test_recording_stop_failure_retains_identity_and_idle_stop_retries(node):
+    """录制停止失败不影响停机结果，保留会话；仅推理模式 idle 下也可重试。"""
+    instance, _ = _recording_node(node)
+    instance.task_state = "running"
+    instance._recording_id = "rec-to-retry"
+    instance._recording_request_id = "request-to-retry"
+    attempts = []
+
+    async def recording_call(operation, **identities):
+        attempts.append((operation, identities))
+        return (len(attempts) > 1, "unavailable" if len(attempts) == 1 else "STOP_ACCEPTED", "")
+
+    instance._recording_call = recording_call
+    stop = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert stop.success and "stop failed" in stop.message
+    assert instance._recording_id == "rec-to-retry"
+    assert instance._recording_request_id == "request-to-retry"
+    instance._require_controller_reset = False
+    retry = asyncio.run(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+    assert retry.success and "saving" in retry.message
+    assert attempts[0] == attempts[1]
+    assert instance._recording_id == instance._recording_request_id == ""
+
+
+def test_new_task_retries_old_recording_cleanup_before_opening_new_session(node):
+    """收尾失败后开始下一轮时，先重试停止旧录制，再创建新录制。"""
+    instance, calls = _recording_node(node)
+    instance._recording_id = "old-rec"
+    instance._recording_request_id = "old-request"
+    result = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert result.success
+    assert calls[:2] == [("recording", "stop", "old-rec"), ("recording", "start", "")]
+    assert instance._recording_id == "rec-1"
+
+
+def test_unconfirmed_cleanup_does_not_reuse_old_recording_for_new_task(node):
+    """旧录制无法停止时保持可重试身份，并明确报告新任务未开新录制。"""
+    instance, _ = _recording_node(node)
+    instance._recording_id = "old-rec"
+    attempts = []
+
+    async def recording_call(operation, **_identities):
+        attempts.append(operation)
+        return False, "unavailable", ""
+
+    instance._recording_call = recording_call
+    start = asyncio.run(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+    assert start.success and "recording not started" in start.message
+    assert instance._recording_id == "old-rec"
+    assert attempts == ["stop"]
+
+
+def test_task_stays_stopping_until_recording_response_arrives(node):
+    """录制停止在途期间不允许新任务；应答后下一轮必须开启新录制。"""
+    instance, _ = _recording_node(node)
+
+    async def exercise():
+        instance.task_state = "running"
+        instance._recording_id = "old-rec"
+        finish = asyncio.Future()
+        calls = []
+
+        async def recording_call(operation, **_identities):
+            calls.append(operation)
+            if operation == "stop":
+                return await finish
+            return True, "STARTED", "new-rec"
+
+        instance._recording_call = recording_call
+        stopping = asyncio.create_task(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+        await asyncio.sleep(0)
+        assert instance.task_state == "stopping"
+        start = await instance.on_start_task(Trigger.Request(), Trigger.Response())
+        assert not start.success and "stopping" in start.message
+        assert calls == ["stop"]
+        finish.set_result((True, "STOP_ACCEPTED", "old-rec"))
+        assert (await stopping).success
+        assert instance.task_state == "idle" and not instance._recording_id
+        _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+        assert (await instance.on_start_task(Trigger.Request(), Trigger.Response())).success
+        assert calls == ["stop", "start"] and instance._recording_id == "new-rec"
+
+    asyncio.run(exercise())
+
+
+def test_superseded_stop_cannot_clear_newer_fault_state(node):
+    """录制收尾期间时钟回退等操作使旧停止失效，迟到应答不能覆盖 fault。"""
+    instance, _ = _recording_node(node)
+
+    async def exercise():
+        instance.task_state, instance._recording_id = "running", "rec-1"
+        finish = asyncio.Future()
+
+        async def recording_call(*_args, **_kwargs):
+            return await finish
+
+        instance._recording_call = recording_call
+        stopping = asyncio.create_task(instance.on_stop_task(Trigger.Request(), Trigger.Response()))
+        await asyncio.sleep(0)
+        instance._clear_task()
+        instance.task_state = "fault"
+        finish.set_result((True, "STOP_ACCEPTED", "rec-1"))
+        result = await stopping
+        assert not result.success and "superseded" in result.message
+        assert instance.task_state == "fault"
+
+    asyncio.run(exercise())
+
+
+def test_late_recording_start_cannot_overwrite_restarted_task(node):
+    """开始在途时停止按 UUID 撤销；其迟到应答不能覆盖下一轮录制身份。"""
+    instance, _ = _recording_node(node)
+    instance._recording_call = DpInferenceNode._recording_call.__get__(instance)
+
+    async def exercise():
+        old_start = asyncio.Future()
+        starts, cancellations = [], []
+
+        async def service_call(client, request, _timeout, _label):
+            if client is instance.recording_clients["start"]:
+                starts.append(request.request_id)
+                if len(starts) == 1:
+                    return await old_start
+                return StartRecording.Response(success=True, recording_id="new-rec"), ""
+            cancellations.append(request.request_id)
+            return CancelRecordingRequest.Response(success=True, state="cancelled"), ""
+
+        instance._service_call = service_call
+        starting = asyncio.create_task(instance.on_start_task(Trigger.Request(), Trigger.Response()))
+        await asyncio.sleep(0)
+        assert instance.task_state == "starting" and starts
+        assert (await instance.on_stop_task(Trigger.Request(), Trigger.Response())).success
+        assert cancellations == starts
+        assert not instance._recording_id and not instance._recording_request_id
+        _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+        assert (await instance.on_start_task(Trigger.Request(), Trigger.Response())).success
+        old_start.set_result((StartRecording.Response(success=True, recording_id="old-rec"), ""))
+        assert not (await starting).success
+        assert instance.task_state == "running" and instance._recording_id == "new-rec"
+        assert instance._recording_request_id == starts[1]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("lose_start_response", [False, True])
+def test_task_recording_with_real_ros_recorder(node, tmp_path, lose_start_response):
+    """隔离 ROS 服务验证 MCAP 话题、时间戳、帧数，以及开始应答丢失后的实际撤销。"""
+    rosbag2_py = pytest.importorskip("rosbag2_py")
+    recorder_module = pytest.importorskip("fastumi_recorder.node")
+    if "mcap" not in rosbag2_py.get_registered_writers():
+        pytest.skip("rosbag2_storage_mcap is not installed")
+    from sensor_msgs.msg import Image, JointState
+    from std_msgs.msg import Float32
+    from rclpy.serialization import deserialize_message
+    from fastumi_interfaces.msg import PolicyActionSequence
+    from fastumi_bringup.initial_pose import load_initial_joint_positions
+
+    instance, _ = _recording_node(node)
+    instance._recording_call = DpInferenceNode._recording_call.__get__(instance)
+    instance.timer.cancel()  # 此测试仅验证服务和数据录制，不调度假引擎推理。
+    if lose_start_response:
+        async def service_call(client, request, timeout, label):
+            result, error = await DpInferenceNode._service_call(
+                instance, client, request, timeout, label)
+            if client is instance.recording_clients["start"] and result is not None:
+                assert result.success
+                return None, "Simulated lost start response"
+            return result, error
+
+        instance._service_call = service_call
+    prefix = "/test_task_recording"
+    recorder = recorder_module.RecorderNode(parameter_overrides=[
+        Parameter("dataset_root", value=str(tmp_path)),
+        Parameter("joint_state_topic", value=prefix + "/joint"),
+        Parameter("gripper_state_topic", value=prefix + "/gripper"),
+        Parameter("image_transport", value="raw"),
+        Parameter("image_topic", value=prefix + "/image"),
+        Parameter("extra_topics", value=prefix + "/action:fastumi_interfaces/msg/PolicyActionSequence"),
+    ])
+    caller = Node("task_recording_smoke_caller")
+    clients = {name: caller.create_client(Trigger, "/fastumi/policy/" + name)
+               for name in ("start_task", "stop_task")}
+    publishers = {name: caller.create_publisher(kind, prefix + "/" + name, 10)
+                  for name, kind in (("joint", JointState), ("gripper", Float32),
+                                     ("image", Image), ("action", PolicyActionSequence))}
+    executor = SingleThreadedExecutor()
+    participants = (instance, recorder, caller)
+    for participant in participants:
+        executor.add_node(participant)
+
+    def publish_inputs():
+        stamp = caller.get_clock().now().nanoseconds
+        joints = JointState(name=[f"joint{i}" for i in range(1, 8)],
+                            position=list(load_initial_joint_positions()))
+        joints.header.stamp.sec, joints.header.stamp.nanosec = divmod(stamp, 10**9)
+        frame = Image(width=16, height=16, step=48, encoding="rgb8", data=bytes(768))
+        frame.header.stamp = joints.header.stamp
+        publishers["joint"].publish(joints)
+        publishers["gripper"].publish(Float32(data=1.0))
+        publishers["image"].publish(frame)
+        context = InferenceContext(np.eye(4), stamp, instance.buffer.episode_id, 1)
+        publishers["action"].publish(sequence_message(_prediction(context), context))
+
+    def pump_until(condition):
+        deadline = time.monotonic() + 5
+        while not condition():
+            assert time.monotonic() < deadline
+            publish_inputs()
+            executor.spin_once(timeout_sec=0.01)
+
+    def call(name):
+        future = clients[name].call_async(Trigger.Request())
+        pump_until(future.done)
+        assert future.result().success, future.result().message
+        return future.result()
+
+    try:
+        pump_until(lambda: all(client.service_is_ready() for client in
+                              (*clients.values(), *instance.recording_clients.values()))
+                   and all(pub.get_subscription_count() for pub in publishers.values())
+                   and all(recorder.engine.status()[field] >= 0
+                           for field in ("joint_age", "gripper_age", "image_age")))
+        _add_frame(instance.buffer, instance.get_clock().now().nanoseconds - 20_000_000)
+        start = call("start_task")
+        if lose_start_response:
+            assert "recording not started" in start.message
+            assert recorder.engine.state == "idle"
+            assert not instance._recording_request_id and not instance._recording_id
+            assert not list(tmp_path.glob("*/*/.recording-*"))
+            assert not recorder.engine.catalog.entries
+            assert call("stop_task").success
+        else:
+            recording_id = instance._recording_id
+            assert recording_id and recorder.engine.state == "recording"
+            pump_until(lambda: recorder.engine._counts["received_frames"] >= 2)
+            assert "saving" in call("stop_task").message
+            pump_until(lambda: recorder.engine.state != "saving")
+            assert recorder.engine.state == "idle", recorder.engine.last_error
+            info = recorder.engine.catalog.entries[recording_id]
+            bag = tmp_path / info["relative_path"] / "bag"
+            assert info["image_frames"] >= 2 and (bag / "metadata.yaml").is_file()
+            assert list(bag.glob("*.mcap"))
+            reader = rosbag2_py.SequentialReader()
+            reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id="mcap"),
+                        rosbag2_py.ConverterOptions("", ""))
+            seen = set()
+            image_count = 0
+            while reader.has_next():
+                topic, serialized, timestamp_ns = reader.read_next()
+                assert timestamp_ns > 0
+                seen.add(topic)
+                if topic == prefix + "/image":
+                    frame = deserialize_message(serialized, Image)
+                    assert 0 < stamp_ns(frame.header.stamp) <= timestamp_ns
+                    assert frame.encoding == "rgb8" and len(frame.data) == 768
+                    image_count += 1
+            assert seen == {prefix + "/" + name for name in publishers}
+            assert image_count == info["image_frames"]
+            del reader
+    finally:
+        recorder.close()
+        for participant in participants:
+            executor.remove_node(participant)
+        executor.shutdown()
+        recorder.destroy_node()
+        caller.destroy_node()

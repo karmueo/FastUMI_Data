@@ -1,7 +1,11 @@
 """验证实机回位脚本只接受起点附近的有效七轴反馈。"""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+
+from diffusion_policy.common.urdf_kinematics import UrdfKinematics
 
 from return_to_start import HOME, validate_homing_start
 
@@ -36,3 +40,10 @@ def test_homing_preflight_rejects_path_outside_trial_region():
 
     with pytest.raises(RuntimeError, match="return path"):
         validate_homing_start(joints, far_forward)
+
+
+def test_configured_home_passes_actual_urdf_preflight():
+    """当前 YAML 起点须通过回位工具自身的真实 FK 边界检查。"""
+    urdf = Path(__file__).parents[2] / "fastumi_rm75/assets/rm_75_kinematic.urdf"
+    fk = UrdfKinematics(urdf, [f"joint{i}" for i in range(1, 8)])
+    validate_homing_start(HOME, fk.forward)

@@ -4,10 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import signal
 import time
+import uuid
 
 import cv2
 import numpy as np
 import rclpy
+from scipy.spatial.transform import Rotation
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -19,12 +21,13 @@ from sensor_msgs.msg import CompressedImage, Image, JointState
 from std_msgs.msg import Bool, Float32
 from std_srvs.srv import Trigger
 from fastumi_interfaces.msg import PolicyActionSequence
-from fastumi_interfaces.srv import ResetPolicyController, SetNumInferenceSteps
+from fastumi_interfaces.srv import (CancelRecording, CancelRecordingRequest, ResetPolicyController,
+                                    SetNumInferenceSteps, StartRecording, StopRecording)
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
 from dp_infer.core import (InferenceContext, JOINT_NAMES, PolicyEngine, build_observations,
-                             compressed_image_to_rgb, image_to_rgb, letterbox_rgb, load_processors, ordered_joints,
-                             validate_urdf)
+                             compressed_image_to_rgb, correct_sequence, image_to_rgb, letterbox_rgb,
+                             load_link7_correction, load_processors, ordered_joints, validate_urdf)
 from dp_infer.synchronizer import ObservationBuffer
 from dp_infer.visual_guard import ball_center_bgr, ball_near_jaws
 
@@ -84,8 +87,16 @@ class DpInferenceNode(Node):
             "task_control_enabled": False,
             "controller_reset_service": "/fastumi/rm75/placo/reset_episode",
             "require_controller_reset": True, "controller_reset_timeout_s": 1.0,
+            # 开始/停止任务时联动 fastumi_recorder 录制；录制失败只告警，不阻止任务。
+            "record_task": False, "record_dir_name": "dp_infer", "record_name": "rollout",
+            "recording_start_service": "/fastumi/recording/start",
+            "recording_stop_service": "/fastumi/recording/stop",
+            "recording_cancel_service": "/fastumi/recording/cancel",
+            "recording_cancel_request_service": "/fastumi/recording/cancel_request",
             "input_timeout_s": 0.2, "history_tolerance_s": 0.015,
             "max_inference_hz": 10.0, "result_timeout_s": 0.5, "postprocessors": "",
+            # Link7 部署修正文件；空字符串为单位阵（不修正）。
+            "link7_correction_file": "",
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -119,6 +130,9 @@ class DpInferenceNode(Node):
                                        self.parameter("expected_urdf_sha256"))
         validate_urdf(urdf_path, engine.cfg, expected_urdf_sha256)
         self.fk = UrdfKinematics(urdf_path, JOINT_NAMES)
+        # 策略内部（观测、起点、后处理）全部使用虚拟 Link7：观测右乘 C⁻¹，发布前右乘 C。
+        self.link7_correction = load_link7_correction(self.parameter("link7_correction_file"))
+        self.link7_correction_inverse = np.linalg.inv(self.link7_correction)
         self.engine = engine  # 只由工作线程调用的策略实例。
         if hasattr(engine, "warmup"):
             engine.warmup()
@@ -155,6 +169,16 @@ class DpInferenceNode(Node):
         self.controller_return_client = self.create_client(
             ResetPolicyController, self.parameter("controller_return_service"),
             callback_group=self._reset_io_group)
+        self._record_task = bool(self.parameter("record_task"))
+        self._recording_id = ""
+        self._recording_request_id = ""  # 开始应答丢失时仍可按持久化请求身份撤销。
+        self.recording_clients = {
+            operation: self.create_client(service, self.parameter(f"recording_{operation}_service"),
+                                          callback_group=self._reset_io_group)
+            for operation, service in (("start", StartRecording), ("stop", StopRecording),
+                                       ("cancel", CancelRecording),
+                                       ("cancel_request", CancelRecordingRequest))
+        }
         self.publisher = self.create_publisher(PolicyActionSequence, self.parameter("output_topic"), 10)
         self.close_guard_publisher = self.create_publisher(
             Bool, self.parameter("close_guard_topic"), 10)
@@ -187,9 +211,12 @@ class DpInferenceNode(Node):
             Trigger, self.parameter("return_service"), self.on_return_to_start,
             callback_group=self._reset_io_group)
         self.timer = self.create_timer(0.01, self.tick)
+        correction_deg = np.degrees(Rotation.from_matrix(self.link7_correction[:3, :3]).magnitude())
         self.get_logger().info(
             f"DP inference ready: base_link -> Link7, 16 actions at 30 Hz, "
-            f"denoise_steps={self._requested_steps}")
+            f"denoise_steps={self._requested_steps}, "
+            f"link7_correction={correction_deg:.2f} deg / "
+            f"{np.linalg.norm(self.link7_correction[:3, 3]) * 1000:.1f} mm")
 
     def parameter(self, name):
         """读取已声明的 ROS 参数当前值。"""
@@ -287,7 +314,8 @@ class DpInferenceNode(Node):
         """重排七轴角度并执行 FK，缓存 base_link 下的 Link7 位姿。"""
         try:
             angles = ordered_joints(list(message.name), message.position)
-            self.buffer.add_pose(stamp_ns(message.header.stamp), self.fk.forward(angles))
+            self.buffer.add_pose(stamp_ns(message.header.stamp),
+                                 self.fk.forward(angles) @ self.link7_correction_inverse)
         except (ValueError, TypeError) as error:
             self.warn(f"Dropped joint state: {error}")
 
@@ -369,25 +397,94 @@ class DpInferenceNode(Node):
         self._invalidate_close_guard()
         return self.operation_id
 
-    async def _controller_call(self, client, timeout_s):
-        """异步等待控制器服务；超时后不允许旧答复改变任务状态。"""
+    async def _service_call(self, client, request, timeout_s, label):
+        """异步调用服务并在超时后取消；返回 (结果或 None, 失败说明)。"""
         if not client.service_is_ready():
-            return False, "Controller service is unavailable"
-        request = ResetPolicyController.Request()
-        request.episode_id = self.buffer.episode_id
+            return None, f"{label} is unavailable"
         future = client.call_async(request)
         timer = self.create_timer(timeout_s, lambda: future.cancel(),
                                   callback_group=self._reset_io_group)
         try:
             await future
             if future.cancelled():
-                return False, "Controller service timed out"
-            result = future.result()
-            return bool(result.success), result.message
+                return None, f"{label} timed out"
+            return future.result(), ""
         except Exception as error:
-            return False, str(error)
+            return None, str(error)
         finally:
             self.destroy_timer(timer)
+
+    async def _controller_call(self, client, timeout_s):
+        """异步等待控制器服务；超时后不允许旧答复改变任务状态。"""
+        request = ResetPolicyController.Request()
+        request.episode_id = self.buffer.episode_id
+        result, error = await self._service_call(client, request, timeout_s, "Controller service")
+        if result is None:
+            return False, error
+        return bool(result.success), result.message
+
+    def _forget_recording(self, request_id, recording_id):
+        """只清除已确认结束的同一会话，避免迟到应答覆盖新会话身份。"""
+        if request_id:
+            if self._recording_request_id != request_id:
+                return
+        elif self._recording_id != recording_id:
+            return
+        self._recording_request_id = ""
+        self._recording_id = ""
+
+    async def _recording_call(self, operation, *, request_id=None, recording_id=None):
+        """调用录制事务服务；返回 (成功, 说明, recording_id)。"""
+        recording_id = self._recording_id if recording_id is None else recording_id
+        if operation == "start":
+            request_id = str(uuid.uuid4())
+            self._recording_request_id = request_id
+            request = StartRecording.Request(
+                request_id=request_id, dir_name=self.parameter("record_dir_name"),
+                name=self.parameter("record_name"))
+        elif operation == "cancel_request":
+            request_id = self._recording_request_id if request_id is None else request_id
+            request = CancelRecordingRequest.Request(request_id=request_id)
+        else:
+            request = (StopRecording if operation == "stop" else CancelRecording).Request(
+                recording_id=recording_id)
+        result, error = await self._service_call(
+            self.recording_clients[operation], request, 5.0, "Recording service")
+        if result is None:
+            if operation == "start":
+                # 取消本地 future 不会撤销服务端的开始操作；为同一请求写入撤销标记。
+                cancelled, cancel_message, _ = await self._recording_call(
+                    "cancel_request", request_id=request_id)
+                if cancelled:
+                    self._forget_recording(request_id, "")
+                else:
+                    error += f"; cancellation unconfirmed: {cancel_message}"
+            return False, error, ""
+        if operation == "cancel_request":
+            # completed/failed 也是终态，无活动录制需要继续追踪。
+            success = bool(result.success or result.state in ("cancelled", "completed", "failed"))
+            return success, result.message, result.recording_id
+        if operation == "start" and not result.success:
+            self._forget_recording(request_id, "")
+        return bool(result.success), result.message, result.recording_id
+
+    async def _finish_recording(self, operation):
+        """停止（保存）或取消当前录制，返回附加到任务响应的说明；无录制时为空。"""
+        recording_id = self._recording_id
+        request_id = self._recording_request_id
+        if not recording_id and not request_id:
+            return ""
+        # 未收到开始应答时没有 recording_id，按请求身份撤销，包含尚未到达的开始请求。
+        actual_operation = operation if recording_id else "cancel_request"
+        success, message, _ = await self._recording_call(
+            actual_operation, request_id=request_id, recording_id=recording_id)
+        identity = recording_id or request_id
+        if not success:
+            self.get_logger().warning(f"Recording {identity} {actual_operation} failed: {message}")
+            return f"; recording {identity} {actual_operation} failed: {message}"
+        self._forget_recording(request_id, recording_id)
+        state = "saving" if actual_operation == "stop" else "cancelled"
+        return f"; recording {identity} {state}"
 
     async def on_start_task(self, request, response):
         """从新 episode 开始策略；控制器确认起点后才开放发布。"""
@@ -402,6 +499,28 @@ class DpInferenceNode(Node):
             return response
         self.task_state = "starting"
         operation = self._clear_task()
+        note = ""
+        if self._record_task:
+            # 上次收尾失败时先重试；不能把新任务悄悄接入上一轮录制。
+            note = await self._finish_recording("stop")
+            if operation != self.operation_id:
+                response.success, response.message = False, "Start was interrupted" + note
+                return response
+        if self._record_task and not (self._recording_id or self._recording_request_id):
+            # 先开录再启动控制器，记录从起点开始的完整过程；失败只告警，任务照常开始。
+            recorded, record_message, recording_id = await self._recording_call("start")
+            if operation != self.operation_id:
+                # 停止请求已按 request_id 撤销此开始，不接纳迟到的 recording_id。
+                response.success, response.message = False, "Start was interrupted"
+                return response
+            if recorded:
+                self._recording_id = recording_id
+                note += f"; recording {recording_id} started"
+            else:
+                self.get_logger().warning(f"Recording not started: {record_message}")
+                note += f"; recording not started: {record_message}"
+        elif self._record_task:
+            note += "; recording not started: previous recording cleanup is unconfirmed"
         if self._require_controller_reset:
             success, message = await self._controller_call(self.controller_start_client, 3.0)
         else:
@@ -409,15 +528,21 @@ class DpInferenceNode(Node):
         if operation != self.operation_id:
             response.success, response.message = False, "Start was interrupted"
             return response
+        if not success:
+            note += await self._finish_recording("cancel")
+            if operation != self.operation_id:
+                response.success, response.message = False, "Start was interrupted" + note
+                return response
         self.task_state = "running" if success else "idle"
-        response.success, response.message = success, message
+        response.success, response.message = success, message + note
         return response
 
     async def on_stop_task(self, _request, response):
         """先撤销推理，再等待控制器和驱动确认停机。"""
         # 开始请求超时只取消本端等待；控制器仍可能稍后接受该请求。
         # 实机即使处于 idle，也要用更新的 episode 确认控制器已停机。
-        if self.task_state == "idle" and not self._require_controller_reset:
+        if (self.task_state == "idle" and not self._require_controller_reset
+                and not (self._recording_id or self._recording_request_id)):
             response.success, response.message = True, "Task is already stopped"
             return response
         if self.task_state == "stopping":
@@ -432,8 +557,13 @@ class DpInferenceNode(Node):
         if operation != self.operation_id:
             response.success, response.message = False, "Stop was superseded"
             return response
+        # 停机确认后再停止录制，保留停机过程；录制结果不影响停机结果。
+        note = await self._finish_recording("stop")
+        if operation != self.operation_id:
+            response.success, response.message = False, "Stop was superseded" + note
+            return response
         self.task_state = "idle" if success else "fault"
-        response.success, response.message = success, message
+        response.success, response.message = success, message + note
         return response
 
     async def on_return_to_start(self, request, response):
@@ -441,7 +571,7 @@ class DpInferenceNode(Node):
         if self.task_state in ("homing", "stopping", "starting"):
             response.success, response.message = False, f"Cannot return while {self.task_state}"
             return response
-        if self.task_state != "idle":
+        if self.task_state != "idle" or self._recording_id or self._recording_request_id:
             stop_response = await self.on_stop_task(request, Trigger.Response())
             if not stop_response.success:
                 response.success, response.message = False, stop_response.message
@@ -510,7 +640,8 @@ class DpInferenceNode(Node):
                         f"denoise_steps={self.active_num_inference_steps} "
                         f"inference_ms={inference_ms:.1f}")
                 else:
-                    self.publisher.publish(sequence_message(sequence, context))
+                    self.publisher.publish(sequence_message(
+                        correct_sequence(sequence, self.link7_correction), context))
                     self.get_logger().info(
                         f"Published sequence={context.sequence_id} episode={context.episode_id} "
                         f"actions=16 denoise_steps={self.active_num_inference_steps} "

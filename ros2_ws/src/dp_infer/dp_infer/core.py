@@ -158,6 +158,46 @@ def decode_actions(actions, context):
     ))
 
 
+def load_link7_correction(path):
+    """读取 Link7 部署修正 C（真实 Link7 在策略虚拟 Link7 系中的 [4,4] 位姿，米）。
+
+    训练标签按 UMI 相机≡RM75 相机生成；两台相机相对手指的安装不同时，发布目标取
+    ``策略 Link7 · C``、策略位姿观测取 ``FK Link7 · C⁻¹``，使 RM75 手指落到训练手指位置。
+    空路径返回单位阵；文件由仓库根 ``compute_link7_correction.py`` 生成。
+    """
+    if not path:
+        return np.eye(4)
+    import yaml
+
+    document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    matrix = np.asarray(document["link7_correction"]["T_virtual_link7"], dtype=np.float64)
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise ValueError("link7 correction must be a finite 4x4 matrix")
+    rotation = matrix[:3, :3]
+    if (not np.allclose(matrix[3], [0, 0, 0, 1]) or not np.allclose(rotation @ rotation.T, np.eye(3), atol=1e-6)
+            or np.linalg.det(rotation) <= 0):
+        raise ValueError("link7 correction must be a rigid transform")
+    # 文件按 9 位小数保存，重新正交化以免累积缩放。
+    corrected = np.eye(4)
+    corrected[:3, :3] = Rotation.from_matrix(rotation).as_matrix()
+    corrected[:3, 3] = matrix[:3, 3]
+    return corrected
+
+
+def correct_sequence(sequence, correction):
+    """把策略虚拟 Link7 目标右乘修正 C，得到真实 Link7 目标；单位阵时原样返回。"""
+    if np.array_equal(correction, np.eye(4)):
+        return sequence
+    matrices = np.tile(np.eye(4), (len(sequence.positions), 1, 1))
+    matrices[:, :3, :3] = Rotation.from_quat(sequence.quaternions).as_matrix()
+    matrices[:, :3, 3] = sequence.positions
+    matrices = matrices @ correction
+    return validate_sequence(ActionSequence(
+        matrices[:, :3, 3], Rotation.from_matrix(matrices[:, :3, :3]).as_quat(),
+        sequence.gripper_openness, sequence.time_from_start,
+    ))
+
+
 def load_processors(specifications):
     """加载 module:factory 列表；每个无参工厂返回具有 process(sequence, context) 的对象。"""
     processors = []  # 按配置顺序执行的后处理器。

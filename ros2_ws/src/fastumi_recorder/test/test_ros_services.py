@@ -155,3 +155,36 @@ def test_ros_service_lifecycle(tmp_path, monkeypatch):
         recorder.destroy_node()
         client.destroy_node()
         rclpy.shutdown()
+
+
+def test_extra_topics_are_parsed_and_recorded_as_extra_streams(tmp_path, monkeypatch):
+    """额外话题按 话题:类型 解析并加入 MCAP 话题表，格式或类型错误时启动即失败。"""
+    from fastumi_recorder.node import parse_extra_topics
+    assert parse_extra_topics('') == []
+    assert parse_extra_topics(' /a:std_msgs/msg/Bool , /b:std_msgs/msg/Float32 ') == [
+        ('/a', 'std_msgs/msg/Bool'), ('/b', 'std_msgs/msg/Float32')]
+    for bad in ('/a', 'a:std_msgs/msg/Bool', '/a:Bool', '/a:std_msgs/msg/NoSuchType'):
+        with pytest.raises(ValueError):
+            parse_extra_topics(bad)
+    monkeypatch.setenv('ROS_DOMAIN_ID', '225')
+    rclpy.init()
+    recorder = RecorderNode(parameter_overrides=[
+        Parameter('dataset_root', value=str(tmp_path)),
+        Parameter('extra_topics', value='/policy/allowed:std_msgs/msg/Bool'),
+    ])
+    try:
+        assert recorder.engine.topics['extra_0'] == ('/policy/allowed', 'std_msgs/msg/Bool')
+        assert '/policy/allowed' in dict(recorder.get_topic_names_and_types())
+    finally:
+        recorder.close()
+        recorder.destroy_node()
+        rclpy.shutdown()
+    rclpy.init()
+    try:
+        with pytest.raises(ValueError, match='重复'):
+            RecorderNode(parameter_overrides=[
+                Parameter('dataset_root', value=str(tmp_path)),
+                Parameter('extra_topics', value='/joint_states:sensor_msgs/msg/JointState'),
+            ])
+    finally:
+        rclpy.shutdown()

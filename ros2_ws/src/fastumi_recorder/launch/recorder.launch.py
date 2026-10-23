@@ -13,10 +13,12 @@ def generate_launch_description():
                     record_camera='true',
                     image_topic='/wrist_camera/image_raw/ffmpeg',
                     image_transport='ffmpeg', image_reliability='reliable',
-                    image_qos_depth='30', fixed_image_topic='', shutdown_save_timeout='120.0')
+                    image_qos_depth='30', fixed_image_topic='', extra_topics='',
+                    shutdown_save_timeout='120.0')
     parameters = {key: ParameterValue(LaunchConfiguration(key), value_type=str)
                   for key in ('dataset_root', 'dir_name', 'name', 'image_topic',
-                              'image_transport', 'image_reliability', 'fixed_image_topic')}
+                              'image_transport', 'image_reliability', 'fixed_image_topic',
+                              'extra_topics')}
     parameters.update(
         record_camera=ParameterValue(LaunchConfiguration('record_camera'), value_type=bool),
         image_qos_depth=ParameterValue(LaunchConfiguration('image_qos_depth'), value_type=int),

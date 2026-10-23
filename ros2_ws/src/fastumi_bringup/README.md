@@ -71,7 +71,7 @@ JPEG/raw 模式支持此前采集退出后视频节点丢失的情况，无需�
 ### 3. 启动硬件与录制服务
 
 **启动会使机械臂回位、夹爪张开。启动前暂停遥操及其他机械臂、夹爪命令发送端；驱动没有指令仲裁。**
-机械臂等待有效反馈后回到 `[0, 20, 0, 70, 0, 90, 90]` 度；夹爪按
+机械臂等待有效反馈后回到 [`config/initial_pose.yaml`](config/initial_pose.yaml) 指定的起点；夹爪按
 `startup_openness=1.0` 平滑张开。回位等待就绪最多 30 秒，等待运动结果最多 120 秒。
 失败或超时会退出整个启动，不重试、不开放录制服务。
 
@@ -157,8 +157,8 @@ source install/setup.bash
 ros2 run fastumi_bringup keyboard_home
 ```
 
-保持焦点在这个终端，按空格键使 RM75 回到本 bringup 的七关节初始位姿
-`[0, 20, 0, 70, 0, 90, 90]` 度，同时向夹爪发送最大开度 `1.0`。
+保持焦点在这个终端，按空格键使 RM75 回到 `config/initial_pose.yaml` 指定的七关节初始位姿，
+同时向夹爪发送最大开度 `1.0`。所有回位和策略控制入口只读取工作区中该源文件；修改后重启相关节点即可。
 即使机械臂已在初始位姿，空格键仍会打开夹爪。Ctrl+C 退出监听并恢复终端输入设置。
 节点不随 `hardware.launch.py` 自动启动，也不接受管道或非交互终端输入。
 按键时若机械臂反馈、驱动或夹爪命令订阅者未就绪，节点不会下发任一命令；
@@ -172,7 +172,7 @@ MoveJ 失败或等待结果超过 120 秒后，节点停止接受回位命令，
 | 服务 | 类型 | 行为 |
 |---|---|---|
 | `/fastumi/arm/emergency_stop` | `std_srvs/srv/Trigger` | 立即向 `/rm_driver/move_stop_cmd` 发送轨迹停止（`rm_set_arm_stop`，机械臂保持上电），中断进行中的运动，并在 `stop_timeout` 内等待 `/rm_driver/move_stop_result` |
-| `/fastumi/arm/return_home` | `std_srvs/srv/Trigger` | 以 `home_speed` 发送阻塞 MoveJ 回到 `[0, 20, 0, 70, 0, 90, 90]` 度，等待 `/rm_driver/movej_result` 后返回；不控制夹爪 |
+| `/fastumi/arm/return_home` | `std_srvs/srv/Trigger` | 以 `home_speed` 发送阻塞 MoveJ 回到 `config/initial_pose.yaml` 指定的起点，等待 `/rm_driver/movej_result` 后返回；不控制夹爪 |
 | `/fastumi/arm/move_joints` | `fastumi_interfaces/srv/MoveJoints` | 按请求的 7 个关节角（`joint_degrees`，joint1..joint7，**单位度**）和速度（`speed`，1～100%）发送阻塞 MoveJ，等待结果后返回 |
 
 `move_joints` 先校验请求：关节数必须为 7 且为有限值，`speed` 在 1～100 之间，目标角在 URDF 关节限位内
@@ -192,8 +192,9 @@ MoveJ 只在关节空间插值，不检查末端轨迹碰撞；实机首次使�
 ```bash
 ros2 service call /fastumi/arm/emergency_stop std_srvs/srv/Trigger
 ros2 service call /fastumi/arm/return_home std_srvs/srv/Trigger
+HOME_REQUEST=$(python -c "import json, math; from fastumi_bringup.initial_pose import load_initial_joint_positions; print(json.dumps(dict(joint_degrees=[math.degrees(q) for q in load_initial_joint_positions()], speed=20)))")
 ros2 service call /fastumi/arm/move_joints fastumi_interfaces/srv/MoveJoints \
-  "{joint_degrees: [0, 20, 0, 70, 0, 90, 90], speed: 20}"
+  "$HOME_REQUEST"
 ```
 
 节点参数：`emergency_stop_service`、`return_home_service`、`move_joints_service`（服务名）、`urdf_path`（关节限位来源）、
@@ -346,6 +347,7 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 | `record_camera` | true | 是否把末端图像写入录制 |
 | `image_topic` / `image_transport` | 由 `wrist_camera_mode` 决定 | 使用本地相机时，显式覆盖必须匹配所选模式；关闭本地相机时可指定外部源 |
 | `shutdown_save_timeout` | 120 秒 | Ctrl+C 等待保存的上限 |
+| `record_policy_topics` | true | 同时录制 dp_infer 的 `/fastumi/policy/action_sequence`、`/fastumi/policy/gripper_close_allowed` 与 `/fastumi/policy/gripper_state`；无推理时为空话题，离线转换忽略 |
 
 维护时可关闭对应 `start_*` 开关，或用 `move_to_initial_pose:=false` 跳过启动回位。
 机械臂独立入口为 `ros2 launch rm_driver rm_75_driver.launch.py`；相机与夹爪独立入口见

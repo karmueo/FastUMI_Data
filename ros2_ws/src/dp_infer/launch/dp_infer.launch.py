@@ -9,7 +9,6 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from dp_infer.urdf_contract import validate_kinematic_equivalence
 
 
@@ -47,6 +46,10 @@ def _start(context):
     checkpoint = _path_argument(context, "checkpoint")
     training_urdf = _path_argument(context, "urdf_path")
     config_file = _path_argument(context, "config_file")
+    # 空字符串关闭 Link7 部署修正；非空时必须是已有文件。
+    correction_file = ""
+    if LaunchConfiguration("link7_correction_file").perform(context).strip():
+        correction_file = str(_path_argument(context, "link7_correction_file"))
     inference_python = _python_argument(
         context, "inference_python", share, Path("model/dp/.venv/bin/python"))
     enabled = LaunchConfiguration("start_controller").perform(context).lower()
@@ -55,6 +58,15 @@ def _start(context):
     dry_run = LaunchConfiguration("dry_run").perform(context).lower()
     if dry_run not in ("true", "false"):
         raise ValueError("dry_run must be true or false")
+    record = LaunchConfiguration("record").perform(context).lower()
+    if record not in ("true", "false"):
+        raise ValueError("record must be true or false")
+    close_approval = LaunchConfiguration("require_close_approval").perform(context).lower()
+    if close_approval not in ("true", "false"):
+        raise ValueError("require_close_approval must be true or false")
+    grasp_latch = LaunchConfiguration("grasp_latch").perform(context).lower()
+    if grasp_latch not in ("true", "false"):
+        raise ValueError("grasp_latch must be true or false")
     image_type = LaunchConfiguration("image_type").perform(context)
     if image_type not in ("compressed", "raw"):
         raise ValueError("image_type must be compressed or raw")
@@ -71,6 +83,11 @@ def _start(context):
         name: LaunchConfiguration(name).perform(context)
         for name in parameter_names
     }
+    raw_gripper_topic = overrides["gripper_topic"]
+    policy_gripper_topic = LaunchConfiguration("policy_gripper_topic").perform(context)
+    if enabled == "true":
+        # 控制器把宇树夹爪反馈换算到训练刻度后转发，推理观测改用换算后的话题。
+        overrides["gripper_topic"] = policy_gripper_topic
     infer_cmd = [
         inference_python, "-m", "dp_infer.node", "--ros-args",
         "--params-file", str(config_file),
@@ -80,10 +97,15 @@ def _start(context):
         "-p", "task_control_enabled:=true",
         "-p", "controller_reset_service:="
         + LaunchConfiguration("controller_reset_service").perform(context),
+        "-p", f"record_task:={record}",
+        "-p", "record_dir_name:=" + LaunchConfiguration("record_dir_name").perform(context),
+        "-p", "record_name:=" + LaunchConfiguration("record_name").perform(context),
     ]
     for name, value in overrides.items():
         if value:
             infer_cmd.extend(("-p", f"{name}:={value}"))
+    if correction_file:
+        infer_cmd.extend(("-p", f"link7_correction_file:={correction_file}"))
     inference = ExecuteProcess(cmd=infer_cmd, output="screen")
     actions = [
         RegisterEventHandler(OnProcessExit(
@@ -112,12 +134,13 @@ def _start(context):
             "--ros-args", "--params-file", str(control_config),
             "-p", f"dry_run:={dry_run}",
             "-p", "task_control_enabled:=true",
-            "-p", "start_joint_positions:=[" + ",".join(
-                str(value) for value in INITIAL_JOINT_POSITIONS) + "]",
             "-p", f"urdf_path:={control_urdf}",
             "-p", f"joint_state_topic:={overrides['joint_topic']}",
-            "-p", f"gripper_state_topic:={overrides['gripper_topic']}",
+            "-p", f"gripper_state_topic:={raw_gripper_topic}",
+            "-p", f"policy_gripper_state_topic:={policy_gripper_topic}",
+            "-p", f"grasp_latch_enabled:={grasp_latch}",
             "-p", f"policy_topic:={overrides['output_topic']}",
+            "-p", f"require_close_approval:={close_approval}",
             "-p", f"close_approval_topic:={overrides['close_guard_topic']}",
             "-p", "reset_service:="
             + LaunchConfiguration("controller_reset_service").perform(context),
@@ -142,8 +165,13 @@ def generate_launch_description():
     defaults = {
         "checkpoint": "", "urdf_path": "",
         "config_file": str(share / "config/dp_infer.yaml"),
+        # 由 compute_link7_correction.py 生成；重装相机或重做手眼标定后须重新生成。
+        "link7_correction_file": str(share / "config/link7_correction.yaml"),
         "inference_python": "", "controller_python": "",
         "control_urdf_path": "", "start_controller": "true", "dry_run": "false",
+        "require_close_approval": "false",
+        "grasp_latch": "true", "policy_gripper_topic": "/fastumi/policy/gripper_state",
+        "record": "false", "record_dir_name": "dp_infer", "record_name": "rollout",
         "device": "cuda:0", "num_inference_steps": "8",
         "image_topic": "/wrist_camera/image_raw/compressed",
         "image_type": "compressed", "joint_topic": "/joint_states",
