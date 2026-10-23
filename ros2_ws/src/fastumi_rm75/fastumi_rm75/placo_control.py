@@ -201,6 +201,13 @@ def decode_trajectory(
     )
 
 
+def trajectory_exhausted(
+    trajectory: TargetTrajectory, now_ns: int, hold_ns: int
+) -> bool:
+    """末点之后再保持 hold_ns，仍无新序列才视为耗尽；保持期内采样返回末点。"""
+    return int(now_ns) > int(trajectory.times_ns[-1]) + int(hold_ns)
+
+
 def sample_trajectory(
     trajectory: TargetTrajectory, now_ns: int
 ) -> tuple[np.ndarray, np.ndarray, float]:
@@ -311,3 +318,98 @@ def gate_gripper_target(target, previous_command, feedback, close_allowed) -> fl
     if hold is None or not np.isfinite(hold) or not 0.0 <= hold <= 1.0:
         hold = 1.0
     return target if close_allowed or target >= hold else float(hold)
+
+
+def _clip_unit(value: float) -> float:
+    return float(min(1.0, max(0.0, value)))
+
+
+@dataclass(frozen=True)
+class GripperScale:
+    """训练夹爪开度 h 与执行夹爪开度 u 的两点线性映射；1.0 对应 1.0，policy_ref 对应 robot_ref。
+
+    训练开度来自手持 UMI 夹爪，执行开度来自宇树夹爪，两者 0..1 刻度不同；
+    参考点取同一目标（如玩偶）在两种夹爪上的夹持读数，相等时为恒等映射。
+    """
+
+    policy_ref: float
+    robot_ref: float
+
+    def __post_init__(self) -> None:
+        for name in ("policy_ref", "robot_ref"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or not 0.0 < value < 1.0:
+                raise ValueError(f"gripper map {name} must be in (0, 1)")
+
+    def to_robot(self, openness: float) -> float:
+        """训练刻度 -> 执行刻度。"""
+        return _clip_unit(1.0 - (1.0 - openness) * (1.0 - self.robot_ref) / (1.0 - self.policy_ref))
+
+    def to_policy(self, openness: float) -> float:
+        """执行刻度 -> 训练刻度。"""
+        return _clip_unit(1.0 - (1.0 - openness) * (1.0 - self.policy_ref) / (1.0 - self.robot_ref))
+
+
+class GraspLatch:
+    """策略开度持续低于闭合阈值时锁定为抓握命令，用位置环误差产生夹持力。
+
+    target 为训练刻度开度，feedback 为执行夹爪原始开度（缺失或过期传 None），
+    now 为单调时钟秒。update 返回执行刻度的覆盖命令，None 表示按刻度映射透传策略开度。
+    锁定后反馈仍低于 miss_state 视为夹空：张开 reopen_s 秒后重新允许锁定，misses 累加；
+    正常释放（策略开度高于 release_threshold）时 misses 清零。
+    """
+
+    OPEN, CLOSED, REOPEN = "open", "closed", "reopen"
+
+    def __init__(self, close_threshold, release_threshold, confirm_s, settle_s,
+                 reopen_s, command, miss_state):
+        values = (close_threshold, release_threshold, confirm_s, settle_s,
+                  reopen_s, command, miss_state)
+        if not all(np.isfinite(value) for value in values):
+            raise ValueError("grasp latch parameters must be finite")
+        if not 0.0 < close_threshold < release_threshold <= 1.0:
+            raise ValueError("grasp thresholds must satisfy 0 < close < release <= 1")
+        if confirm_s < 0.0 or settle_s < 0.0 or reopen_s <= 0.0:
+            raise ValueError("grasp timing parameters must be nonnegative (reopen_s positive)")
+        if not 0.0 <= command < close_threshold or not 0.0 <= miss_state < 1.0:
+            raise ValueError("grasp command must be below close threshold and miss state in [0, 1)")
+        self.close_threshold = float(close_threshold)
+        self.release_threshold = float(release_threshold)
+        self.confirm_s = float(confirm_s)
+        self.settle_s = float(settle_s)
+        self.reopen_s = float(reopen_s)
+        self.command = float(command)
+        self.miss_state = float(miss_state)
+        self.reset()
+
+    def reset(self) -> None:
+        """新 episode、停止或回位时清空锁定状态和夹空计数。"""
+        self.state = self.OPEN
+        self.misses = 0
+        self._below_since = None
+        self._since = None
+
+    def update(self, target, feedback, now, close_allowed=True):
+        if self.state == self.REOPEN:
+            if now - self._since < self.reopen_s:
+                return 1.0
+            self.state, self._below_since = self.OPEN, None
+        if self.state == self.CLOSED:
+            if target > self.release_threshold:
+                self.state, self._below_since, self.misses = self.OPEN, None, 0
+                return None
+            if (self.miss_state > 0.0 and feedback is not None
+                    and now - self._since >= self.settle_s and feedback < self.miss_state):
+                self.state, self._since = self.REOPEN, now
+                self.misses += 1
+                return 1.0
+            return self.command
+        if target >= self.close_threshold or not close_allowed:
+            self._below_since = None
+            return None
+        if self._below_since is None:
+            self._below_since = now
+        if now - self._below_since < self.confirm_s:
+            return None
+        self.state, self._since = self.CLOSED, now
+        return self.command

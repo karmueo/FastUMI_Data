@@ -5,7 +5,7 @@
 | 按键 | 服务 | 作用 |
 |---|---|---|
 | 空格 | `/fastumi/arm/emergency_stop` | RM75 轨迹急停，任何时候都会立即发送，包括回位进行中 |
-| 回车 | `/fastumi/arm/return_home` | 回到初始关节位姿 `[0, 20, 0, 70, 0, 90, 90]` 度 |
+| 回车 | `/fastumi/arm/return_home` | 回到 [`initial_pose.yaml`](../fastumi_bringup/config/initial_pose.yaml) 指定的起点 |
 | J | `/fastumi/arm/move_joints`（`fastumi_interfaces/srv/MoveJoints`） | 显示当前关节角，输入目标关节角（度）和速度，确认后执行 MoveJ |
 
 本包只是服务客户端，不直接发送 `/rm_driver/*` 命令；服务端的就绪检查、超时和急停中断逻辑见

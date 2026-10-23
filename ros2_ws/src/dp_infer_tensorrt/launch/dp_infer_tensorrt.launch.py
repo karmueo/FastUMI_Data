@@ -10,7 +10,6 @@ from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from fastumi_bringup.initial_pose import INITIAL_JOINT_POSITIONS
 from dp_infer.urdf_contract import validate_kinematic_equivalence
 
 
@@ -59,6 +58,12 @@ def _start(context):
     dry_run = LaunchConfiguration("dry_run").perform(context).lower()
     if dry_run not in ("true", "false"):
         raise ValueError("dry_run must be true or false")
+    close_approval = LaunchConfiguration("require_close_approval").perform(context).lower()
+    if close_approval not in ("true", "false"):
+        raise ValueError("require_close_approval must be true or false")
+    grasp_latch = LaunchConfiguration("grasp_latch").perform(context).lower()
+    if grasp_latch not in ("true", "false"):
+        raise ValueError("grasp_latch must be true or false")
     image_type = LaunchConfiguration("image_type").perform(context)
     if image_type not in ("compressed", "raw"):
         raise ValueError("image_type must be compressed or raw")
@@ -76,6 +81,11 @@ def _start(context):
         for name in parameter_names
     }
     overrides["num_inference_steps"] = steps
+    raw_gripper_topic = overrides["gripper_topic"]
+    policy_gripper_topic = LaunchConfiguration("policy_gripper_topic").perform(context)
+    if enabled == "true":
+        # 控制器把宇树夹爪反馈换算到训练刻度后转发，推理观测改用换算后的话题。
+        overrides["gripper_topic"] = policy_gripper_topic
     parameters = {**overrides, "engine_dir": str(engine_dir),
                   "model_manifest": model_manifest, "urdf_path": str(training_urdf),
                   "require_controller_reset": enabled == "true", "task_control_enabled": True,
@@ -109,12 +119,13 @@ def _start(context):
             "--ros-args", "--params-file", str(control_config),
             "-p", f"dry_run:={dry_run}",
             "-p", "task_control_enabled:=true",
-            "-p", "start_joint_positions:=[" + ",".join(
-                str(value) for value in INITIAL_JOINT_POSITIONS) + "]",
             "-p", f"urdf_path:={control_urdf}",
             "-p", f"joint_state_topic:={overrides['joint_topic']}",
-            "-p", f"gripper_state_topic:={overrides['gripper_topic']}",
+            "-p", f"gripper_state_topic:={raw_gripper_topic}",
+            "-p", f"policy_gripper_state_topic:={policy_gripper_topic}",
+            "-p", f"grasp_latch_enabled:={grasp_latch}",
             "-p", f"policy_topic:={overrides['output_topic']}",
+            "-p", f"require_close_approval:={close_approval}",
             "-p", f"close_approval_topic:={overrides['close_guard_topic']}",
             "-p", "reset_service:="
             + LaunchConfiguration("controller_reset_service").perform(context),
@@ -141,6 +152,8 @@ def generate_launch_description():
         "config_file": str(share / "config/dp_infer_tensorrt.yaml"),
         "controller_python": "",
         "control_urdf_path": "", "start_controller": "true", "dry_run": "false",
+        "require_close_approval": "false",
+        "grasp_latch": "true", "policy_gripper_topic": "/fastumi/policy/gripper_state",
         "device": "cuda:0", "precision": "fp16", "num_inference_steps": "8",
         "image_topic": "/wrist_camera/image_raw/compressed",
         "image_type": "compressed", "joint_topic": "/joint_states",

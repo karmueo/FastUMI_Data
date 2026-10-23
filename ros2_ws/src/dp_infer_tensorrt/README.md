@@ -99,9 +99,12 @@ ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
 | `image_topic` | `/wrist_camera/image_raw/compressed` | 相机输入话题；H.264 解码后通常改为 `/wrist_camera/image_decoded`。 |
 | `image_type` | `compressed` | `compressed` 接收 JPEG/PNG `CompressedImage`；`raw` 接收 `Image`，须与 `image_topic` 的消息类型一致。 |
 | `joint_topic` | `/joint_states` | 七轴 `JointState` 输入，关节名 `joint1`～`joint7`，单位弧度；也传给控制器。 |
-| `gripper_topic` | `/motion_control/gripper_state` | 夹爪实测开度 `Float32` 输入，0 闭合、1 张开；也传给控制器。 |
+| `gripper_topic` | `/motion_control/gripper_state` | 宇树夹爪实测开度 `Float32`，0 闭合、1 张开；启动控制器时只传给控制器，否则作为推理输入。 |
+| `policy_gripper_topic` | `/fastumi/policy/gripper_state` | 控制器换算到训练刻度的夹爪反馈；启动控制器时推理节点订阅它。 |
+| `grasp_latch` | `true` | 控制器闭合锁定开关，见 `fastumi_rm75` README“闭合锁定与夹爪刻度映射”。 |
 | `output_topic` | `/fastumi/policy/action_sequence` | 完整 `PolicyActionSequence` 输出；同时作为控制器策略输入。 |
-| `close_guard_topic` | `/fastumi/policy/gripper_close_allowed` | 推理节点发布的视觉闭合许可 `Bool` 话题；控制器据此限制进一步闭合。 |
+| `close_guard_topic` | `/fastumi/policy/gripper_close_allowed` | 推理节点发布的视觉闭合许可 `Bool` 话题；控制器启用门控时据此限制进一步闭合。 |
+| `require_close_approval` | `false` | 控制器视觉闭合门控开关：`false` 直接执行策略夹爪目标；`true` 时须有新鲜视觉许可且本轮已运行 1.5 秒才允许进一步闭合。 |
 | `set_inference_steps_service` | `/fastumi/policy/set_inference_steps` | 动态设置去噪次数的服务名，类型为 `fastumi_interfaces/SetNumInferenceSteps`。 |
 | `controller_reset_service` | `/fastumi/rm75/placo/reset_episode` | 推理节点与控制器共用的 episode 重置确认服务名，类型为 `fastumi_interfaces/ResetPolicyController`。 |
 | `max_start_displacement_m` | `0.0` | 控制器发布命令前检查 Link7 相对起始位置的三维位移上限，单位米；非负有限数，0 表示不启用此限制。 |

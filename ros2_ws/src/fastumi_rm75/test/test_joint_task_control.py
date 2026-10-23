@@ -7,8 +7,13 @@ from types import MethodType, SimpleNamespace as NS
 from unittest.mock import Mock
 
 import numpy as np
+import pytest
+import rclpy
 from fastumi_interfaces.srv import ResetPolicyController
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
 from rclpy.task import Future
+from std_msgs.msg import Float32
 
 from fastumi_rm75.joint_control import JointTrajectory
 from fastumi_rm75.rm75_joint_controller import Rm75JointController
@@ -48,6 +53,68 @@ def req(episode):
     value = ResetPolicyController.Request()
     value.episode_id = episode
     return value
+
+
+@pytest.mark.parametrize("openness", [0.0, 0.58, 1.0])
+def test_gripper_feedback_uses_raw_scale_without_policy_publisher(openness):
+    """关节控制器直接缓存执行夹爪的 0..1 反馈，不依赖 Placo 的映射成员。"""
+    node = controller()
+    node._gripper_monotonic = float("-inf")
+    before = time.monotonic()
+    node._on_gripper_state(Float32(data=openness))
+    assert node._gripper_state == pytest.approx(openness)
+    assert before <= node._gripper_monotonic <= time.monotonic()
+    for publisher in (node._joint_publisher, node._gripper_publisher,
+                      node._stop_publisher, node._movej_publisher):
+        publisher.publish.assert_not_called()
+
+
+@pytest.mark.parametrize("openness", [-0.1, 1.1, float("nan"), float("inf")])
+def test_invalid_gripper_feedback_clears_state_without_refreshing_time(openness):
+    """非法反馈撤销原状态，并保留最后一次有效反馈的接收时间。"""
+    node = controller()
+    last_valid = node._gripper_monotonic
+    node._on_gripper_state(Float32(data=openness))
+    assert node._gripper_state is None
+    assert node._gripper_monotonic == last_valid
+    assert not node._feedback_is_fresh()
+
+
+def test_dry_run_receives_gripper_feedback_over_ros(monkeypatch):
+    """隔离 ROS 域验证真实订阅回调，dry-run 不创建硬件命令发布者。"""
+    monkeypatch.setenv("ROS_DOMAIN_ID", "228")
+    monkeypatch.setenv("ROS_LOCALHOST_ONLY", "1")
+    topic = "/test/rm75_joint/gripper_feedback"
+    rclpy.init(args=["--ros-args", "-p", "dry_run:=true",
+                     "-p", f"gripper_state_topic:={topic}"])
+    node = source = executor = None
+    try:
+        node = Rm75JointController()
+        source = Node("joint_gripper_feedback_test")
+        publisher = source.create_publisher(Float32, topic, 10)
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        executor.add_node(source)
+        before = time.monotonic()
+        deadline = before + 3.0
+        while node._gripper_state is None:
+            assert time.monotonic() < deadline, "Gripper feedback callback did not run"
+            publisher.publish(Float32(data=0.58))
+            executor.spin_once(timeout_sec=0.01)
+        assert node._gripper_state == pytest.approx(0.58)
+        assert node._gripper_monotonic >= before
+        assert topic in dict(node.get_topic_names_and_types())
+        assert all(value is None for value in (
+            node._joint_publisher, node._gripper_publisher,
+            node._stop_publisher, node._movej_publisher))
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if source is not None:
+            source.destroy_node()
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
 
 
 def test_dry_run_still_requires_start_and_fresh_gripper():

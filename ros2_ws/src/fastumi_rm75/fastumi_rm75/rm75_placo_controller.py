@@ -27,8 +27,11 @@ from rm_ros_interfaces.msg import Jointpos, Movej
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty, Float32
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from fastumi_rm75.placo_control import (
     JOINT_NAMES,
+    GraspLatch,
+    GripperScale,
     decode_trajectory,
     fill_joint_command,
     gate_gripper_target,
@@ -36,11 +39,19 @@ from fastumi_rm75.placo_control import (
     pose_matrix,
     sample_trajectory,
     sequence_is_new,
+    trajectory_exhausted,
     urdf_limits,
     validate_gripper_targets,
     validate_start_envelope,
     validate_workspace,
 )
+
+
+def _reset_grasp(node) -> None:
+    """停止、回位或新 episode 时清空闭合锁定；未启用锁定时无操作。"""
+    latch = getattr(node, "_grasp_latch", None)
+    if latch is not None:
+        latch.reset()
 
 
 class Rm75PlacoController(Node):
@@ -58,17 +69,29 @@ class Rm75PlacoController(Node):
         self.declare_parameter("control_rate_hz", 50.0)
         self.declare_parameter("velocity_scale", 0.25)
         self.declare_parameter("joint_state_timeout_s", 0.25)
+        self.declare_parameter("sequence_hold_s", 0.3)
         self.declare_parameter("require_start_state", False)
-        self.declare_parameter("start_joint_positions", Parameter.Type.DOUBLE_ARRAY)
         self.declare_parameter("start_joint_tolerance_rad", Parameter.Type.DOUBLE)
         self.declare_parameter("start_joint_settle_s", Parameter.Type.DOUBLE)
         self.declare_parameter("start_gripper_min", Parameter.Type.DOUBLE)
         self.declare_parameter("gripper_state_timeout_s", 0.25)
         self.declare_parameter("gripper_command_min", 0.0)
-        self.declare_parameter("require_close_approval", True)
+        self.declare_parameter("require_close_approval", False)
         self.declare_parameter("close_approval_topic", "/fastumi/policy/gripper_close_allowed")
         self.declare_parameter("close_approval_timeout_s", 0.25)
         self.declare_parameter("close_min_episode_time_s", 1.5)
+        self.declare_parameter("grasp_latch_enabled", True)
+        self.declare_parameter("grasp_close_threshold", 0.75)
+        self.declare_parameter("grasp_release_threshold", 0.82)
+        self.declare_parameter("grasp_close_confirm_s", 0.15)
+        self.declare_parameter("grasp_settle_s", 1.0)
+        self.declare_parameter("grasp_reopen_s", 1.0)
+        self.declare_parameter("grasp_command", 0.0)
+        self.declare_parameter("grasp_miss_state", 0.0)
+        self.declare_parameter("grasp_max_misses", 3)
+        self.declare_parameter("gripper_map_policy_ref", 0.58)
+        self.declare_parameter("gripper_map_robot_ref", 0.58)
+        self.declare_parameter("policy_gripper_state_topic", "/fastumi/policy/gripper_state")
         self.declare_parameter("workspace_min", [-10.0] * 3)
         self.declare_parameter("workspace_max", [10.0] * 3)
         self.declare_parameter("max_start_displacement_m", 0.0)
@@ -107,8 +130,8 @@ class Rm75PlacoController(Node):
         self._feedback_timeout_s = float(
             self.get_parameter("joint_state_timeout_s").value
         )
+        sequence_hold_s = float(self.get_parameter("sequence_hold_s").value)
         start_defaults = {
-            "start_joint_positions": [0.0] * 7,
             "start_joint_tolerance_rad": 0.035,
             "start_joint_settle_s": 0.5,
             "start_gripper_min": 0.95,
@@ -127,7 +150,7 @@ class Rm75PlacoController(Node):
 
         self._require_start_state = bool(self.get_parameter("require_start_state").value)
         self._start_joints = np.asarray(
-            start_value("start_joint_positions"), dtype=np.float64)
+            load_initial_joint_positions(), dtype=np.float64)
         self._start_joint_tolerance = float(start_value("start_joint_tolerance_rad"))
         self._start_settle_s = float(start_value("start_joint_settle_s"))
         self._start_gripper_min = float(start_value("start_gripper_min"))
@@ -155,6 +178,10 @@ class Rm75PlacoController(Node):
             raise ValueError("velocity_scale must be in (0, 1]")
         if not np.isfinite(self._feedback_timeout_s) or self._feedback_timeout_s <= 0.0:
             raise ValueError("joint_state_timeout_s must be positive and finite")
+        if not np.isfinite(sequence_hold_s) or not 0.0 <= sequence_hold_s <= 1.0:
+            raise ValueError("sequence_hold_s must be in [0, 1]")
+        # 推理延迟偶尔超过序列覆盖时长；末点后短时保持，等待下一条序列接续。
+        self._sequence_hold_ns = int(round(sequence_hold_s * 1e9))
         if not self._dry_run and not self._require_start_state:
             raise ValueError("real control requires require_start_state=true")
         if self._start_joints.shape != (7,) or not np.isfinite(self._start_joints).all():
@@ -174,6 +201,24 @@ class Rm75PlacoController(Node):
             raise ValueError("close_approval_timeout_s must be positive and finite")
         if not np.isfinite(self._close_min_episode_time_s) or self._close_min_episode_time_s < 0.0:
             raise ValueError("close_min_episode_time_s must be nonnegative and finite")
+        # 策略开度为训练（手持夹爪）刻度，命令与反馈为宇树夹爪刻度，二者经 GripperScale 互换。
+        self._gripper_scale = GripperScale(
+            float(self.get_parameter("gripper_map_policy_ref").value),
+            float(self.get_parameter("gripper_map_robot_ref").value))
+        self._grasp_latch = None
+        if bool(self.get_parameter("grasp_latch_enabled").value):
+            grasp = {name: float(self.get_parameter(f"grasp_{name}").value) for name in (
+                "close_threshold", "release_threshold", "close_confirm_s", "settle_s",
+                "reopen_s", "command", "miss_state")}
+            if grasp["command"] < self._gripper_command_min:
+                raise ValueError("grasp_command must not be below gripper_command_min")
+            self._grasp_latch = GraspLatch(
+                grasp["close_threshold"], grasp["release_threshold"],
+                grasp["close_confirm_s"], grasp["settle_s"], grasp["reopen_s"],
+                grasp["command"], grasp["miss_state"])
+        self._grasp_max_misses = int(self.get_parameter("grasp_max_misses").value)
+        if self._grasp_max_misses < 1:
+            raise ValueError("grasp_max_misses must be at least 1")
         if (self._workspace_min.shape != (3,) or self._workspace_max.shape != (3,)
                 or not np.isfinite(self._workspace_min).all()
                 or not np.isfinite(self._workspace_max).all()
@@ -227,6 +272,11 @@ class Rm75PlacoController(Node):
         self._gripper_publisher = self.create_publisher(
             Float32,
             str(self.get_parameter("gripper_command_topic").value),
+            command_qos,
+        )
+        self._policy_gripper_publisher = self.create_publisher(
+            Float32,
+            str(self.get_parameter("policy_gripper_state_topic").value),
             command_qos,
         )
         self._debug_publisher = self.create_publisher(
@@ -302,6 +352,7 @@ class Rm75PlacoController(Node):
         self._latest_sequence = None
         self._minimum_episode = 0
         self._last_gripper = None
+        self._last_policy_gripper = None
         self._stop_future = None
         self._hold_confirmed = True
         self._home_future = None
@@ -359,13 +410,22 @@ class Rm75PlacoController(Node):
             self._set_robot_joints(positions)
 
     def _on_gripper_state(self, message: Float32) -> None:
-        """保存归一化夹爪反馈，供实机首条策略的起始状态门控。"""
+        """保存原始夹爪反馈供起始门控和夹空检测，并发布训练刻度反馈供策略观测。"""
         openness = float(message.data)
         if np.isfinite(openness) and 0.0 <= openness <= 1.0:
             self._gripper_state = openness
             self._gripper_monotonic = time.monotonic()
+            self._policy_gripper_publisher.publish(
+                Float32(data=self._gripper_scale.to_policy(openness)))
         else:
             self._gripper_state = None
+
+    def _fresh_gripper_state(self):
+        """返回新鲜的原始夹爪反馈，过期或缺失时为 None。"""
+        if (self._gripper_state is not None
+                and time.monotonic() - self._gripper_monotonic <= self._gripper_timeout_s):
+            return self._gripper_state
+        return None
 
     def _on_udp_valid(self, message: Bool) -> None:
         self._valid_feedback = bool(message.data)
@@ -452,6 +512,7 @@ class Rm75PlacoController(Node):
         self._faulted_episode = None
         self._episode_started_at = None
         self._close_allowed = False
+        _reset_grasp(self)
         if managed and not self._dry_run:
             self._hold_confirmed = self._hold_gripper()
             self._stop_future = Future()
@@ -501,6 +562,7 @@ class Rm75PlacoController(Node):
             self._episode_started_at = None
             self._task_enabled = True
             self._enabled_episode = episode_id
+            _reset_grasp(self)
             response.success, response.message = True, f"Started episode {episode_id}"
         return response
 
@@ -538,6 +600,7 @@ class Rm75PlacoController(Node):
         self._enabled_episode = None
         self._minimum_episode = episode_id
         self._stop_control("return to start")
+        _reset_grasp(self)
         self._home_future = Future()
         self._home_episode = episode_id
         self._home_started_at = time.monotonic()
@@ -615,6 +678,7 @@ class Rm75PlacoController(Node):
             self._faulted_episode = None
             self._episode_started_at = None
             self._close_allowed = False
+            _reset_grasp(self)
         if not sequence_is_new(
             self._latest_episode,
             self._latest_sequence,
@@ -624,7 +688,7 @@ class Rm75PlacoController(Node):
             return
         if self._faulted_episode == episode_id:
             self.get_logger().warning(
-                "Policy ignored after a workspace, gripper, or IK fault; reset the episode "
+                "Policy ignored after a workspace, gripper, grasp, or IK fault; reset the episode "
                 "after returning RM75 and gripper to the start state",
                 throttle_duration_sec=1.0,
             )
@@ -645,7 +709,8 @@ class Rm75PlacoController(Node):
                 message,
                 self.get_clock().now().nanoseconds,
                 anchor_transform,
-                self._last_gripper,
+                # 序列内插值在训练刻度进行，锚点须用上一拍的策略开度而非执行命令。
+                self._last_policy_gripper,
                 base_frame=self._base_frame,
                 end_frame=self._end_frame,
             )
@@ -657,8 +722,10 @@ class Rm75PlacoController(Node):
                 validate_workspace(
                     np.vstack((anchor_transform[:3, 3], trajectory.positions)),
                     self._workspace_min, self._workspace_max)
+                # 命令下限使用执行夹爪刻度；轨迹本身保留训练刻度供插值和锁定判断。
                 validate_gripper_targets(
-                    trajectory.grippers, self._gripper_command_min)
+                    [self._gripper_scale.to_robot(value) for value in trajectory.grippers],
+                    self._gripper_command_min)
             except ValueError as error:
                 self.get_logger().error(f"Policy sequence rejected: {error}")
                 self._stop_control("policy safety limit")
@@ -693,6 +760,7 @@ class Rm75PlacoController(Node):
         self._trajectory = None
         self._command_positions = None
         self._last_gripper = None
+        self._last_policy_gripper = None
         if not self._dry_run:
             self._stop_publisher.publish(Empty())
         self.get_logger().warning(f"RM75 control stopped: {reason}")
@@ -704,17 +772,37 @@ class Rm75PlacoController(Node):
             self._stop_control("/joint_states feedback timed out")
             return
         now_ns = self.get_clock().now().nanoseconds
-        if now_ns > int(self._trajectory.times_ns[-1]):
+        if trajectory_exhausted(self._trajectory, now_ns, self._sequence_hold_ns):
             self._stop_control("policy sequence completed")
             return
-        position, quaternion, gripper = sample_trajectory(
+        position, quaternion, policy_gripper = sample_trajectory(
             self._trajectory, now_ns
         )
+        close_allowed = self._close_is_allowed()
+        gripper = None
+        if self._grasp_latch is not None:
+            gripper = self._grasp_latch.update(
+                policy_gripper, self._fresh_gripper_state(), time.monotonic(), close_allowed)
+            if self._grasp_latch.misses >= self._grasp_max_misses:
+                self.get_logger().error(
+                    f"Grasp missed {self._grasp_latch.misses} times; stopping the episode")
+                self._stop_control("repeated grasp misses")
+                self._start_verified_episode = None
+                self._home_since = None
+                self._faulted_episode = self._latest_episode
+                _reset_grasp(self)
+                if not self._dry_run:
+                    self._gripper_publisher.publish(Float32(data=1.0))
+                return
+        if gripper is None:
+            gripper = self._gripper_scale.to_robot(policy_gripper)
         gripper = gate_gripper_target(
-            gripper, self._last_gripper, self._gripper_state,
-            self._close_is_allowed())
+            gripper, self._last_gripper, self._gripper_state, close_allowed)
         self._effector_task.T_world_frame = pose_matrix(position, quaternion)
         try:
+            if not self._dry_run:
+                # 插值、锁定和视觉保持之后的最终执行命令也必须满足下限。
+                validate_gripper_targets([gripper], self._gripper_command_min)
             self._solver.solve(True)
             self._robot.update_kinematics()
             positions = np.asarray(
@@ -738,13 +826,14 @@ class Rm75PlacoController(Node):
                     self._workspace_min, self._workspace_max)
         except Exception as error:
             self.get_logger().error(f"Placo command rejected: {error}")
-            self._stop_control("IK or trial envelope failure")
+            self._stop_control("IK, gripper or trial envelope failure")
             self._start_verified_episode = None
             self._home_since = None
             self._faulted_episode = self._latest_episode
             return
         self._command_positions = positions.copy()
         self._last_gripper = float(gripper)
+        self._last_policy_gripper = float(policy_gripper)
         self._publish(positions, gripper)
 
     def destroy_node(self) -> bool:

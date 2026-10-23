@@ -5,6 +5,7 @@ import time
 
 import numpy as np
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from fastumi_rm75.rm75_placo_controller import Rm75PlacoController
 from fastumi_interfaces.srv import ResetPolicyController
 
@@ -19,7 +20,7 @@ def _gate(joints, gripper, *, joint_age=1.0, gripper_age=0.01):
         _require_start_state=True,
         _start_verified_episode=None,
         _feedback_positions=np.asarray(joints, dtype=np.float64),
-        _start_joints=np.array([0.0, 0.3491, 0.0, 1.2217, 0.0, 1.5708, 1.5708]),
+        _start_joints=np.array(load_initial_joint_positions()),
         _start_joint_tolerance=0.035,
         _home_since=now - joint_age,
         _start_settle_s=0.5,
@@ -33,9 +34,9 @@ def _gate(joints, gripper, *, joint_age=1.0, gripper_age=0.01):
 
 
 def test_real_policy_waits_for_home_and_open_gripper():
-    home = [0.0, 0.3491, 0.0, 1.2217, 0.0, 1.5708, 1.5708]
+    home = list(load_initial_joint_positions())
     for joints, gripper, joint_age, gripper_age in (
-        ([0.4, *home[1:]], 1.0, 1.0, 0.01),
+        ([home[0] + 0.4, *home[1:]], 1.0, 1.0, 0.01),
         (home, 0.5, 1.0, 0.01),
         (home, 1.0, 0.1, 0.01),
         (home, 1.0, 1.0, 0.5),
@@ -77,6 +78,18 @@ def test_gripper_close_requires_fresh_vision_and_episode_elapsed_time():
     node._close_approval_monotonic = now - 0.05
     node._close_allowed = False
     assert not Rm75PlacoController._close_is_allowed(node)
+
+
+def test_gripper_close_gate_disabled_ignores_vision():
+    """关闭门控后，无视觉许可、刚开始的 episode 也直接执行策略闭合。"""
+    node = SimpleNamespace(
+        _require_close_approval=False,
+        _close_allowed=False,
+        _close_approval_monotonic=float("-inf"),
+        _episode_started_at=None,
+        _gripper_state=None,
+    )
+    assert Rm75PlacoController._close_is_allowed(node)
 
 
 def test_reset_stops_old_trajectory_and_rejects_queued_old_episode():

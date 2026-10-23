@@ -10,7 +10,11 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description() -> LaunchDescription:
-    """使用工作区的 NumPy 2 解释器启动 Placo 节点。"""
+    """使用工作区的 NumPy 2 解释器启动 Placo 节点。
+
+    控制器自行读取 fastumi_bringup 的 initial_pose.yaml（度，joint1..joint7），
+    与硬件回位及推理入口共用同一文件。
+    """
     package_share = Path(get_package_share_directory("fastumi_rm75"))
     python_candidates = (
         parent / ".venv-numpy2" / "bin" / "python"

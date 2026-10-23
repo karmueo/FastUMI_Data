@@ -6,22 +6,48 @@ rm75_placo_controller:
     control_rate_hz: 50.0
     velocity_scale: 0.25
     joint_state_timeout_s: 0.25
+    # 序列末点后保持该时长等待下一条预测，超时才停臂。实测推理延迟中位 0.26 s、P90 0.43 s，
+    # 发布间隔 0.2 s，而每条序列仅覆盖 0.5 s，立即停臂会使机械臂走走停停；0 恢复立即停止。
+    sequence_hold_s: 0.3
     require_start_state: true
     task_control_enabled: false
-    start_joint_positions: [0.0, 0.3490658504, 0.0, 1.2217304764, 0.0, 1.5707963268, 1.5707963268]
+    # 起始关节角只读取 fastumi_bringup/config/initial_pose.yaml，无需 launch 或命令行另设。
     start_joint_tolerance_rad: 0.035
     start_joint_settle_s: 0.5
     start_gripper_min: 0.95
     gripper_state_timeout_s: 0.25
     # 训练动作以 0 指令抓握；实际夹爪反馈最低约 0.35，不能把反馈下限误用为命令下限。
     gripper_command_min: 0.0
-    require_close_approval: true
+    # 视觉闭合门控：true 时须有新鲜的 close_approval_topic 许可且本轮已运行 close_min_episode_time_s
+    # 才允许进一步闭合；默认 false，直接执行策略夹爪目标。dp_infer launch 以同名参数覆盖。
+    require_close_approval: false
     close_approval_topic: /fastumi/policy/gripper_close_allowed
     close_approval_timeout_s: 0.25
     close_min_episode_time_s: 1.5
-    # 当前任务可用的 116 段示教 FK 范围留出约 2–5 cm 余量；更换任务前需重审。
-    workspace_min: [-0.6, -0.5, 0.16]
-    workspace_max: [0.6, 0.5, 0.50]
+    # 夹爪刻度映射：两点线性，1.0↔1.0，policy_ref↔robot_ref，两者相等即恒等映射。
+    # 控制器把宇树反馈换算到训练刻度后发布到 policy_gripper_state_topic，供推理节点作观测。
+    # 手指 ArUco 码间距实测：UMI 80.7·g+47.4 mm，宇树 79.5·g+48.7 mm，同一开度物理宽度一致，
+    # 故取恒等映射。夹住目标时的读数受锁定压紧影响，不能作为 robot_ref。
+    gripper_map_policy_ref: 0.58
+    gripper_map_robot_ref: 0.58
+    policy_gripper_state_topic: /fastumi/policy/gripper_state
+    # 闭合锁定：策略开度（训练刻度）持续低于 close_threshold 达 close_confirm_s 秒后命令 grasp_command，
+    # 借位置环误差产生夹持力；开度回升到 release_threshold 以上才释放。阈值取自训练集：
+    # 张开段开度不低于 0.83，抓持段最低值 0.50–0.73。
+    grasp_latch_enabled: true
+    grasp_close_threshold: 0.75
+    grasp_release_threshold: 0.82
+    grasp_close_confirm_s: 0.15
+    grasp_command: 0.0
+    # 夹空检测：锁定 settle_s 秒后宇树原始反馈仍低于 miss_state 视为夹空，张开 reopen_s 秒后
+    # 允许策略重试；连续 max_misses 次后停止本 episode。miss_state 为 0 关闭检测，
+    # 建议取宇树空夹读数与夹住目标读数的中点。
+    grasp_settle_s: 1.0
+    grasp_reopen_s: 1.0
+    # 宇树空夹到底实测约 0.031（rollout episode_4/6/7），锁定压紧玩偶约 0.32，取二者中点。
+    grasp_miss_state: 0.18
+    grasp_max_misses: 3
+    # 不设 workspace_min/max：位置保护由 RM75 示教器虚拟墙负责；节点默认 ±10 m 仅保留非有限值检查。
     base_frame: base_link
     end_frame: Link7
     joint_state_topic: /joint_states

@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import placo
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from fastumi_rm75.placo_control import JOINT_NAMES, urdf_limits
 
 
@@ -15,7 +16,7 @@ def test_small_link7_target_respects_placo_limits():
     """一厘米末端目标可收敛，且单步关节变化受 25% 速度限制。"""
     lower, upper, velocity = urdf_limits(URDF)
     robot = placo.RobotWrapper(str(URDF), placo.Flags.ignore_collisions)
-    initial = np.deg2rad([0.0, 20.0, 0.0, 70.0, 0.0, 90.0, 90.0])
+    initial = np.asarray(load_initial_joint_positions())
     for name, position, limit in zip(JOINT_NAMES, initial, velocity):
         robot.set_joint(name, float(position))
         robot.set_velocity_limit(name, float(limit * 0.25))

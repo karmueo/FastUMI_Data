@@ -7,6 +7,8 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from fastumi_rm75.placo_control import (
+    GraspLatch,
+    GripperScale,
     TargetTrajectory,
     decode_trajectory,
     fill_joint_command,
@@ -14,6 +16,7 @@ from fastumi_rm75.placo_control import (
     ordered_joint_positions,
     sample_trajectory,
     sequence_is_new,
+    trajectory_exhausted,
     validate_gripper_targets,
     validate_start_envelope,
     validate_workspace,
@@ -88,6 +91,19 @@ def test_decode_skips_expired_points_and_anchors_at_receive_time():
     np.testing.assert_allclose(position, [0.30, 0.0, 0.3])
     np.testing.assert_allclose(quaternion, [0.0, 0.0, 0.0, 1.0])
     assert gripper == pytest.approx(0.5)
+
+
+def test_trajectory_holds_last_target_before_exhausting():
+    """末点之后保持期内仍按末点采样，超过保持期才视为耗尽。"""
+    trajectory = decode_trajectory(_message(), 1_050_000_000, np.eye(4))
+    hold_ns = 300_000_000
+    assert not trajectory_exhausted(trajectory, 1_200_000_000, hold_ns)
+    assert not trajectory_exhausted(trajectory, 1_500_000_000, hold_ns)
+    assert trajectory_exhausted(trajectory, 1_500_000_001, hold_ns)
+    assert trajectory_exhausted(trajectory, 1_200_000_001, 0)
+    position, _, gripper = sample_trajectory(trajectory, 1_400_000_000)
+    np.testing.assert_allclose(position, [0.32, 0.0, 0.3])
+    assert gripper == pytest.approx(0.6)
 
 
 def test_sampling_uses_shortest_rotation_and_interpolates_gripper():
@@ -185,3 +201,76 @@ def test_gripper_closure_waits_for_visual_approval_but_can_hold_or_reopen():
     assert gate_gripper_target(0.0, None, None, False) == pytest.approx(1.0)
     with pytest.raises(ValueError, match="gripper target"):
         gate_gripper_target(float("nan"), None, 1.0, True)
+
+
+def test_gripper_scale_maps_reference_points_and_round_trips():
+    identity = GripperScale(0.58, 0.58)
+    assert identity.to_robot(0.3) == pytest.approx(0.3)
+    assert identity.to_policy(0.3) == pytest.approx(0.3)
+    scale = GripperScale(0.58, 0.42)
+    assert scale.to_robot(0.58) == pytest.approx(0.42)
+    assert scale.to_robot(1.0) == pytest.approx(1.0)
+    assert scale.to_policy(0.42) == pytest.approx(0.58)
+    for value in (0.5, 0.7, 0.95):
+        assert scale.to_policy(scale.to_robot(value)) == pytest.approx(value)
+    # 超出可表示范围时裁剪到 [0, 1]。
+    assert scale.to_robot(0.0) == 0.0
+    with pytest.raises(ValueError):
+        GripperScale(1.0, 0.5)
+
+
+def _latch(miss_state=0.4):
+    return GraspLatch(0.75, 0.82, 0.15, 1.0, 1.0, 0.0, miss_state)
+
+
+def test_grasp_latch_confirms_before_closing_and_releases_above_threshold():
+    latch = _latch()
+    assert latch.update(0.9, 1.0, 0.0) is None
+    assert latch.update(0.7, 0.9, 1.0) is None
+    # 短暂低于阈值后回升，不锁定。
+    assert latch.update(0.8, 0.9, 1.05) is None
+    assert latch.update(0.7, 0.9, 1.1) is None
+    assert latch.update(0.7, 0.9, 1.2) is None
+    assert latch.update(0.7, 0.9, 1.3) == 0.0
+    assert latch.state == GraspLatch.CLOSED
+    # 锁定后策略开度在回差区内仍保持闭合，夹到目标时反馈停在目标宽度。
+    assert latch.update(0.8, 0.5, 3.0) == 0.0
+    assert latch.update(0.85, 0.5, 3.1) is None
+    assert latch.state == GraspLatch.OPEN and latch.misses == 0
+
+
+def test_grasp_latch_respects_close_gate():
+    latch = _latch()
+    assert latch.update(0.5, 0.9, 0.0, close_allowed=False) is None
+    assert latch.update(0.5, 0.9, 1.0, close_allowed=False) is None
+    assert latch.state == GraspLatch.OPEN
+
+
+def test_grasp_latch_reopens_after_miss_and_can_relatch():
+    latch = _latch()
+    latch.update(0.6, 0.9, 0.0)
+    assert latch.update(0.6, 0.9, 0.2) == 0.0
+    # settle 前的低反馈属于闭合过程，不判夹空；过期反馈也不判。
+    assert latch.update(0.6, 0.35, 0.8) == 0.0
+    assert latch.update(0.6, None, 1.5) == 0.0
+    assert latch.update(0.6, 0.35, 1.5) == 1.0
+    assert latch.state == GraspLatch.REOPEN and latch.misses == 1
+    assert latch.update(0.6, 0.5, 2.0) == 1.0
+    assert latch.update(0.6, 0.9, 2.6) is None
+    assert latch.update(0.6, 0.9, 2.8) == 0.0
+    latch.reset()
+    assert latch.state == GraspLatch.OPEN and latch.misses == 0
+
+
+def test_grasp_latch_miss_detection_disabled_by_zero_state():
+    latch = _latch(miss_state=0.0)
+    latch.update(0.6, 0.9, 0.0)
+    latch.update(0.6, 0.9, 0.2)
+    assert latch.update(0.6, 0.35, 5.0) == 0.0 and latch.misses == 0
+
+
+def test_grasp_latch_rejects_inconsistent_thresholds():
+    with pytest.raises(ValueError):
+        GraspLatch(0.8, 0.75, 0.15, 1.0, 1.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        GraspLatch(0.75, 0.82, 0.15, 1.0, 1.0, 0.8, 0.0)

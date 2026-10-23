@@ -21,6 +21,7 @@ from rm_ros_interfaces.msg import Jointpos, Movej
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty, Float32, String
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 from fastumi_rm75.joint_control import (
     decode_joint_trajectory, limit_joint_step, sample_joint_trajectory, validate_joints,
 )
@@ -36,14 +37,13 @@ class Rm75JointController(Rm75PlacoController):
     def __init__(self):
         Node.__init__(self, "rm75_joint_controller")
         root = Path(get_package_share_directory("fastumi_rm75"))
-        home = np.deg2rad([0, 20, 0, 70, 0, 90, 90]).tolist()
         defaults = {
             "dry_run": True, "urdf_path": str(root / "assets/rm_75_kinematic.urdf"),
             "control_rate_hz": 50.0, "velocity_scale": 0.25,
             "joint_state_timeout_s": 0.25, "gripper_state_timeout_s": 0.25,
-            "start_joint_positions": home, "start_joint_tolerance_rad": 0.035,
+            "start_joint_tolerance_rad": 0.035,
             "start_joint_settle_s": 0.5, "start_gripper_min": 0.95,
-            "workspace_min": [-0.6, -0.5, 0.16], "workspace_max": [0.6, 0.5, 0.50],
+            "workspace_min": [-0.6, -0.5, 0.14], "workspace_max": [0.6, 0.5, 0.50],
             "joint_state_topic": "/joint_states", "gripper_state_topic": "/motion_control/gripper_state",
             "policy_topic": "/fastumi/policy/joint_action_sequence",
             "joint_command_topic": "/rm_driver/movej_canfd_cmd",
@@ -57,7 +57,7 @@ class Rm75JointController(Rm75PlacoController):
         self._dry_run = get("dry_run")
         self._period = 1 / get("control_rate_hz")
         self._feedback_timeout_s, self._gripper_timeout_s = get("joint_state_timeout_s"), get("gripper_state_timeout_s")
-        self._start_joints = np.array(get("start_joint_positions"))
+        self._start_joints = np.array(load_initial_joint_positions())
         self._start_joint_tolerance = get("start_joint_tolerance_rad")
         self._start_settle_s, self._start_gripper_min = get("start_joint_settle_s"), get("start_gripper_min")
         self._workspace_min, self._workspace_max = np.array(get("workspace_min")), np.array(get("workspace_max"))
@@ -122,6 +122,15 @@ class Rm75JointController(Rm75PlacoController):
         self.create_timer(self._period, self._tick)
         self.create_timer(0.05, self._home_tick)
         self.create_timer(0.1, self._status)
+
+    def _on_gripper_state(self, message: Float32) -> None:
+        """缓存执行夹爪原始 0..1 开度及接收时间，供起始门控和反馈超时检查。"""
+        openness = float(message.data)
+        if np.isfinite(openness) and 0.0 <= openness <= 1.0:
+            self._gripper_state = openness
+            self._gripper_monotonic = time.monotonic()
+        else:
+            self._gripper_state = None
 
     def _feedback_is_fresh(self):
         now = time.monotonic()

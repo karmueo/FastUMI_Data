@@ -13,8 +13,9 @@ from fastumi_rm75.rm75_placo_controller import Rm75PlacoController
 from rclpy.task import Future
 from std_msgs.msg import Bool
 
+from fastumi_bringup.initial_pose import load_initial_joint_positions
 
-HOME = np.deg2rad([0, 20, 0, 70, 0, 90, 90])
+HOME = np.asarray(load_initial_joint_positions())
 
 
 def controller(joints=None):
