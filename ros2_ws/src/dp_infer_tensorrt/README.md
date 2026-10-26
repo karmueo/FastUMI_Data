@@ -91,7 +91,7 @@ ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
 | `model_manifest` | `""` | 模型元数据 JSON。留空时定位到 `engine_dir` 的上两级目录下 `onnx/<engine_dir 的目录名>/manifest.json`；显式指定时须为现有文件。 |
 | `urdf_path` | `""` | 必填，训练 URDF 文件；SHA-256 须匹配模型 manifest，用于 Link7 正运动学。 |
 | `config_file` | `<dp_infer_tensorrt 包共享目录>/config/dp_infer_tensorrt.yaml` | 推理节点参数文件，须存在；同步、超时、推理频率等参数在此配置。 |
-| `link7_correction_file` | `<dp_infer 包共享目录>/config/link7_correction.yaml` | Link7 部署修正文件，与 `dp_infer` 共用；传 `''` 关闭（单位阵），非空时须为现有文件。见 [Link7 部署修正](#link7-部署修正)。 |
+| `link7_correction_file` | `<dp_infer 包共享目录>/config/link7_correction.yaml` | Link7 部署修正文件，与 `dp_infer` 共用；传 `'link7_correction_file:= '`（空白值）关闭（单位阵），`ros2 launch` 不接受 `:=''` 空值，非空时须为现有文件。见 [Link7 部署修正](#link7-部署修正)。 |
 | `record` | `false` | `true` 时开始/停止任务联动 `fastumi_recorder` 录制，见 [推理过程录制](#推理过程录制)。仅接受 `true` / `false`。 |
 | `record_dir_name` | `dp_infer` | 录制目录名，保存到 `<dataset_root>/<record_dir_name>/<record_name>/episode_N/bag`。 |
 | `record_name` | `rollout` | 录制名称，见 `record_dir_name`。 |

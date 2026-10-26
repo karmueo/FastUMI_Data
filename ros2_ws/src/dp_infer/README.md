@@ -309,8 +309,8 @@ RM75 相机相对手指多俯视约 15°，手指码处偏约 24 mm，指尖偏�
 - 发布前目标右乘 `C`，`/fastumi/policy/action_sequence` 仍为真实 `base_link -> Link7`。
 
 两侧一致变换保证原地保持的动作恰好指向实测 Link7，启动时不跳变。组合 launch 默认传入随包安装的
-`config/link7_correction.yaml`，启动日志打印修正角度和平移；传 `link7_correction_file:=''`
-关闭（节点参数为空即单位阵）。修正只对齐手指位置，图像视角差异仍在。
+`config/link7_correction.yaml`，启动日志打印修正角度和平移；传 `'link7_correction_file:= '`
+关闭（值为空白，launch 去空白后视为空，节点参数为空即单位阵；`ros2 launch` 不接受 `:=''` 这样的空值）。修正只对齐手指位置，图像视角差异仍在。
 `dp_infer_tensorrt` 实现了相同的修正，默认读取本包安装的同一文件。
 
 修正文件由仓库根的 `compute_link7_correction.py` 生成（`ros2_ws/.venv-numpy1`，已 source Humble）：
