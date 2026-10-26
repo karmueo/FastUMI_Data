@@ -35,6 +35,7 @@ from fastumi_rm75.placo_control import (
     decode_trajectory,
     fill_joint_command,
     gate_gripper_target,
+    gripper_trajectory_anchor,
     ordered_joint_positions,
     pose_matrix,
     sample_trajectory,
@@ -709,8 +710,9 @@ class Rm75PlacoController(Node):
                 message,
                 self.get_clock().now().nanoseconds,
                 anchor_transform,
-                # 序列内插值在训练刻度进行，锚点须用上一拍的策略开度而非执行命令。
-                self._last_policy_gripper,
+                # 序列内插值在训练刻度进行；首次用新鲜实测值，后续用上一拍策略开度。
+                gripper_trajectory_anchor(self._last_policy_gripper,
+                                          self._fresh_gripper_state(), self._gripper_scale),
                 base_frame=self._base_frame,
                 end_frame=self._end_frame,
             )
