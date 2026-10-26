@@ -126,8 +126,25 @@ def _validate_serial_ports(dev_root: Path = Path("/dev")) -> None:
         )
 
 
+def _validate_no_running_server(proc_root: Path = Path("/proc")) -> None:
+    """拒绝重复启动自动扫描串口的厂商服务端，避免争抢电机回复。"""
+    for process in proc_root.iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            executable = os.readlink(process / "exe")
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        if Path(executable.removesuffix(" (deleted)")).name == "dex1_1_gripper_server":
+            raise RuntimeError(
+                f"夹爪服务端已运行（PID {process.name}），拒绝重复打开串口。"
+                "请复用现有硬件服务，或先在原启动终端停止该服务后重试。"
+            )
+
+
 def _launch_gripper(context):
     """解析配置与可选网卡覆盖，创建 ARM64 服务端和 ROS 节点。"""
+    _validate_no_running_server()
     share = Path(get_package_share_directory("unitree_gripper"))
     server_path = share / "vendor" / "dex1_1_gripper_server"
     sdk_library = share / "vendor" / "lib" / "libUnitreeMotorSDK_Arm64.so"

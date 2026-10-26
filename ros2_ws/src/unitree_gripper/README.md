@@ -28,6 +28,8 @@ python -m colcon build --symlink-install --packages-select unitree_gripper
 
 可在仓库中的 `config/gripper.yaml` 修改控制参数后重新构建，或通过 ROS 参数覆盖。
 
+同一台机器只启动一套夹爪服务。`hardware.launch.py` 已包含夹爪服务，不要再同时运行 `run_gripper.sh` 或另一个硬件 launch。启动检查发现已有厂商服务端时会报告 PID 并退出；请复用现有服务，或先在原终端停止后再启动。重复打开串口可能导致 `received 25 bytes, but not 26 bytes` 和 `motor id=1 does not reply`。该检查用于发现已经运行的服务，不提供两个启动进程同时执行时的原子互斥。
+
 | ROS 接口 | 消息类型 | 含义 |
 | --- | --- | --- |
 | `/motion_control/gripper_command` | `std_msgs/msg/Float32` | 目标开度，`0.0` 全闭、`1.0` 全开 |

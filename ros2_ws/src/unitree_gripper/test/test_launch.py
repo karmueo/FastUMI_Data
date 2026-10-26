@@ -96,6 +96,28 @@ def test_serial_validation_requires_accessible_character_device(tmp_path, monkey
     module._validate_serial_ports(tmp_path)
 
 
+@pytest.mark.parametrize("deleted", [False, True])
+def test_duplicate_server_is_rejected(tmp_path, deleted):
+    """识别其他安装目录的服务端，以及升级后仍运行的旧进程。"""
+    module = _load_launch_module()
+    process = tmp_path / "1234"
+    process.mkdir()
+    suffix = " (deleted)" if deleted else ""
+    (process / "exe").symlink_to("/other/install/dex1_1_gripper_server" + suffix)
+    with pytest.raises(RuntimeError, match="PID 1234"):
+        module._validate_no_running_server(tmp_path)
+
+
+def test_unrelated_and_exited_processes_are_ignored(tmp_path):
+    """普通进程和扫描期间退出的进程不阻塞启动。"""
+    module = _load_launch_module()
+    (tmp_path / "1234").mkdir()
+    (tmp_path / "1234" / "exe").symlink_to("/usr/bin/python3")
+    (tmp_path / "5678").mkdir()
+    (tmp_path / "self").mkdir()
+    module._validate_no_running_server(tmp_path)
+
+
 def test_serial_validation_accepts_one_accessible_port(tmp_path, monkeypatch):
     """无关串口不可访问时，不应阻塞可读写的夹爪串口。"""
     module = _load_launch_module()
