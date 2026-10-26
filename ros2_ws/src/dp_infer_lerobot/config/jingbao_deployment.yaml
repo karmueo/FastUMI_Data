@@ -1,0 +1,102 @@
+# 模型和安装测量的冻结部署契约；变更模型或安装后重新审核。
+version: 1
+model_name: jingbao_ddp_20261026_115211_best
+lerobot_version: 0.6.0
+contract:
+  frequency_hz: 30
+  action_reference: per_step_link7
+  rotation_representation: matrix_first_two_rows
+  position_unit: m
+  base_frame: base_link
+  end_frame: Link7
+  gripper_time_index: current
+  gripper_representation: normalized_0_1
+  image_preprocessing: rgb_pillow_box_letterbox_224
+checkpoint_files:
+  config.json: c56069ef52b14e87b6c5e580ce431d37386bbbe0a7e309ce59320097d4e68ca2
+  model.safetensors: 6381086809e88b67ea2d98459e3d052a389742e754bcc873b73a5a9b30c5a987
+  normalization_stats.json: 9276891c956211de1d80d9d5f876fdb91aea160bb86fc71459e29c6eacfb172a
+  policy_postprocessor.json: a5ac341bbeb7bf2b11955a4f6936957e3045937dd4f0d4d6d689ad8043c92f06
+  policy_postprocessor_step_0_unnormalizer_processor.safetensors: 948725be74b7ce283f09a2bbaa34c09f56bb55fbdd2aed3cf8f8dfe65280b1b6
+  policy_preprocessor.json: 0ae78a5e034cf0efb6fa5361cd8d3bab7f8799e1158ee0c3bf631f3755b61bbf
+  policy_preprocessor_step_3_normalizer_processor.safetensors: d586f92d5950de98f8fdfd16946d38780001532c498bb854a3bcbfe21036466f
+deployment_urdf_sha256: 1f5b0a109ef5e8b25e090447cc4f69824754029fa1d9c7f12a3278f35161c1c3
+calibration:
+  T_Cd_Link7_training:
+  - - -0.999932488888212
+    - 0.004849296406571887
+    - -0.010559450278643426
+    - -0.001472962238892026
+  - - -0.004004278327054091
+    - -0.9968962173139844
+    - -0.07862504473861195
+    - 0.08961759028923408
+  - - -0.010907952186612235
+    - -0.07857745369653088
+    - 0.9968483336745183
+    - -0.015643216234331517
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  T_Cd_Link7_deploy:
+  - - -0.999932488888212
+    - 0.004849296406571887
+    - -0.010559450278643426
+    - -0.001472962238892026
+  - - -0.004004278327054091
+    - -0.9968962173139844
+    - -0.07862504473861195
+    - 0.08961759028923408
+  - - -0.010907952186612235
+    - -0.07857745369653088
+    - 0.9968483336745183
+    - -0.015643216234331517
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  T_Cd_Link7_training_sha256: efeadb5303867659711ab4ca3586d2a2c9e726f897bad6b684fc2a816f4c54a9
+  T_Cd_Link7_deploy_sha256: efeadb5303867659711ab4ca3586d2a2c9e726f897bad6b684fc2a816f4c54a9
+  T_Cu_F:
+  - - 0.99981333
+    - -0.005961803
+    - -0.018378315
+    - 0.000886256
+  - - -0.018869459
+    - -0.096827419
+    - -0.995122301
+    - 0.059904153
+  - - 0.004153199
+    - 0.99528333
+    - -0.09692184
+    - 0.08612932
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  T_Cd_F:
+  - - 0.999715646
+    - -0.021478548
+    - -0.010358559
+    - -0.002032132
+  - - -0.012333142
+    - -0.093938987
+    - -0.995501562
+    - 0.061830648
+  - - 0.020408856
+    - 0.995346241
+    - -0.094177173
+    - 0.088738906
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+calibration_sources:
+  training_conversion_report: dataset/lerobot/jingbao/meta/fastumi_conversion.json
+  training_conversion_report_sha256: 073f10040a4f785c2edd93282fe997e24e34903c9bc7e6cc22204133d10b3cd0
+  hand_eye_file: config/calibration/T_cam_end.yaml
+  hand_eye_file_sha256: abd2e2c2b9d1cfce31e61ae9ffbdf34cb147f80a3763747d6a41e1b7b5056de9
+  mount_measurements: 'dp_infer/config/link7_correction.yaml: T_Cu_F, T_Cd_F'
+  mount_measurements_source_sha256: 067753f4d80f107c6541e1dbfda50b490d3cc618823395d3355bf312c5407167
+  installation_confirmed_unchanged: true

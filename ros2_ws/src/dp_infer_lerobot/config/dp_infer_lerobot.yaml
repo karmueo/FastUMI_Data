@@ -1,0 +1,12 @@
+# 时间均为秒；真实轨迹终点另受采集时间+8/30秒严格约束。
+dp_infer_lerobot:
+  ros__parameters:
+    num_inference_steps: 16
+    task_control_enabled: true
+    sync_slop_s: 0.05
+    input_timeout_s: 0.2
+    history_tolerance_s: 0.015
+    max_inference_hz: 10.0
+    result_timeout_s: 0.5
+    controller_reset_timeout_s: 1.0
+    postprocessors: ""

@@ -9,3 +9,5 @@ __pycache__/
 .deps/
 *.pyc
 .superpowers
+# LeRobot DP 的独立 Jetson 模型环境。
+.venv-dp-lerobot/

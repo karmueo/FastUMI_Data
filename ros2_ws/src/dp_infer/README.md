@@ -2,6 +2,8 @@
 
 # DP 推理与 RM75 控制
 
+LeRobot `jingbao_ddp_20261026_115211/best` 目录型模型使用 [dp_infer_lerobot](../dp_infer_lerobot/README.md)。本包保留旧 UMI checkpoint；两者共享 ROS 生命周期和键盘接口，模型与标定配置分别管理。
+
 `dp_infer` 读取训练 checkpoint，用 Jetson GPU 推理绝对 `base_link → Link7`
 末端目标，并发布 `/fastumi/policy/action_sequence`。组合 launch 同时运行现有
 `fastumi_rm75` Placo 控制器，将位姿转换为 RM75 七轴 CANFD 指令，夹爪目标发送至

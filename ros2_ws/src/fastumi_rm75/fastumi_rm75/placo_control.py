@@ -413,3 +413,16 @@ class GraspLatch:
             return None
         self.state, self._since = self.CLOSED, now
         return self.command
+
+
+def gripper_trajectory_anchor(previous_policy, measured_robot, scale):
+    """首次序列用新鲜实测开度的训练刻度；后续保留上一拍策略插值约定。"""
+    if previous_policy is not None:
+        if not np.isfinite(previous_policy) or not 0 <= previous_policy <= 1:
+            raise ValueError("Invalid previous policy gripper")
+        return float(previous_policy)
+    if measured_robot is None:
+        raise ValueError("Fresh gripper feedback is required for the first trajectory")
+    if not np.isfinite(measured_robot) or not 0 <= measured_robot <= 1:
+        raise ValueError("Invalid measured gripper")
+    return scale.to_policy(measured_robot)
