@@ -6,6 +6,8 @@
 VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转换、回放补标，
 以及 RM75 机械臂策略部署。
 
+新 LeRobot jingbao 模型部署见 [`dp_infer_lerobot`](src/dp_infer_lerobot/README.md)：独立 Python 3.10 环境，默认 dry-run，复用现有 RM75 控制接口。
+
 ## `src` 目录总览
 
 `src` 下多数顶层文件夹是独立 ROS 2 包；`ros2_rm_robot` 是包含多个包的子模块：

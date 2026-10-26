@@ -1,0 +1,13 @@
+# Python3.10 / Linux aarch64; install Jetson torch/torchvision separately as documented.
+torch==2.8.0
+torchvision==0.23.0
+numpy==1.26.4
+scipy==1.13.1
+diffusers==0.35.2
+huggingface-hub>=0.34,<1
+safetensors==0.8.0
+einops==0.8.2
+Pillow>=10,<12
+PyYAML>=6,<7
+opencv-python-headless>=4.8,<4.12
+pytest>=8,<9

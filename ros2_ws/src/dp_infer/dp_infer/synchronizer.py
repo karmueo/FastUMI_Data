@@ -4,7 +4,7 @@ from collections import deque
 
 import numpy as np
 
-from dp_infer.core import Observation
+from dp_infer.common import Observation
 
 
 class ObservationBuffer:
