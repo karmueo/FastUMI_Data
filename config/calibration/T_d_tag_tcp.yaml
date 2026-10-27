@@ -1,0 +1,20 @@
+# 夹爪抓取中心 TCP 在双 tag 坐标系 d_tag 中的位姿。
+# T_d_tag_tcp = ^d_tag T_tcp，采用列向量，平移单位为米。
+# p_d_tag = T_d_tag_tcp @ p_tcp
+#
+# d_tag 坐标系定义：
+#   原点：tag ID 0 与 ID 1 中心连线的中点。
+#   XY 平面：两个 tag 所在平面。
+#   +Y：在 tag 平面内垂直于两 tag 连线，由 tag 指向 TCP。
+#   +X：沿两 tag 连线，由 ID 0 指向 ID 1。
+#   +Z：X × Y（右手系），即 ArUco 标记法向，指出 tag 正面（朝向相机一侧）。
+#
+# TCP 相对原点沿 +Y 120 mm，沿 -Z 18 mm（即在 tag 平面背离相机一侧）；
+# 数值取自 aruco_to_tcp.example.yaml 的 bootstrap 几何，尚未实测标定。
+# TCP 坐标轴暂取与 d_tag 同向。
+# 固定安装变换，不随机械臂关节角变化。
+T_d_tag_tcp:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0, 0.12]
+  - [0.0, 0.0, 1.0, -0.018]
+  - [0.0, 0.0, 0.0, 1.0]
