@@ -27,5 +27,6 @@ setup(
     entry_points={"console_scripts": [
         "keyboard_hand_eye_capture = hand_eye_calibration_macpdata.capture:main",
         "export_hand_eye_dataset = hand_eye_calibration_macpdata.export_dataset:main",
+        "keyboard_tag_tcp_capture = hand_eye_calibration_macpdata.tag_tcp_capture:main",
     ]},
 )

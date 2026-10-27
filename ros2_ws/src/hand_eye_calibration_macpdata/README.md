@@ -7,6 +7,7 @@ RM75 腕部鱼眼相机的眼在手上手眼标定：在 `fastumi_bringup` 的 `
 |---|---|
 | `keyboard_hand_eye_capture` | 交互终端中按键驱动 RM75 自动走位、采样并写 MCAP |
 | `export_hand_eye_dataset` | 读取会话 MCAP，重新检测标定板，导出针孔数据集并求解外参 |
+| `keyboard_tag_tcp_capture` | 机械臂随机慢动，观测夹爪双 ArUco，标定部署端相机→TCP（A_d），见第 4 节 |
 
 依赖 `fastumi_bringup`（RM75 运动学 URDF、`kinematics`/`transforms`、终端逐键读取）、
 `fastumi_recorder`（独立进程 MCAP 写入、默认数据根目录）和 `fastumi_usb_camera`（默认鱼眼内参）。
@@ -211,3 +212,82 @@ ros2 run hand_eye_calibration_macpdata export_hand_eye_dataset \
 使用棋盘格时，`README.txt` 附有 [hand_eye_calibration](https://github.com/vdovetzi/hand_eye_calibration)
 的交叉验证命令（`--calibration-pattern "2 8 11 0.03"`，`--eye-to-hand false`）。该工具不做棋盘格 180° 消歧，
 也不支持 AprilGrid。结果可作为下次采集的 `prior_path`，保持默认 `prior_convention:=cam_from_flange`。
+
+## 4. 部署端双 ArUco 相机→TCP 标定（A_d）
+
+`keyboard_tag_tcp_capture` 用腕部鱼眼相机观测贴在机械臂夹爪上的两枚 ArUco（默认 DICT_4X4_50，16 mm，ID 0/1），
+求 ^Cd T_d_tag，再右乘 `config/calibration/T_d_tag_tcp.yaml` 得到
+
+```
+A_d = ^Cd T_tcp = T_cam_dtag @ T_d_tag_tcp
+```
+
+与 UMI 端 A_u = ^Cu T_tcp 组合即得两端相机→夹爪中心的几何差 `D = inv(A_u) @ A_d`
+（D 的平移为抓取点偏差，在示教 TCP 系下；旋转角为夹爪朝向偏差）。
+
+d_tag 坐标系与 `T_d_tag_tcp.yaml` 一致：原点为两 tag 中心中点，+X 沿连线由 ID 0 指向 ID 1，
++Z 为 tag 正面法向（指向相机），+Y = Z × X 指向 TCP。
+
+相机和 tag 都固连在 Link7 上，^Cd T_d_tag 理论上不随臂姿变化。随机改变姿态是为了暴露重力方向变化下的夹爪形变、
+平均检测噪声，并用位姿间离散度衡量结果可信度。
+
+### 运行
+
+先启动 `hardware.launch.py`（夹爪需运行，机械臂回位成功），确认画面中两枚 tag 清晰可见，再在第二个交互终端执行：
+
+```bash
+cd ros2_ws
+source /opt/ros/humble/setup.bash
+source .venv-numpy1/bin/activate
+source install/setup.bash
+ros2 run hand_eye_calibration_macpdata keyboard_tag_tcp_capture --ros-args \
+  -p T_d_tag_tcp_path:=$PWD/../config/calibration/T_d_tag_tcp.yaml \
+  -p T_cam_end_path:=$PWD/../config/calibration/T_cam_end.yaml \
+  -p T_end_tcp_path:=$PWD/../config/calibration/T_end_tcp.yaml \
+  -p num_poses:=20 -p speed:=10
+```
+
+首次使用先加 `-p dry_run:=true -p num_poses:=5` 只打印随机目标关节，再用 `num_poses:=5` 试跑，确认运动幅度安全。
+完整参数见 [config/tag_tcp_capture.example.yaml](config/tag_tcp_capture.example.yaml)。
+
+| 键 | 作用 |
+|---|---|
+| `a` | 以当前静止位姿为起始位姿，先在此采样，再自动随机走位；暂停后按 `a` 继续 |
+| 空格 | 立即下发 `/rm_driver/move_stop_cmd` 并暂停 |
+| `c` | 在当前静止位姿补采 |
+| `h` | 回起始位姿 |
+| `q` | 停止、对已有样本求解并退出 |
+
+**运动**：在起始 Link7 位姿上叠加随机扰动（base 系各轴平移 ±`translation_range_m`，默认 40 mm；绕 Link7 原点随机轴
+旋转 ≤ `rotation_max_deg`，默认 25°），用 URDF IK 求关节，经与手眼采集相同的过滤（Link7 工作空间盒、关节离限位
+≥ 0.1 rad、单次关节变化 ≤ `max_joint_step_rad`，默认 0.5 rad）后以 `speed`（默认 10%）MoveJ。安全逻辑与
+`keyboard_hand_eye_capture` 相同：反馈不新鲜不运动、MoveJ 失败锁定、超时先停止再锁定、`dry_run` 不发布运动。
+采满 `num_poses` 后自动回到起始位姿再求解。
+
+**采样**：每个位姿静止 `settle_seconds` 且夹爪到达目标开度后，连续处理 `frames_per_pose` 帧新图像。每帧在原始鱼眼图上检测
+两枚 tag，角点经鱼眼去畸变后用 IPPE_SQUARE 求两个候选位姿，再在 2×2 组合中选法向最一致、最共面的一组，消除小标签的
+翻转歧义。重投影 RMS > `max_reprojection_px` 或两法向夹角 > `max_normal_angle_deg` 的帧丢弃；有效帧不少于
+`min_valid_fraction` 时取平均作为该位姿的样本。`gripper_openness_values` 给多个开度时各位姿轮流使用，结果中
+`openness_check` 给出各开度相对总体的偏差，用于检查 d_tag 原点是否随开度漂移。
+
+**求解**：对全部位姿样本做 MAD 离群剔除后求刚体平均，得到 `T_cam_dtag`。
+
+### 输出
+
+`<dataset_root>/tag_tcp/session_<时间>/`：
+
+- `result.yaml`：
+  - `T_cam_dtag`：^Cd T_d_tag，单位米；
+  - `T_d_tag_tcp`：使用的 ^d_tag T_tcp 及来源路径；
+  - `A_d`：^Cd T_tcp；
+  - `camera_in_tcp_mm`：相机光心在 TCP 系中的位置，可与 UMI 上尺量结果粗比；
+  - `pose_spread`：内点相对均值的 RMS 平移（mm）/ 旋转（°）离散度，以及内点数和离群样本号；
+  - 给了 `T_cam_end_path` 时，`T_link7_tcp_measured = inv(cam0.T_cam_hand) @ A_d`；
+  - 再给 `T_end_tcp_path` 时，`vs_nominal_T_end_tcp` 给出与名义值的差。
+- `samples.csv`：逐位姿关节、^base T_Link7、^Cd T_d_tag（xyz + 四元数 xyzw）、有效帧数、RMS、法向夹角、tag 间距、内点标记。
+- `images/pose_<i>.jpg`：每个位姿一张原始鱼眼图，可离线复算。
+- `debug/pose_<i>.jpg`：叠加 tag 轮廓、d_tag 轴（X 红、Y 绿、Z 蓝）和 TCP 投影点（洋红十字）。首次使用请核对：
+  X 由 ID 0 指向 ID 1、Y 指向夹爪中心、TCP 十字落在两指之间。
+
+`T_cam_dtag` 与 `T_d_tag_tcp` 分开保存，以后修正 `T_d_tag_tcp` 时直接重新相乘即可，无需重采。
+位姿间离散度应在约 1 mm / 0.5° 以内；明显偏大时查看 `debug/` 中对应位姿。

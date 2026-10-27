@@ -1,0 +1,34 @@
+# keyboard_tag_tcp_capture 参数示例（部署端双 ArUco 相机→TCP 标定，求 A_d = ^Cd T_tcp）：
+#   ros2 run hand_eye_calibration_macpdata keyboard_tag_tcp_capture --ros-args --params-file <本文件>
+# 长度单位米，角度单位见参数名；未列出的参数使用节点默认值。
+keyboard_tag_tcp_capture:
+  ros__parameters:
+    T_d_tag_tcp_path: /abs/path/FastUMI_Data/config/calibration/T_d_tag_tcp.yaml  # 必填，^d_tag T_tcp
+    T_cam_end_path: /abs/path/FastUMI_Data/config/calibration/T_cam_end.yaml      # 可选：输出实测 ^Link7 T_tcp
+    T_end_tcp_path: /abs/path/FastUMI_Data/config/calibration/T_end_tcp.yaml      # 可选：与名义 T_end_tcp 比较
+    camera_config: ""          # 空 = fastumi_usb_camera/config/EndEffectorCalib.yaml（1920x1080 鱼眼）
+    urdf_path: ""              # 空 = fastumi_bringup/assets/rm_75_kinematic.urdf
+    image_topic: /wrist_camera/image_raw/compressed
+    aruco_dictionary: DICT_4X4_50
+    marker_size_m: 0.016       # tag 黑框外边长，按实物测量
+    tag0_id: 0
+    tag1_id: 1
+    dataset_root: ""           # 空 = $DATASET_ROOT 或录制器默认根目录；输出到 <root>/tag_tcp/session_*
+    num_poses: 20              # 含起始位姿
+    frames_per_pose: 15        # 每个位姿静止后连续处理的帧数
+    min_valid_fraction: 0.5    # 有效帧占比下限，不足则该位姿作废
+    speed: 10                  # MoveJ 速度百分比（1..30）
+    translation_range_m: 0.04  # 相对起始 Link7 的随机平移（base 系各轴 ±）
+    rotation_max_deg: 25.0     # 绕 Link7 原点随机轴旋转的最大角度
+    workspace_min: [-0.6, -0.5, 0.16]   # Link7 位置盒（base_link）
+    workspace_max: [0.6, 0.5, 0.60]
+    max_joint_step_rad: 0.5    # 单次 MoveJ 最大关节变化
+    settle_seconds: 1.0        # 关节静止判定时长
+    motion_timeout: 60.0
+    max_reprojection_px: 1.5   # 单枚 tag 鱼眼重投影 RMS 上限
+    max_normal_angle_deg: 10.0 # 两枚 tag 法向夹角上限
+    gripper_openness_values: [1.0]   # 各位姿轮流使用的开度；如 [1.0, 0.6] 检查中点是否随开度漂移
+    require_gripper: true
+    dry_run: false             # true：只规划并打印目标，不发布 MoveJ、不采样
+    max_attempts_factor: 3
+    random_seed: -1
