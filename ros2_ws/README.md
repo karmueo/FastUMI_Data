@@ -26,6 +26,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度；x86 服务端及 DDS 运行库位于包内 `deps`。 |
 | [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，发布 RM75 Link7 扩散策略推荐序列。 |
 | [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
+| [`fastumi_umi_tcp_calibration`](src/fastumi_umi_tcp_calibration/) | Python 标定包 | 从 MCAP 双 ArUco 图像离线标定 UMI 相机到 TCP 的固定变换。 |
 | [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
 | [`tracker_teleoperated`](src/tracker_teleoperated/) | Python/C++ 遥操包 | 管理 Tracker、UMI、逆解和末端视频解码，监控外部硬件并调用远端录制服务。 |
 | [`ros2_rm_robot`](src/ros2_rm_robot/) | 多包机械臂项目 | 提供 RM75 驱动、接口、MoveIt2、仿真及示例。 |
@@ -162,6 +163,16 @@ PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–�
 保持独立。Kalibr 固定版本清单、Jazzy 兼容补丁和详细构建说明由该包维护，见
 [`src/fastumi_camera_calibration/README.md`](src/fastumi_camera_calibration/README.md)。
 
+### `fastumi_umi_tcp_calibration`
+
+该包自动读取 MCAP 中的 UMI raw 或 JPEG/PNG 图像，以双 ArUco 中点和法向构造
+`u_tag` 坐标系，结合已知 `T_u_tag_tcp` 生成 `T_u_cam_tcp.yaml`。
+命令为 `ros2 run fastumi_umi_tcp_calibration calibrate_umi_tcp --bag <录包>`，
+在仓库根目录或 `ros2_ws` 运行时均自动定位仓库中的 `config/calibration/UmiCalib.yaml` 和
+`config/calibration/T_u_tag_tcp.yaml`。标定无需启动硬件，诊断保存在 `dataset/`。
+包属于 NumPy 1 构建环境；坐标约定、参数和测试说明见
+[`src/fastumi_umi_tcp_calibration/README.md`](src/fastumi_umi_tcp_calibration/README.md)。
+
 ### `fastumi_data`
 
 该包是 FastUMI 数据链路的编排与离线处理中心，主要命令包括：
@@ -284,7 +295,7 @@ NumPy 2 环境中导入 `cv_bridge`。
 | --- | --- | --- |
 | NumPy 2 | `tracker_teleoperated` | Placo 0.9.23 与锁文件中的 NumPy 2.3.5。 |
 | 独立 DP/NumPy 1 | `dp_infer` | 保持当前 checkpoint 的 PyTorch/CUDA 与训练时依赖版本。 |
-| NumPy 1 | `fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`gripper_openness`、`fastumi_rm75`、`fastumi_usb_camera`、`unitree_gripper` | 图像转换、数据处理及设备控制依赖。 |
+| NumPy 1 | `fastumi_umi_tcp_calibration`、`fastumi_camera_calibration`、`fastumi_data`、`fastumi_gripper_estimator`、`gripper_openness`、`fastumi_rm75`、`fastumi_usb_camera`、`unitree_gripper` | 图像转换、数据处理及设备控制依赖。 |
 | NumPy 1 | `fastumi_interfaces`、`fastumi_rviz_plugins`、`stereo_camera`、`tof_stereo_camera`、`vive_tracker`、`xv_ros2_msgs`、`xv_sdk_ros2` | 消息、C++ 驱动和 RViz 插件跟随 ROS 工作区基础构建环境。 |
 | NumPy 1 | `control_arm_move`、`force_position_control`、`get_arm_state`、`rm_bringup`、`rm_control`、`rm_description`、`rm_doc`、`rm_driver`、`rm_example`、`rm_gazebo`、`rm_install`、`rm_moveit2`、`rm_ros_interfaces` | `ros2_rm_robot` 的示例、驱动、模型、文档和 MoveIt2 包。 |
 | NumPy 1 | `rm_63_config`、`rm_65_config`、`rm_75_config`、`rm_eco62_config`、`rm_eco63_config`、`rm_eco65_config`、`rm_gen72_config`、`rm_rx75_config` | 八个 MoveIt2 配置包。 |
@@ -399,7 +410,7 @@ ros2 launch dp_infer dp_infer.launch.py \
 python -m colcon test --build-base build \
   --packages-select fastumi_usb_camera fastumi_data \
   fastumi_gripper_estimator gripper_openness fastumi_rm75 \
-  fastumi_camera_calibration
+  fastumi_camera_calibration fastumi_umi_tcp_calibration
 python -m colcon test-result --test-result-base build --all --verbose
 ```
 
