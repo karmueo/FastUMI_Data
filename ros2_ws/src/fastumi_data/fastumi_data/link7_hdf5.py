@@ -2,7 +2,9 @@
 
 结构（N 为帧数）::
 
-    /observations/images/front        (N, H, W, 3) uint8 原分辨率 RGB，每帧一个 chunk
+    /observations/images/front        (N, H, W, 3) uint8 RGB，每帧一个 chunk；Zarr 模式为
+                                      源分辨率，LeRobot 模式为 224×224 letterbox
+                                      （见根属性 image_preprocessing、image_size）
     /observations/qpos                (N, 8) float64 [x, y, z, qx, qy, qz, qw, gripper]
     /observations/timestamp           (N,) float64 名义采样时间（秒，首帧为 0）
     /observations/nominal_timestamp_ns(N,) int64  精确名义时间
@@ -14,7 +16,7 @@
                                       match_error_ns 与 reused
     /action                           (N, 8) 与 qpos 相同：同一条示教轨迹在图像时刻的值
 
-位姿为 episode 起始 Link7 相对位姿，位置单位米，夹爪 [0,1]。根属性记录格式、
+位姿为 episode 起始 UMI TCP 相对位姿，位置单位米，夹爪 [0,1]。根属性记录格式、
 时间语义、选帧路径、源帧率、外参与时间偏移来源、Tracker 序列号和 URDF 摘要；
 嵌套元数据以 JSON 字符串保存在 ``metadata_json``。
 """
@@ -34,12 +36,14 @@ from fastumi_data.frame_spool import FrameSpool
 from fastumi_data.link7_sync import Link7Episode
 
 
-LINK7_SCHEMA_VERSION = "fastumi_ros2_link7_v1"
+# 坐标语义改为 UMI TCP 后升级版本；旧 ``fastumi_ros2_link7_v1`` 文件不再接受。
+HDF5_SCHEMA_VERSION = "fastumi_ros2_tcp_v1"
 # 根属性中的固定时间与坐标语义。
 FIXED_ATTRIBUTES = {
-    "schema_version": LINK7_SCHEMA_VERSION,
-    "pose_frame": "episode_start_link7",
-    "end_frame": "Link7",
+    "schema_version": HDF5_SCHEMA_VERSION,
+    "pose_frame": "episode_start_tcp",
+    "end_frame": "tcp",
+    "tcp_definition": "gripper_grasp_center",
     "sample_rate_hz": 30,
     "timestamp_semantics": "nominal_frame_time",
     "state_time_reference": "image_timestamp",
@@ -65,7 +69,7 @@ def write_link7_episode_hdf5(
     spool: FrameSpool,
     metadata: Dict[str, Any],
 ) -> None:
-    """原子写入一条 Link7 episode：先写同目录临时文件，关闭后再替换。
+    """原子写入一条示教 episode：先写同目录临时文件，关闭后再替换。
 
     Args:
         output_path: 目标 HDF5 路径，必须尚不存在。
@@ -130,7 +134,7 @@ def write_link7_episode_hdf5(
                 quality.create_dataset("reused", data=reused)
             root.create_dataset("action", data=episode.qpos.astype(np.float64))
             root.create_dataset(
-                "world_from_start_link7", data=episode.world_from_start_link7
+                "world_from_start_tcp", data=episode.world_from_start_tcp
             )
         os.replace(temporary, destination)
     except BaseException:
@@ -144,8 +148,8 @@ def read_link7_metadata(path: Path) -> Dict[str, Any]:
         schema = root.attrs.get("schema_version")
         if isinstance(schema, bytes):
             schema = schema.decode()
-        if schema != LINK7_SCHEMA_VERSION:
-            raise ValueError(f"{path} 不是 {LINK7_SCHEMA_VERSION}（实际 {schema!r}）")
+        if schema != HDF5_SCHEMA_VERSION:
+            raise ValueError(f"{path} 不是 {HDF5_SCHEMA_VERSION}（实际 {schema!r}）")
         metadata = json.loads(root.attrs["metadata_json"])
         metadata["selection_path"] = str(root.attrs["selection_path"])
         metadata["nominal_source_fps"] = float(root.attrs["nominal_source_fps"])

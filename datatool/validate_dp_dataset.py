@@ -1,4 +1,4 @@
-"""只读验证 RM75 关节或 Link7 UMI 训练用 Zarr 数据集。
+"""只读验证 RM75 关节或末端位姿 UMI 训练用 Zarr 数据集。
 
 作用：
     检查数据集的根属性、episode 边界、数组结构、chunk、数值和训练窗口，
@@ -7,7 +7,8 @@
 输入：
     --input 为单个 Zarr 目录或包含 Zarr 目录的父目录；递归查找时不跟随符号链接。
     --type 必选，可选 rm75_joint 或 rm75_umi；rm75_umi 同时接受 convert_mcap 输出的
-    fastumi-rm75-link7-v1（示教 Link7 格式）。--action-horizon 默认 16，
+    fastumi-tcp-v1（示教 UMI TCP 格式）和旧 fastumi-rm75-link7-v1（示教 Link7 格式）。
+    --action-horizon 默认 16，
     --seed 默认 42，--val-ratio 默认 0.1，三者用于计算训练和验证窗口。
     输入路径按当前工作目录解析，数据集须包含 meta 和 data 中的必需数组。
 
@@ -51,18 +52,22 @@ else:
 # 两种训练数据类型允许的 Zarr 根属性 format 值。
 FORMATS = {
     "rm75_joint": {"rm75-joint-image-v1", "rm75-joint-image-v2"},
-    "rm75_umi": {"rm75-umi-pose-v1", "rm75-umi-pose-v2", "fastumi-rm75-link7-v1"},
+    "rm75_umi": {"rm75-umi-pose-v1", "rm75-umi-pose-v2", "fastumi-rm75-link7-v1", "fastumi-tcp-v1"},
 }
-# convert_mcap 输出的示教 Link7 格式：存储坐标为 episode 起始 Link7，部署输出到 base_link。
+# convert_mcap 旧示教格式：存储坐标为 episode 起始 Link7，部署输出到 base_link。
 LINK7_FORMAT = "fastumi-rm75-link7-v1"
+# convert_mcap 当前示教格式：存储坐标为 episode 起始 UMI TCP，部署端 Link7→TCP 由推理节点换算。
+TCP_FORMAT = "fastumi-tcp-v1"
+# 两种示教格式共用追溯数组与时间契约。
+DEMO_FORMATS = (LINK7_FORMAT, TCP_FORMAT)
 # 数组形状只列出帧维之后的维度，帧数由 meta/episode_ends 确定。
 COMMON = {"camera0_rgb": (224, 224, 3), "timestamp": (), "source_image_index": ()}
 JOINT = {"robot0_joint_pos": (7,), "robot0_gripper_position": (1,), "action": (8,)}
 UMI = {"robot0_eef_pos": (3,), "robot0_eef_rot_axis_angle": (3,),
        "robot0_gripper_width": (1,), "robot0_demo_start_pose": (6,), "action": (7,)}
-# 示教 Link7 格式额外要求的追溯数组。
+# 示教格式额外要求的追溯数组。
 LINK7_EXTRA = {"dropped_frames_before": (), "image_timestamp_ns": (), "nominal_timestamp_ns": ()}
-# 示教 Link7 格式固定的根属性。
+# 旧示教 Link7 格式固定的根属性。
 LINK7_CONTRACT = {
     "stored_action_layout": "xyz_rotvec_gripper", "pose_frame": "episode_start_link7",
     "deployment_base_frame": "base_link", "end_frame": "Link7", "position_unit": "m",
@@ -71,6 +76,11 @@ LINK7_CONTRACT = {
     "timestamp_semantics": "nominal_frame_time", "state_time_reference": "image_timestamp",
     "action_time_reference": "image_timestamp",
 }
+# 示教 TCP 格式固定的根属性：与 Link7 格式仅坐标系和工具偏移语义不同。
+TCP_CONTRACT = dict(
+    LINK7_CONTRACT, pose_frame="episode_start_tcp", end_frame="tcp",
+    tcp_definition="gripper_grasp_center", tool_offset="deployment_calibration",
+)
 # 同频逐帧路径相邻实际间隔相对整数倍周期的默认容差（秒）。
 INTERVAL_TOLERANCE_S = 0.008
 # 名义时间相邻差允许的整数纳秒舍入误差。
@@ -158,9 +168,10 @@ def check_contract(attrs, kind, findings):
     check_equal(attrs, "image_size", 224, findings)
     check_equal(attrs, "action_layout", "joint8" if kind == "rm75_joint" else "pose10", findings)
     limits = None
-    if format_name == LINK7_FORMAT:
-        # 存储坐标为 episode 起始 Link7，部署输出到 base_link；不要求虚构关节属性。
-        for key, expected in LINK7_CONTRACT.items():
+    if format_name in DEMO_FORMATS:
+        # 存储坐标为 episode 起始 Link7 或 UMI TCP，部署输出到 base_link；不要求虚构关节属性。
+        contract = TCP_CONTRACT if format_name == TCP_FORMAT else LINK7_CONTRACT
+        for key, expected in contract.items():
             check_equal(attrs, key, expected, findings)
         for key in ("gripper_lower", "gripper_upper"):
             value = attrs.get(key)
@@ -174,7 +185,9 @@ def check_contract(attrs, kind, findings):
                               ("gripper_representation", "normalized_0_1"),
                               ("joint_names", JOINT_NAMES)):
             check_equal(attrs, key, expected, findings)
-    if kind == "rm75_umi":
+    if kind == "rm75_umi" and format_name == TCP_FORMAT:
+        check_hash(attrs, findings)
+    elif kind == "rm75_umi":
         offset = attrs.get("tool_offset")
         try:
             valid_offset = np.asarray(offset, dtype=np.float64).shape == (4, 4) and np.allclose(
@@ -606,7 +619,7 @@ def validate_dataset(path, kind, horizon=16, seed=42, val_ratio=0.1):
         result["frames"] = count
         result["episodes"] = len(ends)
         result["windows"] = check_windows(ends, horizon, seed, val_ratio, findings)
-        link7 = attrs.get("format") == LINK7_FORMAT and kind == "rm75_umi"
+        link7 = attrs.get("format") in DEMO_FORMATS and kind == "rm75_umi"
         arrays, result["shapes"] = describe_arrays(root, kind, count, findings, link7)
         for name, array in arrays.items():
             check_chunks(array, name, path, findings)

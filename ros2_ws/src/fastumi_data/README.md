@@ -3,12 +3,12 @@
 # fastumi_data
 
 该包负责 ROS2 FastUMI 的服务化 UMI 采集、episode 事件、连续 MCAP 会话、
-Tracker 到 TCP 标定，以及 MCAP→30 Hz Link7 HDF5→合并 Zarr 的离线训练数据转换
-（`convert_mcap`，见“MCAP→Link7 训练数据”）。
+Tracker 到 TCP 标定，以及 MCAP→30 Hz UMI TCP 轨迹 HDF5→LeRobot v3.0 数据集（默认）或 Zarr 的离线训练数据转换
+（`convert_mcap`，见“MCAP→TCP 训练数据”）。
 
 **默认链路**：相机采集 30 Hz，本地相机推荐并默认 JPEG（`compressed`）原样录制，
-`convert_mcap` 同频逐帧转换为 30 Hz 数据，再通过 `model/dp/train_vr_umi.sh` 的现有 30 Hz
-配置训练。
+`convert_mcap` 同频逐帧转换为 30 Hz 数据并导出 LeRobot 数据集，再用 LeRobot 的相对位姿 Diffusion Policy
+训练；`--output-format zarr` 仍可导出旧 Zarr，通过 `model/dp/train_vr_umi.sh` 的现有 30 Hz 配置训练。
 
 本包使用工作区共享的 `.venv-numpy1`，因为 MCAP 图像转换依赖系统
 `cv_bridge`。每个运行终端先加载 Jazzy、`.venv-numpy1` 和工作区
@@ -300,7 +300,7 @@ Tracker 按最近源时间戳在 30 ms 窗口内配对，无匹配时显示不�
   共享内存段过小导致静默丢帧（见上文）。
 
 **压缩视频验证**（2026-10-10，合成数据）：JPEG 与 H.264 经真实 `collection_node` 采集并解码为 RGB 帧、
-合成 MCAP 经 `convert_mcap` 转成 Link7 RGB HDF5 的端到端测试通过；CDR 解析与 rclpy 序列化逐字节一致（含大端和截断）；接收器
+合成 MCAP 经 `convert_mcap` 转成 TCP 轨迹 RGB HDF5 的端到端测试通过；CDR 解析与 rclpy 序列化逐字节一致（含大端和截断）；接收器
 `auto` 后端在本机 NVIDIA GPU（`h264_cuvid`）和强制 GPU 初始化失败（软件回退）两条路径上都通过。
 **未验证**：真实 Jetson 1280×960@30 FPS 码流、真实相机的 H.264 软件编码链路、长时间运行；包丢失只有在破坏解码
 时才会被发现（best-effort 传输下静默丢掉的 P 帧无法从码流本身察觉）。
@@ -309,24 +309,74 @@ Tracker 按最近源时间戳在 30 ms 窗口内配对，无匹配时显示不�
 真实外参下的 HDF5 位姿；设备运动时的时间指标；RViz2 默认布局中“UMI 视频”停靠面板初始为折叠状态，
 需要手动拖开一次（图像显示本身正常，面板左侧的 `UMI 视频` 标题栏即是）。
 
-## MCAP→Link7 训练数据（convert_mcap）
+## MCAP→TCP 训练数据（convert_mcap）
 
-`convert_mcap` 手动执行，完成 MCAP→`fastumi_ros2_link7_v1` HDF5→合并
-`fastumi-rm75-link7-v1` Zarr。只有输入路径和 `--output-dir` 必填，其余参数都有缺省值。
+`convert_mcap` 手动执行，完成 MCAP→`fastumi_ros2_tcp_v1` HDF5，再按 `--output-format` 导出：
+
+- `lerobot`（默认）：LeRobot v3.0 数据集，写入 `<output-dir>/lerobot`，见“LeRobot 数据集”；
+- `zarr`：`fastumi-tcp-v1` Zarr，写入 `<output-dir>/dataset.zarr`，只记录丢帧、不补帧。
+
+位姿统一为 **episode 起始 UMI TCP（夹爪抓取中心）坐标系**，只用示教端外参 `T_cam_tracker.yaml` 与
+`T_u_cam_tcp.yaml` 计算，与部署机械臂无关；部署端 Link7↔TCP 换算由推理节点用 `T_cam_end.yaml` 与
+`T_d_cam_tcp.yaml` 完成（见“几何与同步”）。部署外参重新标定后只需更新推理配置，不必重新转换和训练。
+此前的 `fastumi_ros2_link7_v1` HDF5 与 `fastumi-rm75-link7-v1` Zarr 把相机视为两端重合点直接换算到 Link7，
+在当前外参下会让抓取中心偏约 9 mm、2.8°，需要重新转换。
+
+LeRobot 模式必填输入路径、`--output-dir` 和 `--repo-id`；Zarr 模式只需输入路径和 `--output-dir`。
 
 > **运行方式**：`ros2 run fastumi_data convert_mcap` 的入口脚本固定使用系统 `/usr/bin/python3`，其中没有
 > `zarr`，会在最后导出 Zarr 时报 `No module named 'zarr'`。在已加载 Jazzy、`.venv-numpy1` 与
 > `install/setup.bash` 的终端里改用 `python -m fastumi_data.mcap_converter`，参数完全相同。下文示例均用此形式。
+> LeRobot 模式不需要 Zarr/JPEG XL 依赖，但需要另一个装有 LeRobot 的 Python（见 `--lerobot-python`）。
+
+### 构建（仅离线转换）
+
+`python -m fastumi_data.mcap_converter` 从工作区 `install/` 导入本包，必须先构建 `fastumi_data`，否则报
+`No module named 'fastumi_data'`。已按 [`ros2_ws/README.md`](../../README.md#分阶段构建) 构建完整工作区时可跳过本节。
+只做离线转换的机器不需要相机、Tracker、RViz 等硬件包，可只构建接口包和本包；`--packages-ignore` 让 colcon
+不检查这些未构建的运行依赖（它们只在采集时使用，转换不导入）：
+
+```bash
+cd ros2_ws
+source /opt/ros/jazzy/setup.bash
+source .venv-numpy1/bin/activate
+PATH="$VIRTUAL_ENV/bin:/opt/ros/jazzy/bin:/usr/bin:/bin" \
+  python -m colcon build --build-base build --symlink-install \
+  --packages-select fastumi_interfaces fastumi_data \
+  --packages-ignore fastumi_usb_camera xv_ros2_msgs fastumi_rviz_plugins gripper_openness \
+  tof_stereo_camera vive_tracker xv_sdk_ros2 fastumi_gripper_estimator \
+  --cmake-args -DPython3_EXECUTABLE="$VIRTUAL_ENV/bin/python"
+```
+
+`--symlink-install` 下 Python 源码改动即时生效；`setup.py` 中的默认外参或 URDF 列表变化后须重新构建，
+否则包内缺少新文件（例如 `T_u_cam_tcp.yaml`）。若 `build/fastumi_interfaces` 来自非 symlink 构建，
+colcon 会报 `failed to create symbolic link ... Is a directory`，删除 `build/fastumi_interfaces` 与
+`install/fastumi_interfaces` 后重建。
 
 ### 默认参数执行
 
 ```bash
-# ros2_ws 目录，已加载 Jazzy、.venv-numpy1 和 install/setup.bash
-python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
-  --output-dir <新输出目录>
+# ros2_ws 目录；每个新终端先加载环境
+source install/setup.bash          # 已构建的工作区，会一并加载 Jazzy
+source .venv-numpy1/bin/activate
+python -c "import fastumi_data"    # 无输出即可导入
+
+# LeRobot 数据集（默认）；仓库数据在 ros2_ws 上一级的 dataset/
+python -m fastumi_data.mcap_converter ../dataset/<任务目录或记录目录> \
+  --output-dir <新输出目录> \
+  --repo-id <用户或组织>/<数据集名> --jobs 0
+
+# Zarr 格式（fastumi-tcp-v1）
+python -m fastumi_data.mcap_converter ../dataset/<任务目录或记录目录> \
+  --output-dir <新输出目录> --output-format zarr
 ```
 
-缺省时依次使用：包内默认外参 `T_cam_tracker.yaml`/`T_cam_end.yaml`（Tracker 绑定 `LHR-B77A06A7`）、包内
+`--repo-id` 必须是 `<用户或组织>/<数据集名>`（如 `local/jingbao`），只写数据集名会报用法错误。
+`--output-dir` 必须尚不存在，数据集写入其中的 `lerobot/` 子目录。`--jobs 0` 按 CPU 数自动并行（上限 8），
+缺省 `1` 为串行；单条约 450 帧的 1080p 记录在 LeRobot 模式下串行约 15 秒，另加整批一次的写入器
+预检与导出约 13 秒（Zarr 模式需写原分辨率 HDF5，约 1.5 分钟）。
+
+缺省时依次使用：包内默认外参 `T_cam_tracker.yaml`/`T_u_cam_tcp.yaml`（Tracker 绑定 `LHR-B77A06A7`）、包内
 `rm_75.urdf`、记录快照中的标称源帧率与处理配置（无快照时用包默认 `processing.yaml`），夹爪按 `auto`
 选择（二值化副本用 0/1，否则用 `filtered_openness`）。连续录制（`record_session`）的快照没有标称源帧率，
 须加 `--source-camera-fps 30`。
@@ -338,12 +388,16 @@ python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
   --output-dir <新输出目录> \
   --urdf <实际部署使用的URDF> \
   --tracker-camera-extrinsic <T_cam_tracker.yaml> \
-  --end-camera-extrinsic <T_cam_end.yaml> \
+  --umi-tcp-extrinsic <T_u_cam_tcp.yaml> \
   --tracker-serial <自定义外参缺少绑定时声明的序列号> \
   --source-camera-fps <标称源帧率覆盖值> \
   --gripper-source auto|binary|filtered|raw \
   --config <处理配置> \
-  --jobs <并行进程数>
+  --jobs <并行进程数> \
+  --output-format lerobot|zarr \
+  --repo-id <用户或组织>/<数据集名> \
+  --lerobot-python <LeRobot 环境的 python> \
+  --max-fill-gap <最大补齐缺失帧数>
 ```
 
 ### 参数
@@ -354,12 +408,16 @@ python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
 | `--output-dir` | 是 | — | 新输出目录，必须尚不存在 |
 | `--urdf` | 否 | 包内 `assets/rm_75.urdf` | 部署使用的 URDF，只记录摘要与快照，不参与计算 |
 | `--tracker-camera-extrinsic` | 否 | 包内 `T_cam_tracker.yaml` | `T_cam_tracker` 外参，须带 Tracker 身份（文件内序列号或 `.binding.yaml`） |
-| `--end-camera-extrinsic` | 否 | 包内 `T_cam_end.yaml` | `T_cam_end` 外参（相机到 Link7） |
+| `--umi-tcp-extrinsic` | 否 | 包内 `T_u_cam_tcp.yaml` | UMI 相机←TCP 外参（顶层键 `T_u_cam_tcp`）；旧 `--end-camera-extrinsic` 已移除并给出迁移提示 |
 | `--tracker-serial` | 否 | 空 | 自定义 Tracker 外参缺少身份绑定时声明序列号；不能覆盖既有绑定 |
 | `--source-camera-fps` | 否 | 读记录快照 `image.nominal_source_fps` | 标称源帧率覆盖值（如 30、29.97、90）；快照缺失时必须给出 |
 | `--gripper-source` | 否 | `auto` | 夹爪开度来源：`auto`、`binary`、`filtered`、`raw`，见下方说明 |
 | `--config` | 否 | 记录 processing 快照，否则包默认 `processing.yaml` | 处理配置（话题、采样率等） |
 | `--jobs` | 否 | `1` | 并行转换记录的进程数；`1` 在当前进程串行，`0` 按 CPU 数和记录数自动选择（上限 8），见下方说明 |
+| `--output-format` | 否 | `lerobot` | 导出格式：`lerobot`（LeRobot v3.0）或 `zarr`（旧格式） |
+| `--repo-id` | LeRobot 模式必填 | — | `<用户或组织>/<数据集名>`，只写入元数据，不上传 |
+| `--lerobot-python` | 否 | 环境变量 `FASTUMI_LEROBOT_PYTHON`，其次 `~/work/lerobot/.venv/bin/python` | 装有 LeRobot 的 Python；都不可用时报错，不回退到当前解释器 |
+| `--max-fill-gap` | 否 | `2` | LeRobot 模式允许补齐的最大连续缺失帧数（非负整数），超过时在缺口处切分 episode；`0` 表示所有缺口都切分 |
 
 ### 参数说明
 
@@ -399,7 +457,7 @@ python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
 - **标称源帧率**：`--source-camera-fps` 优先，否则读快照 `image.nominal_source_fps`；缺失时报错，**不用实测帧率
   推断**。旧记录须按实际采集配置声明（2026-10-12 的六份记录为 30）。30 Hz ±1%（含 29.97）走同频逐帧路径，
   ≥60 Hz 走高帧率抽帧路径，其他值在转换前报错。
-- **外参与设备身份**：缺省使用安装到包 share 的 `T_cam_tracker.yaml`、`T_cam_end.yaml`（源文件在仓库
+- **外参与设备身份**：缺省使用安装到包 share 的 `T_cam_tracker.yaml`、`T_u_cam_tcp.yaml`（源文件在仓库
   `config/calibration/`）。Tracker 外参必须有身份：文件内 `tracker_serial` 和/或同目录
   `<名>.binding.yaml`（保存 `tracker_serial`、原始外参字节 `calibration_sha256`、来源记录 UUID、状态话题
   与标定时间戳来源）。默认绑定为 **`LHR-B77A06A7`**。缺少身份时须用
@@ -412,8 +470,16 @@ python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
 
 ### 几何与同步
 
-`T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7`，两份外参的 `cam0.T_cam_hand`
-分别为 `T_Cu_Tracker`、`T_Cd_Link7`，再以裁剪后首帧归一化为 episode 起始 Link7 相对位姿。Tracker 外参的
+`T_W_TCP(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cu_TCP`，其中 `T_Cu_Tracker` 为
+`T_cam_tracker.yaml` 的 `cam0.T_cam_hand`，`T_Cu_TCP` 为 `T_u_cam_tcp.yaml` 的 `T_u_cam_tcp`，再以裁剪后首帧
+归一化为 episode 起始 TCP 相对位姿。
+
+部署时两端 TCP 视为同一物理点：`T_Link7_TCP = inverse(T_cam_end) × T_d_cam_tcp`，推理节点把 FK 得到的 Link7
+右乘它作为观测，把预测的 TCP 目标右乘其逆还原为 Link7 目标。这样部署抓取中心复现示教抓取中心的轨迹；两端
+相机相对 TCP 的安装差（当前约 9 mm、2.8°）只体现为图像视角差。两端 TCP 坐标轴必须采用同一约定，推理节点
+启动时比较 checkpoint 内嵌的 `T_u_cam_tcp` 与部署 `T_d_cam_tcp`，轴向相差超过 `max_tcp_axis_deg`（默认 10°）
+拒绝启动。目前只有 `dp_infer`（加载 Zarr 训练的 checkpoint）实现了该换算，LeRobot 模型的部署节点须按同样
+方式处理。Tracker 外参的
 `time_offset`（秒）固定按 `t_camera = t_tracker + offset` 解释（手眼标定报告的 `t_eye = t_hand + offset`），
 即同一时刻相机时间戳比 Tracker 晚 offset；默认外参为 +1.841 ms（V4L2 链路重新标定），Tracker 查询时间为
 `t_image − 1.841 ms`。改用其他标定工具时，须先把偏移换算成这一定义再写入。
@@ -446,7 +512,9 @@ python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
 “写入图像”（按帧）、“校验数值”（按 episode）三个阶段，不打印过程行；
 管道或日志重定向时不画进度条，正常情况下 stderr 为空。只有异常才打印：episode 被质量拒绝时输出
 `拒绝 <episode>: 原因`（显示在进度条上方，不被覆盖），硬错误（转换前检查失败、转换中止、无有效 episode）输出到
-stderr 并返回 1。成功结束时 stdout 只有一行汇总：`完成：有效 N / 拒绝 M episode，F 帧 → <dataset.zarr>`。
+stderr 并返回 1。Zarr 模式成功结束时 stdout 只有一行汇总：`完成：有效 N / 拒绝 M episode，F 帧 → <dataset.zarr>`。
+LeRobot 模式在“转换记录”后经过“写入 LeRobot”（按 episode）阶段；汇总行另含 LeRobot episode 数和舍弃片段数，
+随后打印参考训练命令；片段过短被舍弃或某条记录没有可导出 episode 时在 stderr 提示。
 时间戳来源提示、配置调整、单 episode 提示等不再打印，可在 `manifest.json`（`warnings`、各来源 `processing`）和
 `record_report.json` 中查看。
 
@@ -458,41 +526,120 @@ stderr 并返回 1。成功结束时 stdout 只有一行汇总：`完成：有�
 ├── snapshots/calibration/            两份外参与绑定清单快照
 ├── snapshots/urdf/<名>.urdf          URDF 快照（摘要与 Zarr 根属性一致）
 ├── records/<任务>/<记录>/
-│   ├── episodes/episode_XXXX.hdf5    fastumi_ros2_link7_v1，逐条原子发布
+│   ├── episodes/episode_XXXX.hdf5    fastumi_ros2_tcp_v1，逐条原子发布
 │   ├── reports/episode_XXXX.json     接受或拒绝原因、质量统计、丢帧、名义—实际累积差
-│   └── record_report.json            配置来源与调整、身份预检、解码统计
-└── dataset.zarr                      fastumi-rm75-link7-v1，全部写入并回读验收后才发布
+│   └── record_report.json            配置来源与调整、身份预检、解码统计；LeRobot 模式另有补帧与切分结果
+├── dataset.zarr                      Zarr 模式：fastumi-tcp-v1，全部写入并回读验收后才发布
+└── lerobot/                          LeRobot 模式：v3.0 数据集，finalize 并回读校验后整体发布
+    └── meta/fastumi.json             FastUMI 契约（坐标系、单位、时间语义）与逐 episode 溯源
 ```
 
-- **HDF5**：原分辨率 RGB、`qpos`/`action`（`[xyz, quaternion_xyzw, gripper]`，同一示教轨迹在图像时刻的值）、
+LeRobot 模式运行中使用 `.lerobot_staging/`（逐 episode `.npz`、写入器任务、日志和未发布的数据集），
+成功后删除，失败时保留供诊断。
+
+- **HDF5**：RGB（Zarr 模式为源分辨率；LeRobot 模式在解码后立即 letterbox 为 224×224，不保存原分辨率，
+  根属性 `image_preprocessing`、`image_size` 标明）、`qpos`/`action`（`[xyz, quaternion_xyzw, gripper]`，同一示教轨迹在图像时刻的值）、
   名义时间、实际图像时间、源索引、`dropped_frames_before`、质量数组（高帧率路径另有匹配误差与复用标记），
   根属性含选帧路径、标称/实测/拟合帧率、外参与绑定摘要、期望与实测 Tracker 序列号、时间偏移及来源和 URDF 摘要。
 - **Zarr**：224×224 letterbox RGB（与部署 `letterbox_rgb` 相同，JPEG XL `lossless=True, effort=3,
   numthreads=1`，逐帧回读确认无损）、末端位置、旋转向量、夹爪、起始位姿、7D 动作、`meta/episode_names`
   （`<任务>/<记录>/episode_XXXX`）、`data/timestamp`、`source_image_index`、`dropped_frames_before`、
   `image_timestamp_ns`、`nominal_timestamp_ns`；根属性写入计划第 4 节契约（`frequency: 30`、
-  `pose_frame: episode_start_link7`、`normalization_contract: fixed-gripper-0-1-v1`、`urdf_sha256` 等），
+  `pose_frame: episode_start_tcp`、`end_frame: tcp`、`tool_offset: deployment_calibration`、
+  `umi_camera_from_tcp`、`normalization_contract: fixed-gripper-0-1-v1`、`urdf_sha256` 等），
   `episode_metadata` 逐条保留来源、帧率、身份、外参摘要和时间偏移；`complete=true` 只表示导出完整，
   不表示时间标定已验证。
-- **失败行为**：质量拒绝跳过并写报告；损坏文件、标定或身份错误、导出异常中止并返回非零，保留诊断产物；
+- **失败行为**：质量拒绝跳过并写报告；损坏文件、标定或身份错误、导出异常中止并返回非零，保留诊断产物
+  （LeRobot 模式另保留 `.lerobot_staging/` 中的 `.npz`、写入器日志与未发布数据集，清单 `status=failed`）；
   零条有效 episode 返回失败；只有一条时成功，并在 `manifest.json` 的 `warnings` 记录当前训练默认验证划分至少需要
   两条。转换按 episode 把解码帧
   暂存到磁盘，内存不随 episode 长度增长。
 
-### 校验与训练
+### LeRobot 数据集
+
+| 字段 | 格式与语义 |
+| --- | --- |
+| `observation.state` | `float32[7]`：`[x, y, z, rx, ry, rz, gripper]` |
+| `action` | `float32[7]`：同一图像时刻的示教位姿，数值等于 `observation.state`，不前移 |
+| `observation.images.front` | RGB，与部署 `letterbox_rgb` 相同地缩放并居中补黑至 224×224，CPU H.264（`crf=18`、`g=2`）MP4 |
+| `task` | 依次取 episode 任务名、记录任务名、记录标识 |
+
+位置单位米，旋转为轴角旋转向量（弧度），夹爪为 `[0,1]`，均位于“episode 起始 UMI TCP 坐标系”。导出时不计算
+相对位姿或 rot6d，由 LeRobot 训练预处理完成（模型内部 state/action 为 10 维）。时间和索引由 LeRobot 按连续
+30 Hz 生成。`meta/fastumi.json` 记录 `action_time_reference=image_timestamp` 等契约，以及每个 episode 的源
+HDF5（相对输出目录）、源行区间、补齐帧下标、切分序号和原名义帧号；`umi_camera_from_tcp` 为示教
+`T_u_cam_tcp`，供部署端核对 TCP 轴向。
+
+**进程分工**：ROS 环境读取 HDF5，完成四元数→旋转向量、丢帧补齐、切分和 letterbox，每个 episode 写成临时
+`.npz`；随后以 `-I` 隔离模式启动 LeRobot Python（移除 `PYTHONPATH`，设置 `HF_HUB_OFFLINE=1`）运行
+`lerobot_writer.py`，调用 `LeRobotDataset.create/add_frame/save_episode/finalize`，再重新打开数据集核对
+长度、数值和首/中/末帧解码误差。主进程确认 `meta/` 中没有临时目录绝对路径后，整体重命名为 `lerobot/`。
+转换开始前先用同一 Python 编码并解码一段 16 帧测试视频；LeRobot、libx264 编码或解码后端不可用时直接
+报错，不创建输出目录。
+
+**丢帧补齐与切分**（只对 LeRobot 模式；Zarr 模式仍只记录 `dropped_frames_before`、不补帧）：
+
+- 按缺失帧数（`dropped_frames_before`）判断，不按两个有效帧的跨度。缺失帧数 ≤ `--max-fill-gap` 时补齐：
+  图像取最近邻，与两侧等距时取较早帧；位置线性插值；姿态四元数 SLERP 后转为旋转向量；二值夹爪
+  （`binary` 来源）取最近邻，连续夹爪线性插值。
+- 超过上限时在缺口处切分 episode，避免长时间“图像静止、位姿运动”的样本；片段名为
+  `<原 episode>/segment_XX`。切分出的片段从零计时，但位姿仍在原 episode 起始 TCP 坐标系。
+- 补齐后少于 16 帧（等于 horizon）的片段丢弃并写入 `record_report.json`；某条记录的片段全部被舍弃时，
+  该记录的 `lerobot.status` 为 `failed`，其余记录照常导出；所有记录都没有有效 episode 时整次转换失败。
+- 不外推首尾，不放宽现有质量门限。
+
+**同时刻动作的时间语义**：训练配置 `n_obs_steps=2`、`horizon=16` 的动作窗口为 `t-1 … t+14`，推理取
+`t … t+7`。由于 `action[t] == state[t]`，8 个输出中首个的训练目标是当前时刻位姿，其余 7 个对应未来时刻；
+模型有误差、机器人在推理期间也可能继续运动，所以不能假定首步实际不动。第 k 个输出（k = 0…7）的目标时刻为
+“观测图像时间 + k/30 s”，部署端应根据观测时间、推理耗时和控制延迟只执行尚未过期的目标，剩余目标保留原
+时刻，不能重新从零计时；固定丢弃一步不一定足够。现有 `dp_infer` 已按此方式发布：`PolicyActionSequence`
+的 `header.stamp` 为观测图像时间，`time_from_start[k] = k/30`，结果超过 `result_timeout` 即丢弃。
+
+**训练**（在 LeRobot 工作区运行，转换结束时也会打印）：
+
+```bash
+uv run lerobot-train \
+  --dataset.repo_id=<转换时的repo-id> \
+  --dataset.root=<output-dir>/lerobot \
+  --policy.type=diffusion \
+  --policy.use_relative_pose=true \
+  --policy.relative_pose_state_starts='[0]' \
+  --policy.n_obs_steps=2 \
+  --policy.horizon=16 \
+  --policy.n_action_steps=8 \
+  --policy.drop_n_last_frames=7 \
+  --policy.resize_shape='[224,224]' \
+  --policy.crop_ratio=0.95 \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --output_dir=outputs/train/dp_relpose \
+  --job_name=dp_relpose \
+  --batch_size=64 \
+  --steps=200000
+```
+
+`drop_n_last_frames` 按 `horizon - n_action_steps - n_obs_steps + 1` 显式给出，只减少末尾采样点；16 步
+窗口仍有边界 padding：episode 开头的 `t-1`，以及最后一个起点 `t=N-8` 的末尾 7 步。图像已是 224×224，
+`resize_shape=[224,224]` 不改变尺寸，只为让 `crop_ratio` 推导出 212×212 裁剪；训练随机裁剪、eval 中心
+裁剪，都在模型内部执行。部署端只在模型外做相同的 RGB letterbox，加载训练配置并调用 `eval()`，不得再次
+resize 或裁剪。
+
+### 校验与训练（Zarr 模式）
 
 ```bash
 # 仓库根目录
 .venv/bin/python datatool/validate_dp_dataset.py --input <输出目录>/dataset.zarr --type rm75_umi
 # 单条 episode 用 --val-ratio 0
-DATASET_PATH=<输出目录的绝对路径>/dataset.zarr bash model/dp/train_vr_umi.sh
+CONFIG_NAME=train_diffusion_unet_timm_fastumi_tcp_workspace \
+  DATASET_PATH=<输出目录的绝对路径>/dataset.zarr bash model/dp/train_vr_umi.sh
 ```
 
-校验器对新格式实际解码 JPEG XL chunk，检查根属性契约、坐标系（存储 `episode_start_link7`、部署
+校验器对新格式实际解码 JPEG XL chunk，检查根属性契约、坐标系（存储 `episode_start_tcp`、部署
 `base_link`）、夹爪契约与 `[0,1]` 开度、URDF 摘要、名义时间差 `(1+dropped)/30 ±1 ns`、源索引与实际
-时间严格递增、同频路径源索引连续与实际间隔 ±8 ms、拟合帧率与报告一致，以及起始位姿和训练窗口。训练沿用
-`train_diffusion_unet_timm_vr_umi_workspace.yaml`（`task.contract.frequency_hz=30`），workspace 启动时要求
-新格式 Zarr 的 `frequency` 与之一致，夹爪观测与动作固定使用 `[0,1]` 输入边界（与 v2 checkpoint 相同缩放），
+时间严格递增、同频路径源索引连续与实际间隔 ±8 ms、拟合帧率与报告一致，以及起始位姿和训练窗口。训练使用
+`train_diffusion_unet_timm_fastumi_tcp_workspace.yaml`（`CONFIG_NAME` 指定，`task.contract.end_frame=tcp`、
+`frequency_hz=30`），workspace 启动时要求 Zarr 的 `frequency`、`end_frame` 与契约一致，把 `umi_camera_from_tcp`
+写入 checkpoint，夹爪观测与动作固定使用 `[0,1]` 输入边界（与 v2 checkpoint 相同缩放），
 checkpoint 写入 30 Hz 契约和真实 URDF 摘要。
 
 ### 本轮验证（2026-10-13）
@@ -536,9 +683,9 @@ ros2 run fastumi_data episode_command start
 ros2 run fastumi_data episode_command stop
 ros2 run fastumi_data episode_command abort
 
-# 4. 离线转换为 30 Hz Link7 训练数据（连续录制的快照没有标称源帧率，须显式声明）
+# 4. 离线转换为 30 Hz TCP 训练数据（连续录制的快照没有标称源帧率，须显式声明）
 python -m fastumi_data.mcap_converter dataset/pick_place/<session>/raw/bag \
-  --output-dir /data/converted/pick_place_link7 --source-camera-fps 30
+  --output-dir /data/converted/pick_place_tcp --repo-id local/pick_place --source-camera-fps 30
 ```
 
 连续录制同样支持压缩图像：`record_session` 增加 `--image-mode`、`--image-topic`、
@@ -554,7 +701,7 @@ ros2 run fastumi_data record_session --task pick_place --extrinsic … \
   --image-mode h264 --image-topic /wrist_camera/image_raw/ffmpeg
 ```
 
-旧的 TCP 格式（`fastumi_ros2_v2`，按处理配置采样率）转换已移除，`convert_mcap` 只输出 Link7 数据，
+旧的 TCP 格式（`fastumi_ros2_v2`，按处理配置采样率）转换已移除，`convert_mcap` 只输出 30 Hz UMI TCP 数据，
 命令行不再提供 `--extrinsic` 用法。完整流程、数据结构和验收步骤见仓库
 `docs/ros2_fastumi_pipeline.md`。
 

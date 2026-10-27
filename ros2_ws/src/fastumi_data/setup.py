@@ -15,7 +15,7 @@ DEFAULT_CALIBRATION_FILES = [
     for name in (
         "T_cam_tracker.yaml",
         "T_cam_tracker.binding.yaml",
-        "T_cam_end.yaml",
+        "T_u_cam_tcp.yaml",
     )
 ]
 # 转换缺省 --urdf 时使用的部署 URDF，摘要须与 dp_infer 的 expected_urdf_sha256 一致。

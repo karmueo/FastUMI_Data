@@ -1,12 +1,12 @@
-"""按所选图像的实际时间同步 Tracker 位姿与夹爪，生成 episode 起始 Link7 相对轨迹。
+"""按所选图像的实际时间同步 Tracker 位姿与夹爪，生成 episode 起始 UMI TCP 相对轨迹。
 
 时间约定：图像 ``k`` 的实际消息时间为 ``t_image(k)``。Tracker 位姿与跟踪状态在
 ``t_image(k) + tracker_time_offset_ns`` 查询（偏移已按外参语义换算，见
 :mod:`fastumi_data.link7_calibration`），位置线性插值、旋转 SLERP；夹爪在
 ``t_image(k)`` 插值。名义时间只用于标注，不参与插值。
 
-几何约定：``T_W_Link7(t) = T_W_Tracker(t + offset) × T_Tracker_Link7``，再以
-裁剪后首帧为参考 ``T_Link7_start_Link7(t) = inverse(T_W_Link7(t0)) × T_W_Link7(t)``。
+几何约定：``T_W_TCP(t) = T_W_Tracker(t + offset) × T_Tracker_TCP``，再以
+裁剪后首帧为参考 ``T_TCPstart_TCP(t) = inverse(T_W_TCP(t0)) × T_W_TCP(t)``。
 ``qpos`` 每行为 ``[x, y, z, qx, qy, qz, qw, gripper]``，位置单位米，夹爪 [0,1]。
 
 首尾因缺少插值支撑可以裁剪；帧间隔异常、拟合帧率偏差、有效帧率不足、高帧率
@@ -52,7 +52,7 @@ HEAD_TAIL_TRIMMED = "HEAD_TAIL_TRIMMED"
 
 @dataclass(frozen=True)
 class Link7SyncConfig:
-    """Link7 同步与质量门限。"""
+    """示教轨迹同步与质量门限。"""
 
     max_pose_gap_s: float = 0.10
     max_gripper_gap_s: float = 0.20
@@ -61,7 +61,7 @@ class Link7SyncConfig:
 
 @dataclass
 class Link7Episode:
-    """完成同步和 Link7 相对变换的 episode；图像以位置索引引用源序列。"""
+    """完成同步和 TCP 相对变换的 episode；图像以位置索引引用源序列。"""
 
     selection: FrameSelection
     """裁剪后的选帧（名义时间、丢帧、匹配误差均已按首帧重算）。"""
@@ -70,8 +70,8 @@ class Link7Episode:
     tracker_tracking_ok: np.ndarray
     pose_gap_ms: np.ndarray
     gripper_gap_ms: np.ndarray
-    world_from_start_link7: np.ndarray
-    """裁剪后首帧的 ``T_W_Link7``，用于追溯。"""
+    world_from_start_tcp: np.ndarray
+    """裁剪后首帧的 ``T_W_TCP``，用于追溯。"""
 
     def __len__(self) -> int:
         """输出帧数。"""
@@ -209,21 +209,21 @@ def synchronize_link7_episode(
     poses: Sequence[PoseSample],
     grippers: Sequence[GripperSample],
     tracker_statuses: Sequence[TrackerStatusSample],
-    tracker_to_link7: np.ndarray,
+    tracker_to_tcp: np.ndarray,
     nominal_source_fps: float,
     config: Link7SyncConfig = Link7SyncConfig(),
     tracker_time_offset_ns: int = 0,
     gripper_field: str = "filtered_openness",
     gripper_interpolation: str = "linear",
 ) -> Link7SyncResult:
-    """同步一条 episode 并转换到起始 Link7 相对坐标系。
+    """同步一条 episode 并转换到起始 TCP 相对坐标系。
 
     Args:
         image_timestamps_ns: episode 范围内按解码顺序排列的源图像时间。
         poses: 世界系 Tracker 位姿。
         grippers: 夹爪估计（带源图像时间）。
         tracker_statuses: Tracker 跟踪状态，新格式必须存在。
-        tracker_to_link7: ``T_Tracker_Link7``。
+        tracker_to_tcp: ``T_Tracker_TCP``。
         nominal_source_fps: 标称源帧率，决定选帧路径。
         config: 同步与质量门限。
         tracker_time_offset_ns: Tracker 查询时间相对图像时间的偏移。
@@ -329,7 +329,7 @@ def synchronize_link7_episode(
     positions = np.asarray([record[0][0] for record in kept_records], dtype=np.float64)
     quaternions = np.asarray([record[0][1] for record in kept_records], dtype=np.float64)
     relative_positions, relative_quaternions = transform_series_to_episode_frame(
-        positions, quaternions, tracker_to_link7
+        positions, quaternions, tracker_to_tcp
     )
     openness = np.asarray([record[1][0] for record in kept_records], dtype=np.float64)
     qpos = np.concatenate(
@@ -368,6 +368,6 @@ def synchronize_link7_episode(
         tracker_tracking_ok=np.ones(len(kept), dtype=bool),
         pose_gap_ms=np.asarray([record[0][2] for record in kept_records], dtype=np.float32),
         gripper_gap_ms=np.asarray([record[1][2] for record in kept_records], dtype=np.float32),
-        world_from_start_link7=pose_to_matrix(positions[0], quaternions[0]) @ tracker_to_link7,
+        world_from_start_tcp=pose_to_matrix(positions[0], quaternions[0]) @ tracker_to_tcp,
     )
     return Link7SyncResult(episode, [], warnings, stats)

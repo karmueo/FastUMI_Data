@@ -12,6 +12,8 @@ MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 NUM_EPOCHS="${NUM_EPOCHS:-120}"
 LEARNING_RATE="${LEARNING_RATE:-3.0e-4}"
 FINETUNE_CKPT="${FINETUNE_CKPT:-}"
+# fastumi-tcp-v1 数据须改用 train_diffusion_unet_timm_fastumi_tcp_workspace。
+CONFIG_NAME="${CONFIG_NAME:-train_diffusion_unet_timm_vr_umi_workspace}"
 
 for name in NUM_PROCESSES TRAIN_BATCH_SIZE VAL_BATCH_SIZE NUM_EPOCHS; do
   value="${!name}"
@@ -57,6 +59,7 @@ printf '  train batch per GPU: %s\n' "$TRAIN_BATCH_SIZE"
 printf '  validation batch per GPU: %s\n' "$VAL_BATCH_SIZE"
 printf '  global train batch: %s\n' "$GLOBAL_BATCH_SIZE"
 printf '  mixed precision: %s\n' "$MIXED_PRECISION"
+printf '  config: %s\n' "$CONFIG_NAME"
 printf '  dataset: %s\n' "$DATASET"
 printf '  epochs: %s\n' "$NUM_EPOCHS"
 printf '  learning rate: %s\n' "$LEARNING_RATE"
@@ -77,7 +80,7 @@ if ((NUM_PROCESSES > 1)); then
 fi
 
 TRAIN_ARGS=(
-  --config-name=train_diffusion_unet_timm_vr_umi_workspace
+  "--config-name=$CONFIG_NAME"
   "task.dataset_path=$DATASET"
   "hydra.run.dir=$RUN_DIR"
   "training.num_epochs=$NUM_EPOCHS"

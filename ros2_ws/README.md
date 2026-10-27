@@ -24,7 +24,7 @@ VIVE Tracker 位姿采集、夹爪开度估计、连续 MCAP 录制与离线转�
 | [`fastumi_rviz_plugins`](src/fastumi_rviz_plugins/) | C++ RViz2 插件包 | 提供 MCAP 回放标注面板，显示传感器状态并控制 episode、播放和保存。 |
 | [`fastumi_rm75`](src/fastumi_rm75/) | Python 部署包 | 将策略相对 TCP 目标安全映射到 RM75，并适配标准平行夹爪控制接口。 |
 | [`unitree_gripper`](src/unitree_gripper/) | Python 控制包 | 控制 Unitree Dex1-1 夹爪，并发布真实开度；x86 服务端及 DDS 运行库位于包内 `deps`。 |
-| [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，发布 RM75 Link7 扩散策略推荐序列。 |
+| [`dp_infer`](src/dp_infer/) | Python 推理包 | 订阅图像、关节和夹爪观测，运行 Link7 或 UMI TCP 扩散策略，发布 RM75 Link7 推荐序列。 |
 | [`fastumi_camera_calibration`](src/fastumi_camera_calibration/) | Python 标定包 | 从 MCAP 提取图像并调用独立 Kalibr overlay。 |
 | [`fastumi_umi_tcp_calibration`](src/fastumi_umi_tcp_calibration/) | Python 标定包 | 从 MCAP 双 ArUco 图像离线标定 UMI 相机到 TCP 的固定变换。 |
 | [`stereo_camera`](src/stereo_camera/) | C++ 驱动包 | 发布 V4L2 双目相机图像。 |
@@ -183,7 +183,7 @@ PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–�
 | `episode_manager` | 提供 episode 开始、停止和放弃服务，并发布边界事件。 |
 | `episode_command` | 从命令行调用 episode 控制服务。 |
 | `record_session` | 连续录制一场 MCAP 会话并保存配置和标定快照。 |
-| `convert_mcap` | 批量把 MCAP 记录转换为 30 Hz Link7 HDF5 与合并 `fastumi-rm75-link7-v1` Zarr，并输出报告和清单。 |
+| `convert_mcap` | 批量把 MCAP 记录转换为 30 Hz UMI TCP 轨迹 HDF5，并导出 LeRobot v3.0 数据集（默认）或 `fastumi-tcp-v1` Zarr，同时输出报告和清单。 |
 | `calibrate_tracker_tcp` | 求解 Tracker 到 TCP 的刚体外参。 |
 | `calibrate_tracker_camera` | 从录包数据求解 Tracker 与相机间的手眼关系。 |
 | `calibrate_aruco_tcp` | 通过 ArUco 观测估计相机/Tracker 到 TCP 的标定关系。 |
@@ -239,7 +239,7 @@ PDF 和日志。命令入口为 `calibrate_camera_intrinsics`，与 Tracker–�
 
 ### `dp_infer`
 
-该包在独立 `.venv-dp` 环境中运行 Link7 扩散策略，订阅
+该包在独立 `.venv-dp` 环境中运行 Link7 或 UMI TCP 扩散策略（TCP checkpoint 需部署外参换算），订阅
 `/usb_camera/image_raw`、`/joint_states` 和 `/gripper/openness`，发布
 `fastumi_interfaces/PolicyActionSequence`。它自带模型推理所需的本地 Python
 模块，checkpoint 和训练 URDF 由启动参数指定。构建和 ROS 2 启动命令见

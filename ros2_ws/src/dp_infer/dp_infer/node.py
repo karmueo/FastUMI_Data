@@ -16,9 +16,10 @@ from std_srvs.srv import Trigger
 from fastumi_interfaces.msg import PolicyActionSequence
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
-from dp_infer.core import (InferenceContext, JOINT_NAMES, PolicyEngine, build_observations,
-                             image_to_rgb, letterbox_rgb, load_processors, ordered_joints,
-                             validate_urdf)
+from dp_infer.core import (DEFAULT_MAX_TCP_AXIS_DEG, InferenceContext, JOINT_NAMES, PolicyEngine,
+                             build_observations, compare_tcp_frames, contract_end_frame,
+                             image_to_rgb, letterbox_rgb, load_deploy_tcp, load_processors,
+                             ordered_joints, validate_urdf)
 from dp_infer.synchronizer import ObservationBuffer
 
 
@@ -61,6 +62,9 @@ class DpInferenceNode(Node):
             "reset_service": "/fastumi/policy/reset_episode", "sync_slop_s": 0.05,
             "input_timeout_s": 0.2, "history_tolerance_s": 0.015,
             "max_inference_hz": 10.0, "result_timeout_s": 0.5, "postprocessors": "",
+            # TCP checkpoint 必填：部署相机←Link7 与部署相机←TCP 外参。
+            "end_camera_extrinsic": "", "deploy_tcp_extrinsic": "",
+            "max_tcp_axis_deg": DEFAULT_MAX_TCP_AXIS_DEG,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -89,6 +93,9 @@ class DpInferenceNode(Node):
         expected_urdf_sha256 = getattr(engine, "urdf_sha256",  # 注入引擎已完成契约校验时复用其摘要。
                                        self.parameter("expected_urdf_sha256"))
         validate_urdf(urdf_path, engine.cfg, expected_urdf_sha256)
+        self.end_frame = contract_end_frame(engine.cfg)  # 策略末端：Link7 或 tcp。
+        self.link7_from_tool = self.load_tool_offset(engine.cfg)  # T_Link7_TCP，Link7 契约为单位阵。
+        self.link7_from_tool.setflags(write=False)
         self.fk = UrdfKinematics(urdf_path, JOINT_NAMES)
         self.engine = engine  # 只由工作线程调用的策略实例。
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dp_infer_policy")
@@ -107,11 +114,40 @@ class DpInferenceNode(Node):
                                                     qos_profile_sensor_data)
         self.reset_service = self.create_service(Trigger, self.parameter("reset_service"), self.on_reset)
         self.timer = self.create_timer(0.01, self.tick)
-        self.get_logger().info("DP inference ready: base_link -> Link7, 16 steps at 30 Hz")
+        self.get_logger().info(
+            f"DP inference ready: base_link -> {self.end_frame} observations, "
+            "Link7 targets, 16 steps at 30 Hz")
 
     def parameter(self, name):
         """读取启动时声明的 ROS 参数值。"""
         return self.get_parameter(name).value
+
+    def load_tool_offset(self, cfg):
+        """返回 ``T_Link7_TCP``；Link7 checkpoint 为单位阵且不得配置部署 TCP 外参。
+
+        TCP checkpoint 要求 ``end_camera_extrinsic`` 与 ``deploy_tcp_extrinsic``，并用 checkpoint
+        内嵌的示教 ``umi_camera_from_tcp`` 核对两端 TCP 轴向约定。
+
+        Raises:
+            ValueError: 外参缺失、非法或两端 TCP 轴向不一致。
+        """
+        end_path, tcp_path = self.parameter("end_camera_extrinsic"), self.parameter("deploy_tcp_extrinsic")
+        if self.end_frame == "Link7":
+            if end_path or tcp_path:
+                raise ValueError("Link7 checkpoints do not use end_camera_extrinsic/deploy_tcp_extrinsic")
+            return np.eye(4)
+        if not end_path or not tcp_path:
+            raise ValueError("TCP checkpoints require end_camera_extrinsic and deploy_tcp_extrinsic")
+        link7_from_tcp, camera_from_tcp = load_deploy_tcp(end_path, tcp_path)
+        umi_camera_from_tcp = getattr(cfg.task.contract, "umi_camera_from_tcp", None)
+        if umi_camera_from_tcp is None:
+            raise ValueError("TCP checkpoint must embed umi_camera_from_tcp")
+        offset_mm, angle_deg = compare_tcp_frames(
+            umi_camera_from_tcp, camera_from_tcp, self.parameter("max_tcp_axis_deg"))
+        self.get_logger().info(
+            f"Deployment TCP: Link7->TCP {np.linalg.norm(link7_from_tcp[:3, 3]) * 1000:.1f} mm; "
+            f"camera->TCP differs from UMI by {offset_mm:.1f} mm / {angle_deg:.2f} deg")
+        return link7_from_tcp
 
     def warn(self, text):
         """节流报告无效输入或被丢弃的结果，避免高频传感器刷屏。"""
@@ -126,10 +162,11 @@ class DpInferenceNode(Node):
             self.warn(f"Dropped image: {error}")
 
     def on_joint(self, message):
-        """重排七轴角度并执行 FK，缓存 base_link 下的 Link7 位姿。"""
+        """重排七轴角度并执行 FK，缓存 base_link 下的策略末端（Link7 或 TCP）位姿。"""
         try:
             angles = ordered_joints(list(message.name), message.position)
-            self.buffer.add_pose(stamp_ns(message.header.stamp), self.fk.forward(angles))
+            self.buffer.add_pose(stamp_ns(message.header.stamp),
+                                 self.fk.forward(angles) @ self.link7_from_tool)
         except (ValueError, TypeError) as error:
             self.warn(f"Dropped joint state: {error}")
 
@@ -179,7 +216,8 @@ class DpInferenceNode(Node):
         if history is not None:
             reference = history[-1].pose.copy()
             reference.setflags(write=False)
-            context = InferenceContext(reference, history[-1].stamp_ns, self.buffer.episode_id, 0)
+            context = InferenceContext(reference, history[-1].stamp_ns, self.buffer.episode_id, 0,
+                                       self.link7_from_tool)
             self.pending = (build_observations(history, self.buffer.start_pose), context)
         if self.future is not None or self.pending is None or time.monotonic() - self.last_started_s < self.period_s:
             return
@@ -188,7 +226,8 @@ class DpInferenceNode(Node):
         if not 0 <= now_ns - context.stamp_ns <= self.buffer.timeout_ns:
             return
         self.sequence_id += 1
-        context = InferenceContext(context.reference_pose, context.stamp_ns, context.episode_id, self.sequence_id)
+        context = InferenceContext(context.reference_pose, context.stamp_ns, context.episode_id,
+                                   self.sequence_id, context.link7_from_tool)
         self.active_context = context
         self.last_started_s = time.monotonic()
         self.future = self.worker.submit(self.engine.predict, observations, context)

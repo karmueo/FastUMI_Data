@@ -1,4 +1,4 @@
-# 本文件定义 RM75 Link7 DP 推理节点的 ROS 参数及默认输入输出话题。
+# 本文件定义 RM75 DP 推理节点（Link7 或 UMI TCP checkpoint）的 ROS 参数及默认输入输出话题。
 dp_infer:
   ros__parameters:
     checkpoint: ""
@@ -17,3 +17,9 @@ dp_infer:
     max_inference_hz: 10.0
     result_timeout_s: 0.5
     postprocessors: ""
+    # 仅 TCP checkpoint（fastumi-tcp-v1 训练）使用：部署相机←Link7 与部署相机←TCP 外参，
+    # 例如仓库 config/calibration/T_cam_end.yaml 与 T_d_cam_tcp.yaml；Link7 checkpoint 必须留空。
+    end_camera_extrinsic: ""
+    deploy_tcp_extrinsic: ""
+    # 示教 TCP 与部署 TCP 坐标轴允许的最大夹角（度）。
+    max_tcp_axis_deg: 10.0

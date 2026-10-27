@@ -1,6 +1,14 @@
-"""构造训练一致的 UMI 观测，执行推理并将相对动作还原为绝对目标序列。"""
+"""构造训练一致的 UMI 观测，执行推理并将相对动作还原为绝对目标序列。
 
-from dataclasses import dataclass
+checkpoint 的末端契约有两种：
+
+- ``Link7``：训练位姿即 Link7，工具偏移为单位阵（旧 Link7 数据）。
+- ``tcp``：训练位姿为夹爪抓取中心 TCP（``fastumi-tcp-v1``）。部署端用
+  ``T_Link7_TCP = inverse(T_cam_end) × T_d_cam_tcp`` 把 FK 得到的 Link7 换算为 TCP 作为观测，
+  再把预测的 TCP 目标右乘 ``inverse(T_Link7_TCP)`` 还原为 Link7 目标发布。
+"""
+
+from dataclasses import dataclass, field
 import hashlib
 import importlib
 from pathlib import Path
@@ -8,6 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
+import yaml
 
 from diffusion_policy.common.pose_repr_util import convert_pose_mat_rep
 from umi.common.pose_util import mat_to_pose10d, pose10d_to_mat
@@ -22,6 +31,15 @@ OBS_SHAPES = {
     "robot0_gripper_width": (1,),
     "robot0_eef_rot_axis_angle_wrt_start": (6,),
 }
+# 两种可部署 checkpoint 契约的共同部分。
+COMMON_CONTRACT = {"base_frame": "base_link", "gripper_representation": "normalized_0_1",
+                   "action_reference": "current_observed_end_frame", "frequency_hz": 30}
+# 末端坐标系 → 该契约要求的工具偏移声明。
+END_FRAME_TOOL_OFFSETS = {"Link7": "identity", "tcp": "deployment_calibration"}
+# 示教 TCP 与部署 TCP 坐标轴允许的最大夹角（度）；超过说明两端 TCP 轴向约定不一致。
+DEFAULT_MAX_TCP_AXIS_DEG = 10.0
+# 齐次刚体变换合法性检查的数值容差。
+_ROTATION_TOLERANCE = 1e-5
 
 
 def ordered_joints(names, positions):
@@ -61,11 +79,11 @@ def letterbox_rgb(rgb, size=224):
 
 @dataclass(frozen=True)
 class Observation:
-    """一个已同步观测：ROS 纳秒时间、CHW RGB、base→Link7 变换与归一化夹爪。"""
+    """一个已同步观测：ROS 纳秒时间、CHW RGB、base→策略末端变换与归一化夹爪。"""
 
     stamp_ns: int  # 图像采集时间。
     image: np.ndarray  # [3,224,224] 浮点 RGB。
-    pose: np.ndarray  # [4,4] 米制绝对位姿。
+    pose: np.ndarray  # [4,4] 米制绝对位姿，末端为 checkpoint 契约的 Link7 或 TCP。
     gripper: float  # 训练使用的归一化开度。
 
 
@@ -73,10 +91,12 @@ class Observation:
 class InferenceContext:
     """一次推理固定的参考状态；传入后处理器，不随实时订阅更新。"""
 
-    reference_pose: np.ndarray  # 本次最新观测的 base→Link7 变换。
+    reference_pose: np.ndarray  # 本次最新观测的 base→策略末端（Link7 或 TCP）变换。
     stamp_ns: int  # 本次最新图像采集时间。
     episode_id: int  # 重置时递增的 episode 标识。
     sequence_id: int  # 每次提交推理时递增的编号。
+    # T_Link7_TCP；Link7 契约为单位阵。解码时用它把策略末端目标还原为 Link7 目标。
+    link7_from_tool: np.ndarray = field(default_factory=lambda: np.eye(4))
 
 
 @dataclass
@@ -128,7 +148,11 @@ def validate_sequence(sequence):
 
 
 def decode_actions(actions, context):
-    """把 [16,10] 相对动作左乘冻结观测位姿，输出完整绝对目标；拒绝退化 6D 旋转。"""
+    """把 [16,10] 相对动作左乘冻结观测位姿并换算为 Link7，输出完整绝对目标；拒绝退化 6D 旋转。
+
+    ``T_base_Link7 = T_base_tool(ref) × relative × inverse(T_Link7_tool)``，Link7 契约下
+    ``T_Link7_tool`` 为单位阵。
+    """
     values = np.asarray(actions, dtype=np.float64)
     if values.shape != (16, 10) or not np.isfinite(values).all():
         raise ValueError("Expected finite [16,10] actions")
@@ -140,7 +164,8 @@ def decode_actions(actions, context):
     orthogonal = second - np.sum(second * unit, axis=-1, keepdims=True) * unit
     if np.any(np.linalg.norm(orthogonal, axis=-1) < 1e-8):
         raise ValueError("Degenerate second rotation axis")
-    matrices = context.reference_pose @ pose10d_to_mat(values[:, :9])
+    matrices = (context.reference_pose @ pose10d_to_mat(values[:, :9])
+                @ np.linalg.inv(context.link7_from_tool))
     return validate_sequence(ActionSequence(
         matrices[:, :3, 3], Rotation.from_matrix(matrices[:, :3, :3]).as_quat(),
         values[:, 9], np.arange(16) / 30.0,
@@ -159,14 +184,24 @@ def load_processors(specifications):
     return processors
 
 
+def contract_end_frame(cfg):
+    """返回 checkpoint 契约的末端坐标系 ``Link7`` 或 ``tcp``；其他取值抛出 ValueError。"""
+    contract = getattr(cfg.task, "contract", None)  # 兼容 OmegaConf 与测试注入的简单对象。
+    end_frame = getattr(contract, "end_frame", None) if contract is not None else None
+    if end_frame not in END_FRAME_TOOL_OFFSETS:
+        raise ValueError(f"Unsupported checkpoint end_frame: {end_frame!r}")
+    return end_frame
+
+
 def validate_contract(cfg, expected_urdf_sha256=None):
-    """限制为当前 RM75 五键/10D/30Hz 契约，并返回可信的训练 URDF 摘要。"""
+    """限制为当前 RM75 五键/10D/30Hz 契约（Link7 或 TCP 末端），并返回可信的训练 URDF 摘要。"""
     contract = cfg.task.get("contract", {})
-    expected = {"base_frame": "base_link", "end_frame": "Link7", "tool_offset": "identity",
-                "gripper_representation": "normalized_0_1",
-                "action_reference": "current_observed_end_frame", "frequency_hz": 30}
-    if any(contract.get(key) != value for key, value in expected.items()):
-        raise ValueError("Checkpoint does not match the RM75 Link7 deployment contract")
+    end_frame = contract.get("end_frame")
+    expected = dict(COMMON_CONTRACT, end_frame=end_frame,
+                    tool_offset=END_FRAME_TOOL_OFFSETS.get(end_frame))
+    if end_frame not in END_FRAME_TOOL_OFFSETS or any(
+            contract.get(key) != value for key, value in expected.items()):
+        raise ValueError("Checkpoint does not match the RM75 Link7/TCP deployment contract")
     shape_meta = cfg.shape_meta
     urdf_sha256 = contract.get("urdf_sha256") or expected_urdf_sha256
     if (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64
@@ -205,6 +240,77 @@ def validate_urdf(urdf_path, cfg, expected_urdf_sha256=None):
         )
 
 
+def _rigid_transform(value, name):
+    """要求 4×4 有限齐次刚体变换，返回 float64 副本；否则抛出 ValueError。"""
+    try:
+        matrix = np.array(value, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} is not a numeric matrix") from error
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise ValueError(f"{name} must be a finite 4x4 matrix")
+    rotation = matrix[:3, :3]
+    if (not np.allclose(matrix[3], [0, 0, 0, 1], atol=1e-9)
+            or not np.allclose(rotation.T @ rotation, np.eye(3), atol=_ROTATION_TOLERANCE)
+            or abs(np.linalg.det(rotation) - 1) > _ROTATION_TOLERANCE):
+        raise ValueError(f"{name} must be a rigid transform")
+    return matrix
+
+
+def _read_yaml(path, name):
+    """读取 YAML 映射；文件缺失或格式错误时抛出 ValueError。"""
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f"{name} must name an existing file: {path}")
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{name} {path} must be a YAML mapping")
+    return document
+
+
+def load_deploy_tcp(end_camera_path, deploy_tcp_path):
+    """读取部署外参，返回 ``(T_Link7_TCP, T_Cd_TCP)``，平移单位米。
+
+    Args:
+        end_camera_path: ``T_cam_end.yaml``，``cam0.T_cam_hand`` 为部署相机←Link7。
+        deploy_tcp_path: ``T_d_cam_tcp.yaml``，顶层 ``T_d_cam_tcp`` 为部署相机←TCP。
+
+    Raises:
+        ValueError: 文件缺失、缺少矩阵或矩阵不是刚体变换。
+    """
+    end = _read_yaml(end_camera_path, "end_camera_extrinsic").get("cam0") or {}
+    if "T_cam_hand" not in end:
+        raise ValueError(f"{end_camera_path} is missing cam0.T_cam_hand")
+    camera_from_link7 = _rigid_transform(end["T_cam_hand"], "T_cam_end")
+    document = _read_yaml(deploy_tcp_path, "deploy_tcp_extrinsic")
+    if "T_d_cam_tcp" not in document:
+        raise ValueError(f"{deploy_tcp_path} is missing T_d_cam_tcp")
+    camera_from_tcp = _rigid_transform(document["T_d_cam_tcp"], "T_d_cam_tcp")
+    return np.linalg.inv(camera_from_link7) @ camera_from_tcp, camera_from_tcp
+
+
+def compare_tcp_frames(umi_camera_from_tcp, deploy_camera_from_tcp,
+                       max_axis_deg=DEFAULT_MAX_TCP_AXIS_DEG):
+    """比较示教与部署两端的相机←TCP 外参，返回 ``(平移差 mm, 旋转差 度)``。
+
+    两端 TCP 视为同一物理点，坐标轴必须采用同一约定。旋转差超过 ``max_axis_deg``
+    说明轴向约定不一致（常见为 90°/180°），继续部署会让相对动作整体错乱。
+    平移差和较小的旋转差来自两套夹具/相机安装差异，只影响图像视角，返回供日志记录。
+
+    Raises:
+        ValueError: 矩阵非法或旋转差超过阈值。
+    """
+    umi = _rigid_transform(umi_camera_from_tcp, "umi_camera_from_tcp")
+    deploy = _rigid_transform(deploy_camera_from_tcp, "T_d_cam_tcp")
+    difference = np.linalg.inv(umi) @ deploy
+    angle = float(np.degrees(np.linalg.norm(Rotation.from_matrix(difference[:3, :3]).as_rotvec())))
+    offset_mm = float(np.linalg.norm(difference[:3, 3]) * 1000)
+    if angle > max_axis_deg:
+        raise ValueError(
+            f"UMI and deployment TCP axes differ by {angle:.1f} deg (> {max_axis_deg} deg); "
+            "both TCP frames must use the same axis convention")
+    return offset_mm, angle
+
+
 class PolicyEngine:
     """单线程使用的策略实例；ROS 层负责调度，模型依赖仅在创建时导入。"""
 
@@ -214,6 +320,7 @@ class PolicyEngine:
 
         self.policy, self.cfg = load_policy(checkpoint, device)
         self.urdf_sha256 = validate_contract(self.cfg, expected_urdf_sha256)
+        self.end_frame = contract_end_frame(self.cfg)  # 策略末端：Link7 或 tcp。
         self.device = device  # 推理张量所在设备。
         self.processors = list(processors)  # 已构造的后处理扩展。
 

@@ -1,9 +1,9 @@
-"""把多条 ``fastumi_ros2_link7_v1`` HDF5 合并导出为 ``fastumi-rm75-link7-v1`` Zarr。
+"""把多条 ``fastumi_ros2_tcp_v1`` HDF5 合并导出为 ``fastumi-tcp-v1`` Zarr。
 
 输出 ReplayBuffer 结构（N 为总帧数）::
 
     data/camera0_rgb               (N, 224, 224, 3) uint8，JPEG XL 无损，每帧一个 chunk
-    data/robot0_eef_pos            (N, 3) float32，episode 起始 Link7 系，米
+    data/robot0_eef_pos            (N, 3) float32，episode 起始 UMI TCP 系，米
     data/robot0_eef_rot_axis_angle (N, 3) float32，旋转向量，弧度
     data/robot0_gripper_width      (N, 1) float32，归一化开度 [0,1]
     data/robot0_demo_start_pose    (N, 6) float32，本段首帧 [xyz, rotvec]
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -37,14 +36,19 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from fastumi_data.jxl_codec import load_codecs, lossless_jpegxl
+from fastumi_data.link7_arrays import (  # noqa: F401  旧调用方仍从本模块导入
+    IMAGE_SIZE,
+    letterbox_rgb_uint8,
+    numeric_episode,
+    to_jsonable,
+)
 from fastumi_data.link7_hdf5 import count_link7_images, iter_link7_images, read_link7_arrays
 
 
-ZARR_FORMAT = "fastumi-rm75-link7-v1"
-IMAGE_SIZE = 224
+# 坐标语义改为 UMI TCP 后的格式名；旧 ``fastumi-rm75-link7-v1`` 存储 Link7 位姿。
+ZARR_FORMAT = "fastumi-tcp-v1"
 # 图像逐批写入及回读校验的帧数。
 _IMAGE_BATCH = 64
 # 图像任务切片的帧数：并行调度与进度回报的粒度。
@@ -65,10 +69,12 @@ ROOT_CONTRACT: Dict[str, Any] = {
     "image_size": IMAGE_SIZE,
     "action_layout": "pose10",
     "stored_action_layout": "xyz_rotvec_gripper",
-    "pose_frame": "episode_start_link7",
+    "pose_frame": "episode_start_tcp",
     "deployment_base_frame": "base_link",
-    "end_frame": "Link7",
-    "tool_offset": np.eye(4).tolist(),
+    "end_frame": "tcp",
+    "tcp_definition": "gripper_grasp_center",
+    # 部署端 Link7→TCP 由推理节点从 T_cam_end 与 T_d_cam_tcp 计算，不写死在数据里。
+    "tool_offset": "deployment_calibration",
     "position_unit": "m",
     "rotation_unit": "rad",
     "gripper_representation": "normalized_0_1",
@@ -101,46 +107,6 @@ class ZarrEpisodeSource:
     metadata: Dict[str, Any]
 
 
-def letterbox_rgb_uint8(rgb: np.ndarray, size: int = IMAGE_SIZE) -> np.ndarray:
-    """与部署 ``letterbox_rgb`` 相同的缩放、居中黑边，返回 ``(size, size, 3)`` uint8。"""
-    height, width = rgb.shape[:2]
-    scale = size / max(height, width)
-    resized = cv2.resize(
-        rgb,
-        (max(1, round(width * scale)), max(1, round(height * scale))),
-        interpolation=cv2.INTER_AREA,
-    )
-    output = np.zeros((size, size, 3), dtype=np.uint8)
-    y, x = (size - resized.shape[0]) // 2, (size - resized.shape[1]) // 2
-    output[y:y + resized.shape[0], x:x + resized.shape[1]] = resized
-    return output
-
-
-def numeric_episode(arrays: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-    """把 HDF5 的 qpos/action（xyz + 四元数 xyzw + 夹爪）转换为 Zarr 数值数组。"""
-    qpos = np.asarray(arrays["qpos"], dtype=np.float64)
-    action = np.asarray(arrays["action"], dtype=np.float64)
-    position = qpos[:, :3]
-    rotvec = Rotation.from_quat(qpos[:, 3:7]).as_rotvec()
-    action_rotvec = Rotation.from_quat(action[:, 3:7]).as_rotvec()
-    start = np.concatenate((position[:1], rotvec[:1]), axis=1)
-    count = len(qpos)
-    return {
-        "robot0_eef_pos": position.astype(np.float32),
-        "robot0_eef_rot_axis_angle": rotvec.astype(np.float32),
-        "robot0_gripper_width": qpos[:, 7:8].astype(np.float32),
-        "robot0_demo_start_pose": np.repeat(start, count, axis=0).astype(np.float32),
-        "action": np.concatenate(
-            (action[:, :3], action_rotvec, action[:, 7:8]), axis=1
-        ).astype(np.float32),
-        "timestamp": np.asarray(arrays["timestamp"], dtype=np.float64),
-        "nominal_timestamp_ns": np.asarray(arrays["nominal_timestamp_ns"], dtype=np.int64),
-        "image_timestamp_ns": np.asarray(arrays["image_timestamp_ns"], dtype=np.int64),
-        "source_image_index": np.asarray(arrays["source_image_index"], dtype=np.int64),
-        "dropped_frames_before": np.asarray(arrays["dropped_frames_before"], dtype=np.int32),
-    }
-
-
 def _check_episode_arrays(name: str, values: Dict[str, np.ndarray]) -> None:
     """导出前检查单条 episode 的数值、单调性和夹爪范围。"""
     for key in ("robot0_eef_pos", "robot0_eef_rot_axis_angle", "action", "timestamp"):
@@ -154,21 +120,6 @@ def _check_episode_arrays(name: str, values: Dict[str, np.ndarray]) -> None:
             raise ValueError(f"{name} 的 {key} 不是严格递增")
     if np.any(values["source_image_index"] < 0):
         raise ValueError(f"{name} 的 source_image_index 含负值")
-
-
-def to_jsonable(value: Any) -> Any:
-    """把含 NumPy 标量/数组的嵌套结构转换为纯 JSON 类型。"""
-
-    def default(item):
-        if isinstance(item, np.generic):
-            return item.item()
-        if isinstance(item, np.ndarray):
-            return item.tolist()
-        if isinstance(item, Path):
-            return str(item)
-        raise TypeError(f"无法序列化 {type(item).__name__}")
-
-    return json.loads(json.dumps(value, default=default))
 
 
 def export_link7_zarr(

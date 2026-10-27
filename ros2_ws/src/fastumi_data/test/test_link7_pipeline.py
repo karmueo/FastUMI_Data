@@ -1,4 +1,4 @@
-"""端到端验证 convert_mcap：MCAP→Link7 HDF5→合并 Zarr、身份预检、失败行为与校验器。"""
+"""端到端验证 convert_mcap：MCAP→TCP 轨迹 HDF5→合并 Zarr、身份预检、失败行为与校验器。"""
 
 from __future__ import annotations
 
@@ -57,9 +57,9 @@ def calibration(tmp_path: Path) -> dict:
                         "time_offset": 0.010}),
         encoding="utf-8",
     )
-    end = directory / "T_cam_end.yaml"
-    end.write_text(
-        yaml.safe_dump({"cam0": {"T_cam_hand": transform([-0.3, 0.1, 0.0], [0.0, 0.09, -0.01])}}),
+    umi_tcp = directory / "T_u_cam_tcp.yaml"
+    umi_tcp.write_text(
+        yaml.safe_dump({"T_u_cam_tcp": transform([-0.3, 0.1, 0.0], [0.0, 0.07, 0.21])}),
         encoding="utf-8",
     )
     (directory / "T_cam_tracker.binding.yaml").write_text(
@@ -76,7 +76,7 @@ def calibration(tmp_path: Path) -> dict:
     )
     urdf = directory / "robot.urdf"
     urdf.write_text("<robot name='rm75'/>\n", encoding="utf-8")
-    return {"tracker": tracker, "end": end, "urdf": urdf}
+    return {"tracker": tracker, "umi_tcp": umi_tcp, "urdf": urdf}
 
 
 def make_record(root: Path, task: str, name: str, mode="compressed", frames=80,
@@ -112,12 +112,14 @@ def make_record(root: Path, task: str, name: str, mode="compressed", frames=80,
     return record
 
 
-def arguments(source: Path, output: Path, calibration: dict, *extra: str) -> list:
-    """组装 convert_mcap 参数。"""
+def arguments(source: Path, output: Path, calibration: dict, *extra: str,
+              output_format: str = "zarr") -> list:
+    """组装 convert_mcap 参数；本文件验证旧 Zarr 模式，缺省显式指定 ``--output-format zarr``。"""
     return [
         str(source), "--output-dir", str(output), "--urdf", str(calibration["urdf"]),
         "--tracker-camera-extrinsic", str(calibration["tracker"]),
-        "--end-camera-extrinsic", str(calibration["end"]), *extra,
+        "--umi-tcp-extrinsic", str(calibration["umi_tcp"]),
+        "--output-format", output_format, *extra,
     ]
 
 
@@ -135,8 +137,8 @@ def test_batch_converts_records_to_link7_hdf5_and_zarr(tmp_path: Path, calibrati
     ]
     hdf5_path = output / "records/task_a/20260101T000000Z_a/episodes/episode_0000.hdf5"
     with h5py.File(hdf5_path, "r") as root:
-        assert root.attrs["schema_version"] == "fastumi_ros2_link7_v1"
-        assert root.attrs["pose_frame"] == "episode_start_link7"
+        assert root.attrs["schema_version"] == "fastumi_ros2_tcp_v1"
+        assert root.attrs["pose_frame"] == "episode_start_tcp"
         assert root.attrs["action_time_reference"] == "image_timestamp"
         assert root.attrs["timestamp_semantics"] == "nominal_frame_time"
         assert root.attrs["selection_path"] == "same_rate"
@@ -153,7 +155,10 @@ def test_batch_converts_records_to_link7_hdf5_and_zarr(tmp_path: Path, calibrati
         hdf5_times = root["observations/timestamp"][:]
     store = zarr.open_group(str(output / "dataset.zarr"), mode="r")
     attrs = dict(store.attrs)
-    assert attrs["format"] == "fastumi-rm75-link7-v1" and attrs["complete"] is True
+    assert attrs["format"] == "fastumi-tcp-v1" and attrs["complete"] is True
+    assert attrs["pose_frame"] == "episode_start_tcp" and attrs["end_frame"] == "tcp"
+    assert attrs["tool_offset"] == "deployment_calibration"
+    assert attrs["umi_camera_from_tcp"] == yaml.safe_load(calibration["umi_tcp"].read_text())["T_u_cam_tcp"]
     assert attrs["frequency"] == 30 and attrs["normalization_contract"] == "fixed-gripper-0-1-v1"
     assert attrs["urdf_sha256"] == hashlib.sha256(
         (output / "snapshots/urdf/robot.urdf").read_bytes()
@@ -710,8 +715,10 @@ def test_configured_image_mode_must_match_bag_message_type(
     assert "image_mode" in error
 
 
-def test_existing_output_and_removed_extrinsic_option_are_rejected(tmp_path, calibration) -> None:
-    """输出目录必须不存在；旧 --extrinsic 给出迁移提示。"""
+def test_existing_output_and_removed_extrinsic_option_are_rejected(
+    tmp_path, calibration, capsys,
+) -> None:
+    """输出目录必须不存在；旧 --extrinsic 与 --end-camera-extrinsic 给出迁移提示。"""
     data = tmp_path / "data"
     make_record(data, "task", "r")
     output = tmp_path / "out"
@@ -720,6 +727,11 @@ def test_existing_output_and_removed_extrinsic_option_are_rejected(tmp_path, cal
         main(arguments(data, output, calibration))
     with pytest.raises(SystemExit):
         main([str(data), "--extrinsic", "x.yaml"])
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        main([str(data), "--output-dir", str(tmp_path / "new"), "--end-camera-extrinsic=x.yaml"])
+    assert "--umi-tcp-extrinsic" in capsys.readouterr().err
+    assert not (tmp_path / "new").exists()
 
 
 def test_discover_sources_accepts_bag_record_and_task_directory(tmp_path) -> None:

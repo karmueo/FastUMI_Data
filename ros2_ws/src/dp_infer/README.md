@@ -3,7 +3,7 @@
 # DP 推理节点
 
 `dp_infer_node` 订阅 USB 相机、RM75 七轴关节状态及归一化夹爪开度，运行
-RM75 `base_link → Link7` 扩散策略，并发布完整推荐目标序列。节点只发布推荐结果，
+RM75 扩散策略（末端为 `Link7` 或 UMI TCP），并发布完整的 `base_link → Link7` 推荐目标序列。节点只发布推荐结果，
 不会向机械臂或夹爪发送控制命令。
 
 本包包含当前 `DiffusionUnetTimmPolicy` checkpoint 推理所需的
@@ -80,8 +80,31 @@ checkpoint 如已内嵌摘要，则以内嵌值为准；使用其他旧 checkpoi
 黑边填充、CHW RGB `[0,1]`；图像内容、相机视角、夹爪开合方向、URDF 与训练
 数据必须对应。缺少输入、时间不同步、历史不足或结果过期时不会发布新序列。
 
+## 末端契约：Link7 与 UMI TCP
+
+checkpoint 的 `task.contract.end_frame` 决定策略末端：
+
+- `Link7`（`tool_offset: identity`）：旧 Link7 数据训练，观测和目标都是 Link7。
+  `end_camera_extrinsic`、`deploy_tcp_extrinsic` 必须留空。
+- `tcp`（`tool_offset: deployment_calibration`）：`convert_mcap` 输出的
+  `fastumi-tcp-v1` 数据训练，策略位姿为夹爪抓取中心 TCP。必须提供部署外参
+  `end_camera_extrinsic`（`T_cam_end.yaml`，`cam0.T_cam_hand` 为相机←Link7）和
+  `deploy_tcp_extrinsic`（`T_d_cam_tcp.yaml`，顶层 `T_d_cam_tcp` 为相机←TCP）。节点计算
+  `T_Link7_TCP = inverse(T_cam_end) × T_d_cam_tcp`，把 FK 得到的 Link7 右乘它作为观测，
+  把预测的 TCP 目标右乘其逆还原为 Link7 目标；输出消息仍为 `end_frame=Link7`。
+
+TCP checkpoint 内嵌示教端 `umi_camera_from_tcp`（`T_u_cam_tcp`）。启动时与部署
+`T_d_cam_tcp` 比较，坐标轴夹角超过 `max_tcp_axis_deg`（默认 10°）说明两端 TCP 轴向约定
+不一致，拒绝启动；否则在日志打印 Link7→TCP 距离和两端相机←TCP 的平移/旋转差。
+
+```bash
+ros2 launch dp_infer dp_infer.launch.py checkpoint:=<tcp.ckpt> urdf_path:=<训练 URDF> \
+  end_camera_extrinsic:=config/calibration/T_cam_end.yaml \
+  deploy_tcp_extrinsic:=config/calibration/T_d_cam_tcp.yaml
+```
+
 模型需要两帧、五键观测，输出 16 个 10D 相对动作；节点按最新关节反馈通过
-训练 URDF 的 FK 转为 16 个绝对 `Link7` 推荐位姿。输出的
+训练 URDF 的 FK（TCP checkpoint 另经 `T_Link7_TCP` 换算）转为 16 个绝对 `Link7` 推荐位姿。输出的
 `header.frame_id=base_link`、`end_frame=Link7`，位置单位米、四元数顺序 xyzw，
 `gripper_openness` 与位姿一一对应。`header.stamp` 是最新观测采集时间，
 `time_from_start[i]=i/30` 秒，所以下游应结合当前时间选择有效目标。默认

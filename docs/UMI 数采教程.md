@@ -2,11 +2,11 @@
 
 # UMI 数采教程
 
-适用链路：手持 UMI 相机 + VIVE Tracker + 图像夹爪开度 → RM75 Link7 位姿策略 → Jetson 实机。全文使用 **MCAP**；采集、转换、训练参考 `scl_dev`，部署参考 **`jetson_dev`**。
+适用链路：手持 UMI 相机 + VIVE Tracker + 图像夹爪开度 → UMI TCP（夹爪抓取中心）位姿策略 → RM75 Jetson 实机。全文使用 **MCAP**；采集、转换、训练参考 `scl_dev`，部署参考 **`jetson_dev`**。
 
 ```text
 标定包 / 机械臂截图与位姿 → 夹爪标定 + Tracker–相机标定 + 机械臂手眼标定
-    → 30 Hz 任务 MCAP → 质检 → Link7 HDF5 + dataset.zarr → DP 训练 / 评估
+    → 30 Hz 任务 MCAP → 质检 → TCP 轨迹 HDF5 + dataset.zarr → DP 训练 / 评估
     → best.ckpt → PyTorch 部署
                 → ONNX / 误差验证 → Jetson TensorRT / 误差验证 → C++ 部署
 ```
@@ -348,13 +348,17 @@ cat "$CALIB_DIR/T_cam_end.yaml"
 
 检查同名 `.txt` 报告及输出目录的 `debug/`；质量门同样为内点率 ≥0.8、平均旋转 ≤1°、平均平移 ≤0.01 m。应有足够多不同旋转轴的有效姿态，图像中标定板清晰、残差无明显异常。
 
-`cam0.T_cam_hand` 必须最终表示 **`T_Cd_Link7`：Link7 → 机械臂相机**。若采样 SDK 返回其他 Hand/TCP 参考，应按已知固定变换换算：`T_Cd_Link7 = T_Cd_Hand × T_Hand_Link7`，核对后再用于转换；脚本不会自动处理该差异。
+`cam0.T_cam_hand` 必须最终表示 **`T_Cd_Link7`：Link7 → 机械臂相机**。若采样 SDK 返回其他 Hand/TCP 参考，应按已知固定变换换算：`T_Cd_Link7 = T_Cd_Hand × T_Hand_Link7`，核对后再用于部署；脚本不会自动处理该差异。
 
-两份外参通过相机参考建立 UMI 与机器人末端的对应关系：
+两端还各需一份相机←TCP（夹爪抓取中心）外参：示教端 `T_u_cam_tcp.yaml`（`fastumi_umi_tcp_calibration`），部署端 `T_d_cam_tcp.yaml`（`keyboard_tag_tcp_capture` 实测 `T_cam_dtag` 乘 `T_d_tag_tcp`）。两端 TCP 视为同一物理点，坐标轴必须采用同一约定。转换只用示教端外参，部署端外参只在推理时使用：
 
 ```text
-T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7
+转换：T_W_TCP(t)   = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_u_cam_tcp
+部署：T_Link7_TCP  = inverse(T_cam_end) × T_d_cam_tcp
+      观测 T_base_TCP = FK(q) × T_Link7_TCP；目标 T_base_Link7 = T_base_TCP目标 × inverse(T_Link7_TCP)
 ```
+
+这样部署抓取中心复现示教抓取中心的轨迹，两端相机相对 TCP 的安装差只表现为图像视角差。部署外参重新标定后只需更新推理参数，不必重新转换和训练。
 
 采集与部署使用相容的相机视角、镜头和图像构图；各相机内参按各自设备填写。重新安装相机或 Tracker 后重新标定。正式采集沿用本次 `v4l2_buffer` 时间戳链路；旧 `callback_now` 数据须使用对应链路的时间标定，不能混用偏移。
 
@@ -423,7 +427,7 @@ ros2 bag info "$RECORD_DIR/raw/bag"
 python analyze_collection_quality.py --input "$TASK_INPUT" \
   --output-dir "$FASTUMI_ROOT/dataset/_analysis/${RUN_ID}_raw" \
   --tracker-camera-extrinsic "$CALIB_DIR/T_cam_tracker.yaml" \
-  --end-camera-extrinsic "$CALIB_DIR/T_cam_end.yaml" \
+  --umi-tcp-extrinsic "$CALIB_DIR/T_u_cam_tcp.yaml" \
   --tracker-serial "$TRACKER_SERIAL" \
   --decode-mode full --plots all --jobs 1 --delete-rejected no
 ```
@@ -467,12 +471,12 @@ cd "$FASTUMI_ROOT"
 python -m fastumi_data.mcap_converter "$TASK_INPUT" \
   --output-dir "$CONVERT_DIR" \
   --tracker-camera-extrinsic "$CALIB_DIR/T_cam_tracker.yaml" \
-  --end-camera-extrinsic "$CALIB_DIR/T_cam_end.yaml" \
+  --umi-tcp-extrinsic "$CALIB_DIR/T_u_cam_tcp.yaml" \
   --tracker-serial "$TRACKER_SERIAL" --urdf "$TRAIN_URDF" \
-  --gripper-source auto --jobs 1
+  --gripper-source auto --jobs 1 --output-format zarr
 ```
 
-使用模块入口以确保读取当前环境中的 Zarr 依赖；`ros2 run ... convert_mcap` 的已安装入口可能使用缺少 Zarr 的系统解释器。输出目录必须尚不存在。多记录可按内存/磁盘条件增加 `--jobs`；初次验证保留串行。
+本节沿用 Diffusion Policy 的 Zarr 训练流程，须显式加 `--output-format zarr`（`convert_mcap` 现在默认导出 LeRobot v3.0 数据集，需要 `--repo-id` 和 LeRobot Python，见 [LeRobot 数据集说明](../ros2_ws/src/fastumi_data/README.md#lerobot-数据集)）。使用模块入口以确保读取当前环境中的 Zarr 依赖；`ros2 run ... convert_mcap` 的已安装入口可能使用缺少 Zarr 的系统解释器。输出目录必须尚不存在。多记录可按内存/磁盘条件增加 `--jobs`；初次验证保留串行。
 
 服务化采集从 `session.yaml` 读取标称源帧率。历史记录缺失时，确认实际采集配置后加 `--source-camera-fps 30`，不根据观察到的低帧率猜测标称值。不要给 JPEG MCAP 套用 raw 图像处理配置。
 
@@ -482,7 +486,7 @@ python -m fastumi_data.mcap_converter "$TASK_INPUT" \
 ├── snapshots/calibration/        两份外参及可用绑定
 ├── snapshots/urdf/rm_75.urdf      与部署传递同一份 URDF
 ├── records/<任务>/<记录>/
-│   ├── episodes/*.hdf5           原分辨率 RGB 和 Link7 示教轨迹
+│   ├── episodes/*.hdf5           RGB（Zarr 模式源分辨率，LeRobot 模式 224 letterbox）和 UMI TCP 示教轨迹
 │   ├── reports/*.json           每条 episode 接受/拒绝与时间质量报告
 │   └── record_report.json
 └── dataset.zarr                 合并后的 30 Hz 训练数据
@@ -499,7 +503,7 @@ env -u PYTHONPATH uv run --no-sync python ../../datatool/validate_dp_dataset.py 
   --report "$FASTUMI_ROOT/dataset/_analysis/${RUN_ID}_dataset.json"
 ```
 
-应无错误；检查 30 Hz、起始 Link7 相对坐标、夹爪 `[0,1]`、URDF 摘要、时间递增、图像解码及训练窗口。单条 episode 仅作数据调试时加 `--val-ratio 0`，常规训练保留至少两条并使用默认验证划分。转换细节见 [MCAP→Link7 说明](../ros2_ws/src/fastumi_data/README.md#mcaplink7-训练数据convert_mcap)。
+应无错误；检查 30 Hz、起始 TCP 相对坐标（`fastumi-tcp-v1`）、夹爪 `[0,1]`、URDF 摘要、时间递增、图像解码及训练窗口。单条 episode 仅作数据调试时加 `--val-ratio 0`，常规训练保留至少两条并使用默认验证划分。转换细节见 [MCAP→TCP 说明](../ros2_ws/src/fastumi_data/README.md#mcaptcp-训练数据convert_mcap)。
 
 **采集 PC 与训练机分开时：**先在训练机创建 `dataset/processed/`；将整个转换目录传过去，包括快照和报告，使用新的 `RUN_ID`，目标目录应为空或不存在：
 
@@ -541,16 +545,16 @@ rerun --web-viewer --port auto "$RRD_FILE"
 
 ### 8.1 数据与模型契约
 
-**T：训练机 `scl_dev`。** 使用第 6 节 `dataset.zarr`，沿用 [RM75 Link7 训练说明](../model/dp/README.md#5-rm75-link7-位姿)。
+**T：训练机 `scl_dev`。** 使用第 6 节 `dataset.zarr`，按 [RM75 Link7 训练说明](../model/dp/README.md#5-rm75-link7-位姿) 训练，但须用 TCP 配置 `CONFIG_NAME=train_diffusion_unet_timm_fastumi_tcp_workspace`；用 Link7 配置训练 `fastumi-tcp-v1` 会在启动时报错。
 
 | 项目 | 约定 |
 | --- | --- |
 | 观测 | `camera0_rgb`、`robot0_eef_pos`、`robot0_eef_rot_axis_angle`、`robot0_gripper_width`、`robot0_eef_rot_axis_angle_wrt_start` |
 | 图像 | RGB，224×224 letterbox，与部署预处理相同 |
-| 存储 / 训练 | Zarr 存储 episode 起始 Link7 系轨迹；加载器构造相对当前观测的动作，模型输出 `[B,16,10]` 的 `[xyz, rotation_6d, gripper]` |
+| 存储 / 训练 | Zarr 存储 episode 起始 UMI TCP 系轨迹；加载器构造相对当前观测的动作，模型输出 `[B,16,10]` 的 `[xyz, rotation_6d, gripper]` |
 | 单位 / 夹爪 | 位置米、旋转弧度；夹爪为 `[0,1]` 编码，0 闭、1 开 |
 | 时间 | 30 Hz；16 个连续动作，时间偏移 `i/30`，最后一步为 0.5 s |
-| 部署 | 按当前观测恢复 `base_link → Link7` 目标，用同一训练 URDF 做 FK |
+| 部署 | FK 得到 Link7 后乘 `T_Link7_TCP` 作为观测，按当前观测恢复 TCP 目标再换回 `base_link → Link7` 目标；checkpoint 内嵌示教 `T_u_cam_tcp`，供部署端核对 TCP 轴向 |
 
 关节 8D、旧单相机 7D 模型与本教程位姿 10D checkpoint 不能互换。
 
@@ -576,6 +580,7 @@ cd "$FASTUMI_ROOT"
 mkdir -p dataset/h5dy_data/rm75_umi "$(dirname "$RUN_DIR")"
 CUDA_VISIBLE_DEVICES=0 NUM_PROCESSES=1 \
 HF_HUB_CACHE="$HF_HUB_CACHE" DATASET_PATH="$CONVERT_DIR/dataset.zarr" \
+CONFIG_NAME=train_diffusion_unet_timm_fastumi_tcp_workspace \
 TRAIN_BATCH_SIZE=32 VAL_BATCH_SIZE=32 NUM_EPOCHS=120 \
 bash model/dp/train_vr_umi.sh "$RUN_DIR"
 ```
@@ -695,6 +700,8 @@ ros2 topic echo --once /motion_control/gripper_state
 ### 9.4 dry-run、实机测试与停止
 
 **J2：首次联调使用 dry-run。**
+
+> **TCP checkpoint 尚需部署端支持：**`scl_dev` 的 `dp_infer` 已支持 `fastumi-tcp-v1` 训练的 checkpoint（参数 `end_camera_extrinsic:="$CALIB_DIR/T_cam_end.yaml" deploy_tcp_extrinsic:="$CALIB_DIR/T_d_cam_tcp.yaml"`），`jetson_dev` 的 `dp_infer` 与 `dp_infer_tensorrt` 合入同样的 Link7↔TCP 换算前，只能部署 Link7 checkpoint，不能直接加载 TCP checkpoint。
 
 ```bash
 ros2 launch dp_infer dp_infer.launch.py \

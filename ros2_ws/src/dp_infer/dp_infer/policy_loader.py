@@ -1,4 +1,4 @@
-"""加载 RM75 Link7 扩散策略 checkpoint 并恢复训练时使用的模型权重。"""
+"""加载 RM75 Link7/TCP 扩散策略 checkpoint 并恢复训练时使用的模型权重。"""
 
 from pathlib import Path
 
@@ -11,7 +11,7 @@ def load_policy(checkpoint: Path, device: str):
     """从可信 checkpoint 加载 EMA/model 权重，并返回策略与训练配置。
 
     Args:
-        checkpoint: 本地训练生成的 Link7 checkpoint 文件。
+        checkpoint: 本地训练生成的 Link7 或 TCP checkpoint 文件。
         device: PyTorch 设备名，如 ``cuda:0`` 或 ``cpu``。
 
     Returns:
@@ -38,8 +38,9 @@ def load_policy(checkpoint: Path, device: str):
     # 训练产物使用 dill 序列化；只接受部署人员提供的可信 checkpoint。
     payload = torch.load(checkpoint, map_location="cpu", pickle_module=dill, weights_only=False)
     cfg = payload["cfg"]
-    if list(cfg.shape_meta.action.shape) != [10] or cfg.task.get("contract", {}).get("end_frame") != "Link7":
-        raise ValueError("Expected a Link7 pose10 checkpoint")
+    if (list(cfg.shape_meta.action.shape) != [10]
+            or cfg.task.get("contract", {}).get("end_frame") not in ("Link7", "tcp")):
+        raise ValueError("Expected a Link7 or TCP pose10 checkpoint")
     if cfg.training.get("tf32", False):
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.allow_tf32 = True

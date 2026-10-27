@@ -1,0 +1,14 @@
+# FastUMI 示教 UMI TCP 位姿训练：数据为 convert_mcap --output-format zarr 输出的 fastumi-tcp-v1。
+# 五键观测与 10D 动作沿用 Link7 位姿配置，只把契约末端改为夹爪抓取中心 TCP；
+# 部署端 Link7→TCP 由 dp_infer 用 T_cam_end 与 T_d_cam_tcp 计算。
+defaults:
+  - train_diffusion_unet_timm_vr_umi_workspace
+  - _self_
+name: train_diffusion_unet_timm_fastumi_tcp
+exp_name: fastumi_tcp_pose
+task:
+  contract:
+    end_frame: tcp
+    tool_offset: deployment_calibration
+    # 训练启动时从 Zarr 根属性读取并写回 checkpoint，供部署端核对 TCP 坐标轴约定。
+    umi_camera_from_tcp: null

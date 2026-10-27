@@ -1,4 +1,4 @@
-"""验证示教 Link7 格式的固定夹爪归一化契约和数据/训练频率契约检查。"""
+"""验证示教 Link7/TCP 格式的固定夹爪归一化契约和数据/训练频率、末端契约检查。"""
 
 import numpy as np
 import pytest
@@ -6,7 +6,9 @@ import torch
 import zarr
 
 from diffusion_policy.dataset.umi_dataset import UmiDataset, uses_fixed_gripper_range
-from diffusion_policy.workspace.train_diffusion_unet_image_workspace import check_dataset_frequency
+from diffusion_policy.workspace.train_diffusion_unet_image_workspace import (
+    check_dataset_end_frame, check_dataset_frequency, copy_camera_from_tcp,
+)
 from test_vr_umi import umi_shape
 
 
@@ -122,3 +124,34 @@ def test_dataset_frequency_must_match_training_contract() -> None:
     check_dataset_frequency({"format": "rm75-umi-pose-v2"}, contract)
     with pytest.raises(ValueError):
         check_dataset_frequency({"format": "rm75-umi-pose-v2", "frequency": 20}, contract)
+
+
+def test_tcp_format_uses_same_gripper_and_frequency_contract() -> None:
+    """fastumi-tcp-v1 与 Link7 格式共用固定夹爪边界和 30 Hz 频率要求。"""
+    attrs = dict(LINK7_ATTRS, format="fastumi-tcp-v1")
+    assert uses_fixed_gripper_range(attrs)
+    with pytest.raises(ValueError, match="fastumi-tcp-v1"):
+        uses_fixed_gripper_range(dict(attrs, gripper_upper=2.0))
+    with pytest.raises(ValueError, match="requires"):
+        check_dataset_frequency({k: v for k, v in attrs.items() if k != "frequency"},
+                                {"frequency_hz": 30})
+
+
+def test_dataset_end_frame_must_match_training_contract() -> None:
+    """TCP 数据不能用 Link7 契约训练；任一方未声明时保持兼容。"""
+    check_dataset_end_frame({"end_frame": "tcp"}, {"end_frame": "tcp"})
+    with pytest.raises(ValueError, match="TCP workspace"):
+        check_dataset_end_frame({"end_frame": "tcp"}, {"end_frame": "Link7"})
+    check_dataset_end_frame({}, {"end_frame": "Link7"})
+    check_dataset_end_frame({"end_frame": "tcp"}, None)
+
+
+def test_camera_from_tcp_is_copied_from_dataset_attrs() -> None:
+    """TCP 契约从数据集根属性复制 4×4 示教相机←TCP 外参，缺失或形状错误时报错。"""
+    matrix = np.eye(4)
+    matrix[:3, 3] = [0.0, 0.066, 0.207]
+    assert copy_camera_from_tcp({"umi_camera_from_tcp": matrix.tolist()}) == matrix.tolist()
+    with pytest.raises(ValueError, match="umi_camera_from_tcp"):
+        copy_camera_from_tcp({})
+    with pytest.raises(ValueError, match="umi_camera_from_tcp"):
+        copy_camera_from_tcp({"umi_camera_from_tcp": [[1, 0], [0, 1]]})

@@ -1,8 +1,17 @@
-"""``convert_mcap``：把 MCAP 记录批量转换为 Link7 HDF5，并合并导出 30 Hz Zarr。
+"""``convert_mcap``：把 MCAP 记录批量转换为 UMI TCP 轨迹 HDF5，并导出 30 Hz 训练数据集。
 
-命令行入口执行 MCAP→``fastumi_ros2_link7_v1`` HDF5→``fastumi-rm75-link7-v1`` Zarr：
-负责来源发现、配置与标称源帧率解析、外参设备身份预检、逐记录转换编排、
-清单和发布。单条记录的读取与同步见 :mod:`fastumi_data.link7_record`。
+命令行入口执行 MCAP→``fastumi_ros2_tcp_v1`` HDF5，再按 ``--output-format`` 导出：
+
+- ``lerobot``（默认）：LeRobot v3.0 数据集。ROS 环境内完成补帧、切分和 letterbox 并写出
+  逐 episode ``.npz``，再由独立的 LeRobot Python 子进程写入、回读校验后原子发布，
+  见 :mod:`fastumi_data.link7_lerobot` 与 :mod:`fastumi_data.lerobot_export`。
+- ``zarr``：``fastumi-tcp-v1`` Zarr，只记录丢帧、不补帧。
+
+位姿为 episode 起始 UMI TCP（夹爪抓取中心）坐标系，由 ``T_cam_tracker`` 与
+``T_u_cam_tcp`` 组合得到，不依赖部署机械臂；部署端 Link7↔TCP 换算由推理节点完成。
+
+本模块负责来源发现、配置与标称源帧率解析、外参设备身份预检、导出环境预检、
+逐记录转换编排、清单和发布。单条记录的读取与同步见 :mod:`fastumi_data.link7_record`。
 """
 
 from __future__ import annotations
@@ -10,7 +19,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import multiprocessing
@@ -34,11 +43,12 @@ from fastumi_data.gripper_source import (
     resolve_gripper_source,
 )
 from fastumi_data.json_report import write_json_report
+from fastumi_data.link7_arrays import IMAGE_SIZE
 from fastumi_data.link7_calibration import (
     CalibrationError,
-    Link7Calibration,
+    TcpCalibration,
     check_timestamp_source,
-    load_link7_calibration,
+    load_tcp_calibration,
     normalize_timestamp_source,
 )
 from fastumi_data.link7_config import (
@@ -47,19 +57,40 @@ from fastumi_data.link7_config import (
     resolve_processing,
     resolve_source_fps,
 )
-from fastumi_data.link7_hdf5 import LINK7_SCHEMA_VERSION
+from fastumi_data.link7_hdf5 import HDF5_SCHEMA_VERSION
+from fastumi_data.link7_lerobot import LEROBOT_FORMAT, prepare_lerobot_episode, resolve_task
 from fastumi_data.link7_record import Link7RecordConverter, precheck_tracker_identity
 from fastumi_data.link7_zarr import ZARR_FORMAT, ZarrEpisodeSource, export_link7_zarr
+from fastumi_data.lerobot_export import (
+    export_lerobot,
+    preflight_lerobot,
+    resolve_lerobot_python,
+    training_command,
+    validate_repo_id,
+)
 
 
 # 输出目录中的固定文件名。
 OUTPUT_ZARR_NAME = "dataset.zarr"
+OUTPUT_LEROBOT_NAME = "lerobot"
+# LeRobot 模式的临时目录：逐 episode .npz、写入器任务与日志、未发布的数据集。
+LEROBOT_STAGING_NAME = ".lerobot_staging"
+# --output-format 取值。
+FORMAT_LEROBOT = "lerobot"
+FORMAT_ZARR = "zarr"
+# --max-fill-gap 缺省值：最多补齐连续 2 帧缺失。
+DEFAULT_MAX_FILL_GAP = 2
 MANIFEST_NAME = "manifest.json"
 # 缺省 --urdf 时使用的包内部署 URDF（与 dp_infer 默认 expected_urdf_sha256 一致）。
 DEFAULT_URDF_NAME = "rm_75.urdf"
 EXTRINSIC_MIGRATION = (
-    "--extrinsic 已移除：convert_mcap 现在输出 Link7 数据，请使用 --tracker-camera-extrinsic "
-    "与 --end-camera-extrinsic（缺省为包内已绑定的默认外参），并提供 --output-dir"
+    "--extrinsic 已移除：convert_mcap 现在输出 UMI TCP 轨迹，请使用 --tracker-camera-extrinsic "
+    "与 --umi-tcp-extrinsic（缺省为包内已绑定的默认外参），并提供 --output-dir"
+)
+END_EXTRINSIC_MIGRATION = (
+    "--end-camera-extrinsic 已移除：转换输出 UMI TCP 轨迹，不再使用部署端 T_cam_end；"
+    "请用 --umi-tcp-extrinsic 指定 T_u_cam_tcp（缺省为包内默认外参），"
+    "T_cam_end 与 T_d_cam_tcp 改由推理节点在部署时使用"
 )
 # 逐 episode 写入 Zarr 根属性的元数据键。
 _ZARR_EPISODE_KEYS = (
@@ -68,7 +99,7 @@ _ZARR_EPISODE_KEYS = (
     "fitted_frame_rate_hz", "selection_path", "frame_drop_count", "image_mode",
     "image_timestamp_source", "expected_tracker_serial", "observed_tracker_serial",
     "tracker_serial_source", "tracker_binding_sha256", "tracker_camera_extrinsic_sha256",
-    "end_camera_extrinsic_sha256", "tracker_time_offset_ms", "tracker_time_offset_source_s",
+    "umi_tcp_extrinsic_sha256", "tracker_time_offset_ms", "tracker_time_offset_source_s",
     "time_calibration_timestamp_source",
     "time_calibration_conditions",
     "gripper_source",
@@ -229,8 +260,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="convert_mcap",
         description=(
-            "把 FastUMI MCAP 记录转换为 30 Hz Link7 HDF5，并合并导出 "
-            "fastumi-rm75-link7-v1 Zarr"
+            "把 FastUMI MCAP 记录转换为 30 Hz UMI TCP 轨迹 HDF5，并导出 LeRobot v3.0 数据集"
+            "（默认）或 fastumi-rm75-link7-v1 Zarr"
         ),
     )
     parser.add_argument("input", help="单个 bag、单条已保存记录或任务目录")
@@ -244,8 +275,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="T_cam_tracker 外参；缺省为包内已绑定的默认外参",
     )
     parser.add_argument(
-        "--end-camera-extrinsic", default="",
-        help="T_cam_end 外参；缺省为包内默认外参",
+        "--umi-tcp-extrinsic", default="",
+        help="T_u_cam_tcp 外参（UMI 相机←TCP）；缺省为包内默认外参",
     )
     parser.add_argument(
         "--tracker-serial", default="",
@@ -264,10 +295,32 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--output-format", choices=(FORMAT_LEROBOT, FORMAT_ZARR), default=FORMAT_LEROBOT,
+        help="导出格式：lerobot（默认，LeRobot v3.0，写入 <output-dir>/lerobot）或 zarr（旧格式）",
+    )
+    parser.add_argument(
+        "--repo-id", default="",
+        help="LeRobot 数据集标识 <用户或组织>/<数据集名>；lerobot 模式必填，不会上传",
+    )
+    parser.add_argument(
+        "--lerobot-python", default="",
+        help=(
+            "安装了 LeRobot 的 Python；缺省依次取环境变量 FASTUMI_LEROBOT_PYTHON、"
+            "~/work/lerobot/.venv/bin/python"
+        ),
+    )
+    parser.add_argument(
+        "--max-fill-gap", type=int, default=DEFAULT_MAX_FILL_GAP,
+        help=(
+            "lerobot 模式允许补齐的最大连续缺失帧数（默认 2），按缺失帧数计；"
+            "超过时在缺口处切分 episode，0 表示所有缺口都切分"
+        ),
+    )
+    parser.add_argument(
         "--jobs", type=int, default=1,
         help=(
             "并行转换记录的进程数；1（默认）在当前进程串行；0 按 CPU 数和记录数自动选择，"
-            f"上限 {MAX_AUTO_JOBS}。每条记录仍在单个进程内顺序处理，Zarr 在全部记录完成后统一合并"
+            f"上限 {MAX_AUTO_JOBS}。每条记录仍在单个进程内顺序处理，数据集在全部记录完成后统一合并"
         ),
     )
     return parser
@@ -349,19 +402,25 @@ class _RecordTask:
     fps_source: str
     gripper: GripperSource
     identity: Dict
-    calibration: Link7Calibration
+    calibration: TcpCalibration
     output_dir: Path
     urdf_name: str
     urdf_sha256: str
+    output_format: str = FORMAT_ZARR
+    max_fill_gap: int = DEFAULT_MAX_FILL_GAP
 
 
 @dataclass(frozen=True)
 class _RecordResult:
-    """一条记录的转换结果；``log`` 为需要打印的异常行（episode 被拒绝），由主进程按完成顺序输出。"""
+    """一条记录的转换结果；``log`` 为需要打印的异常行（episode 被拒绝），由主进程按完成顺序输出。
+
+    ``segments`` 为 LeRobot 模式下补齐、切分后写出的 ``.npz`` 片段（Zarr 模式为空）。
+    """
 
     report: Dict
     accepted: List[ZarrEpisodeSource]
     log: List[str]
+    segments: List[Dict] = field(default_factory=list)
 
 
 class _WorkerFailure(Exception):
@@ -385,6 +444,8 @@ def _convert_record(task: _RecordTask) -> _RecordResult:
     record_dir = task.output_dir / "records" / record.record_id
     work_dir = task.output_dir / ".work" / record.record_id
     session_image = (record.session or {}).get("image") or {}
+    # LeRobot 只用 224 letterbox 图像，解码后立即缩放，HDF5 不保存原分辨率。
+    image_size = IMAGE_SIZE if task.output_format == FORMAT_LEROBOT else None
     base_metadata = dict(task.calibration.metadata())
     base_metadata.update(task.identity)
     base_metadata.update(
@@ -405,12 +466,17 @@ def _convert_record(task: _RecordTask) -> _RecordResult:
             "urdf_sha256": task.urdf_sha256,
             "urdf_file": task.urdf_name,
             "gripper_source": gripper.report(),
+            "image_preprocessing": (
+                "none" if image_size is None else "letterbox_inter_area_black_border"
+            ),
+            "image_size": image_size or 0,
         }
     )
     summary = Link7RecordConverter(
         record.record_id, record.bag_uri, record_dir, work_dir,
         processing, task.calibration, task.fps, base_metadata,
         log=lambda _line: None, gripper_source=gripper, reject_log=rejected_lines.append,
+        image_size=image_size,
     ).convert()
     record_report = {
         "record_id": record.record_id,
@@ -427,12 +493,68 @@ def _convert_record(task: _RecordTask) -> _RecordResult:
         ],
         "rejected": summary.rejected,
     }
+    segments: List[Dict] = []
+    if task.output_format == FORMAT_LEROBOT:
+        segments = _prepare_lerobot_record(task, summary.accepted, record_report, rejected_lines)
     write_json_report(str(record_dir / "record_report.json"), record_report)
     accepted = [
         ZarrEpisodeSource(item["name"], Path(item["hdf5"]), _episode_zarr_metadata(item["metadata"]))
         for item in summary.accepted
     ]
-    return _RecordResult(record_report, accepted, rejected_lines)
+    return _RecordResult(record_report, accepted, rejected_lines, segments)
+
+
+def _prepare_lerobot_record(
+    task: _RecordTask, accepted: List[Dict], record_report: Dict, log: List[str],
+) -> List[Dict]:
+    """把一条记录的有效 HDF5 episode 补齐、切分为 ``.npz`` 片段，并写入记录报告。
+
+    记录的片段全部被舍弃（或没有有效 episode）时，报告中该记录的 LeRobot 状态为 failed。
+    """
+    record = task.record
+    npz_dir = task.output_dir / LEROBOT_STAGING_NAME / "npz" / record.record_id
+    record_task = (record.session or {}).get("task_name")
+    segments: List[Dict] = []
+    dropped: List[Dict] = []
+    for item in accepted:
+        prepared = prepare_lerobot_episode(
+            Path(item["hdf5"]),
+            item["name"],
+            npz_dir,
+            task.max_fill_gap,
+            task.gripper.interpolation,
+            resolve_task(item["metadata"].get("task_name"), record_task, record.record_id),
+            relative_to=task.output_dir,
+        )
+        for segment in prepared["segments"]:
+            segment["record_id"] = record.record_id
+        segments.extend(prepared["segments"])
+        dropped.extend(prepared["dropped_segments"])
+    for item in dropped:
+        log.append(
+            f"{item['source_episode']} 片段 {item['segment_index']} 补齐后仅 "
+            f"{item['frames_after_fill']} 帧，已舍弃"
+        )
+    status = "succeeded" if segments else "failed"
+    record_report["lerobot"] = {
+        "status": status,
+        "max_fill_gap": task.max_fill_gap,
+        "episodes": [
+            {
+                key: segment[key]
+                for key in ("name", "source_episode", "frames", "source_rows", "split")
+            }
+            | {"filled_frame_count": len(segment["filled_frames"])}
+            for segment in segments
+        ],
+        "dropped_segments": dropped,
+    }
+    if not segments:
+        record_report["lerobot"]["error"] = (
+            "片段全部被舍弃" if accepted else "没有有效 episode"
+        )
+        log.append(f"{record.record_id} 没有可导出的 LeRobot episode：{record_report['lerobot']['error']}")
+    return segments
 
 
 def _convert_in_worker(task: _RecordTask) -> _RecordResult:
@@ -477,9 +599,25 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     if any(item == "--extrinsic" or item.startswith("--extrinsic=") for item in arguments_list):
         parser.error(EXTRINSIC_MIGRATION)
+    if any(
+        item == "--end-camera-extrinsic" or item.startswith("--end-camera-extrinsic=")
+        for item in arguments_list
+    ):
+        parser.error(END_EXTRINSIC_MIGRATION)
     arguments = parser.parse_args(arguments_list)
     if arguments.jobs < 0:
         parser.error("--jobs 不能为负数")
+    if arguments.max_fill_gap < 0:
+        parser.error("--max-fill-gap 不能为负数")
+    lerobot_mode = arguments.output_format == FORMAT_LEROBOT
+    repo_id = ""
+    if lerobot_mode:
+        if not arguments.repo_id:
+            parser.error("--output-format lerobot 需要 --repo-id <用户或组织>/<数据集名>")
+        try:
+            repo_id = validate_repo_id(arguments.repo_id)
+        except ValueError as error:
+            parser.error(str(error))
     output_dir = Path(arguments.output_dir).expanduser().resolve()
     if output_dir.exists():
         parser.error(f"--output-dir {output_dir} 已存在；请指定新的输出目录")
@@ -499,14 +637,14 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
             if arguments.tracker_camera_extrinsic
             else default_calibration_path("T_cam_tracker.yaml")
         )
-        end_extrinsic = (
-            Path(arguments.end_camera_extrinsic).expanduser()
-            if arguments.end_camera_extrinsic
-            else default_calibration_path("T_cam_end.yaml")
+        umi_tcp_extrinsic = (
+            Path(arguments.umi_tcp_extrinsic).expanduser()
+            if arguments.umi_tcp_extrinsic
+            else default_calibration_path("T_u_cam_tcp.yaml")
         )
-        calibration = load_link7_calibration(
+        calibration = load_tcp_calibration(
             str(tracker_extrinsic),
-            str(end_extrinsic),
+            str(umi_tcp_extrinsic),
             arguments.tracker_serial,
         )
         sources = discover_sources(Path(arguments.input))
@@ -543,14 +681,19 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
             identities[record.record_id] = precheck_tracker_identity(
                 record.bag_uri, processing.topics["tracker_status"], calibration.tracker_serial
             )
+        lerobot_python: Optional[Path] = None
+        lerobot_preflight: Optional[Dict] = None
+        if lerobot_mode:
+            lerobot_python = resolve_lerobot_python(arguments.lerobot_python)
+            lerobot_preflight = preflight_lerobot(lerobot_python)
     except (CalibrationError, ConfigError, ValueError, OSError, RuntimeError) as error:
         print(f"转换前检查失败：{error}", file=sys.stderr)
         return 1
 
     output_dir.mkdir(parents=True)
     manifest: Dict = {
-        "format": ZARR_FORMAT,
-        "hdf5_schema": LINK7_SCHEMA_VERSION,
+        "format": LEROBOT_FORMAT if lerobot_mode else ZARR_FORMAT,
+        "hdf5_schema": HDF5_SCHEMA_VERSION,
         "status": "running",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "input": str(Path(arguments.input).expanduser().resolve()),
@@ -563,12 +706,21 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
         "zarr": None,
         "warnings": notes,
     }
+    if lerobot_mode:
+        manifest["lerobot"] = None
+        manifest["lerobot_export"] = {
+            "repo_id": repo_id,
+            "python": str(lerobot_python),
+            "max_fill_gap": arguments.max_fill_gap,
+            "preflight": lerobot_preflight,
+        }
     manifest_path = output_dir / MANIFEST_NAME
 
     def save_manifest() -> None:
         write_json_report(str(manifest_path), manifest)
 
     accepted_sources: list[ZarrEpisodeSource] = []
+    segments: list[Dict] = []
     progress = _Progress(len(plans))
     try:
         snapshots = output_dir / "snapshots"
@@ -577,9 +729,9 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
                 Path(calibration.tracker_camera.path), snapshots / "calibration",
                 calibration.tracker_camera.sha256,
             ),
-            "end_camera": _copy_snapshot(
-                Path(calibration.end_camera.path), snapshots / "calibration",
-                calibration.end_camera.sha256,
+            "umi_tcp": _copy_snapshot(
+                Path(calibration.umi_tcp.path), snapshots / "calibration",
+                calibration.umi_tcp.sha256,
             ),
         }
         if calibration.binding is not None:
@@ -595,6 +747,7 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
             _RecordTask(
                 record, processing, fps, fps_source, gripper, identities[record.record_id],
                 calibration, output_dir, urdf_path.name, urdf_sha256,
+                arguments.output_format, arguments.max_fill_gap,
             )
             for record, processing, fps, fps_source, gripper in plans
         ]
@@ -615,29 +768,40 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
         else:
             _convert_parallel(tasks, workers, finish)
         accepted_sources = [source for item in results for source in item.accepted]
+        segments = [segment for item in results for segment in item.segments]
         shutil.rmtree(output_dir / ".work", ignore_errors=True)
-        if not accepted_sources:
+        if not (segments if lerobot_mode else accepted_sources):
             manifest["status"] = "failed"
             manifest["error"] = "没有任何有效 episode"
             save_manifest()
             progress.close()
             print("转换失败：没有任何有效 episode", file=sys.stderr)
             return 1
-        manifest["zarr"] = export_link7_zarr(
-            accepted_sources,
-            output_dir / OUTPUT_ZARR_NAME,
-            urdf_sha256,
-            {
-                "source_manifest": MANIFEST_NAME,
-                "hdf5_schema": LINK7_SCHEMA_VERSION,
-                "urdf_file": manifest["urdf"]["snapshot"],
-                "expected_tracker_serial": calibration.tracker_serial,
-                "tracker_camera_extrinsic_sha256": calibration.tracker_camera.sha256,
-                "end_camera_extrinsic_sha256": calibration.end_camera.sha256,
-            },
-            jobs=zarr_workers,
-            on_progress=progress.report,
-        )
+        if lerobot_mode:
+            manifest["lerobot"] = export_lerobot(
+                segments,
+                output_dir / OUTPUT_LEROBOT_NAME,
+                output_dir / LEROBOT_STAGING_NAME,
+                repo_id,
+                lerobot_python,
+                {
+                    "source_manifest": "../" + MANIFEST_NAME,
+                    "hdf5_schema": HDF5_SCHEMA_VERSION,
+                    "max_fill_gap": arguments.max_fill_gap,
+                    "urdf_sha256": urdf_sha256,
+                    "expected_tracker_serial": calibration.tracker_serial,
+                    "tracker_camera_extrinsic_sha256": calibration.tracker_camera.sha256,
+                    "umi_tcp_extrinsic_sha256": calibration.umi_tcp.sha256,
+                    "umi_camera_from_tcp": calibration.umi_tcp.matrix.tolist(),
+                },
+                on_progress=progress.report,
+            )
+            shutil.rmtree(output_dir / LEROBOT_STAGING_NAME, ignore_errors=True)
+        else:
+            manifest["zarr"] = _export_zarr(
+                accepted_sources, output_dir, urdf_sha256, manifest, calibration,
+                zarr_workers, progress,
+            )
     except Exception as error:  # 硬错误：中止批次并保留诊断产物。
         manifest["status"] = "failed"
         manifest["error"] = (
@@ -648,17 +812,67 @@ def run_batch(argv: Optional[list[str]] = None) -> int:
         print(f"转换中止：{manifest['error']}", file=sys.stderr)
         return 1
     progress.close()
+    rejected = sum(len(item["rejected"]) for item in manifest["sources"])
+    if lerobot_mode:
+        manifest["status"] = "succeeded"
+        save_manifest()
+        dropped = sum(
+            len(item.get("lerobot", {}).get("dropped_segments", [])) for item in manifest["sources"]
+        )
+        failed = [
+            item["record_id"] for item in manifest["sources"]
+            if item.get("lerobot", {}).get("status") == "failed"
+        ]
+        print(
+            f"完成：有效 {len(accepted_sources)} / 拒绝 {rejected} episode，"
+            f"LeRobot {manifest['lerobot']['episodes']} episode（舍弃片段 {dropped}），"
+            f"{manifest['lerobot']['frames']} 帧 → {manifest['lerobot']['path']}"
+        )
+        if failed:
+            print(f"无可导出 episode 的记录：{', '.join(failed)}", file=sys.stderr)
+        print(
+            "训练命令（在 LeRobot 工作区运行）：\n  "
+            + training_command(repo_id, Path(manifest["lerobot"]["path"]))
+        )
+        return 0
     if len(accepted_sources) < 2:
         message = "只有 1 条有效 episode：当前训练默认验证划分至少需要两条有效 episode"
         manifest["warnings"].append(message)
     manifest["status"] = "succeeded"
     save_manifest()
-    rejected = sum(len(item["rejected"]) for item in manifest["sources"])
     print(
         f"完成：有效 {len(accepted_sources)} / 拒绝 {rejected} episode，"
         f"{manifest['zarr']['frames']} 帧 → {manifest['zarr']['path']}"
     )
     return 0
+
+
+def _export_zarr(
+    accepted_sources: Sequence[ZarrEpisodeSource],
+    output_dir: Path,
+    urdf_sha256: str,
+    manifest: Dict,
+    calibration: TcpCalibration,
+    jobs: int,
+    progress: _Progress,
+) -> Dict:
+    """旧 Zarr 模式：合并导出全部有效 HDF5 episode，返回导出摘要。"""
+    return export_link7_zarr(
+        accepted_sources,
+        output_dir / OUTPUT_ZARR_NAME,
+        urdf_sha256,
+        {
+            "source_manifest": MANIFEST_NAME,
+            "hdf5_schema": HDF5_SCHEMA_VERSION,
+            "urdf_file": manifest["urdf"]["snapshot"],
+            "expected_tracker_serial": calibration.tracker_serial,
+            "tracker_camera_extrinsic_sha256": calibration.tracker_camera.sha256,
+            "umi_tcp_extrinsic_sha256": calibration.umi_tcp.sha256,
+            "umi_camera_from_tcp": calibration.umi_tcp.matrix.tolist(),
+        },
+        jobs=jobs,
+        on_progress=progress.report,
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> None:

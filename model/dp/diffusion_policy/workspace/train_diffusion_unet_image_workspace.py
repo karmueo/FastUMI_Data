@@ -44,13 +44,13 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 # 必须在根属性声明 frequency 且与训练契约一致的数据格式。
-FREQUENCY_REQUIRED_FORMATS = ("fastumi-rm75-link7-v1",)
+FREQUENCY_REQUIRED_FORMATS = ("fastumi-rm75-link7-v1", "fastumi-tcp-v1")
 
 
 def check_dataset_frequency(dataset_attrs, contract) -> None:
     """核对数据集根属性 frequency 与 task.contract.frequency_hz 一致。
 
-    示教 Link7 格式必须同时声明两者且相等；其他格式在两者都存在时也要求一致。
+    convert_mcap 示教格式必须同时声明两者且相等；其他格式在两者都存在时也要求一致。
 
     Raises:
         ValueError: 缺失（对必需格式）或不一致。
@@ -68,6 +68,40 @@ def check_dataset_frequency(dataset_attrs, contract) -> None:
     if isinstance(actual, bool) or not isinstance(actual, (int, float)) or float(actual) != float(expected):
         raise ValueError(
             f"Dataset frequency {actual!r} does not match task.contract.frequency_hz={expected!r}")
+
+
+def check_dataset_end_frame(dataset_attrs, contract) -> None:
+    """核对数据集根属性 end_frame 与 task.contract.end_frame 一致。
+
+    ``fastumi-tcp-v1`` 存储 UMI TCP 轨迹，用 Link7 契约训练会让部署端把 TCP 动作当作
+    Link7 执行；任一方未声明时不检查（兼容旧数据和其他任务）。
+
+    Raises:
+        ValueError: 两者都声明但不一致。
+    """
+    attrs = dataset_attrs or {}
+    expected = None if contract is None else contract.get("end_frame")
+    actual = attrs.get("end_frame")
+    if expected is not None and actual is not None and actual != expected:
+        raise ValueError(
+            f"Dataset end_frame {actual!r} does not match task.contract.end_frame={expected!r}; "
+            "train fastumi-tcp-v1 data with the TCP workspace config")
+
+
+def copy_camera_from_tcp(dataset_attrs):
+    """返回写入 checkpoint 契约的示教相机←TCP 外参（4×4 列表）。
+
+    契约声明 ``umi_camera_from_tcp`` 键时要求数据集根属性提供同名 4×4 矩阵，
+    推理节点据此核对部署 TCP 与示教 TCP 的坐标轴约定。
+
+    Raises:
+        ValueError: 数据集缺少该矩阵或形状不是 4×4。
+    """
+    matrix = (dataset_attrs or {}).get("umi_camera_from_tcp")
+    values = np.asarray(matrix, dtype=np.float64) if matrix is not None else None
+    if values is None or values.shape != (4, 4) or not np.isfinite(values).all():
+        raise ValueError("Training dataset must contain a 4x4 umi_camera_from_tcp root attribute")
+    return values.tolist()
 
 
 def _instantiate_env_runner(env_runner_cfg, output_dir) -> Optional[BaseImageRunner]:
@@ -425,6 +459,11 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         assert isinstance(dataset, BaseImageDataset) or isinstance(dataset, BaseDataset)
         contract = cfg.task.get("contract")
         check_dataset_frequency(getattr(dataset, "dataset_attrs", {}), contract)
+        check_dataset_end_frame(getattr(dataset, "dataset_attrs", {}), contract)
+        if contract is not None and "umi_camera_from_tcp" in contract:
+            camera_from_tcp = copy_camera_from_tcp(dataset.dataset_attrs)
+            cfg.task.contract.umi_camera_from_tcp = camera_from_tcp
+            self.cfg.task.contract.umi_camera_from_tcp = camera_from_tcp
         if contract is not None and "urdf_sha256" in contract:
             urdf_sha256 = dataset.dataset_attrs.get("urdf_sha256")
             if (not isinstance(urdf_sha256, str) or len(urdf_sha256) != 64

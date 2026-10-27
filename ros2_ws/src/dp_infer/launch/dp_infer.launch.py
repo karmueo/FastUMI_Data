@@ -10,7 +10,7 @@ from launch_ros.substitutions import FindPackageShare
 OVERRIDE_NAMES = (  # 可从 launch 命令行覆盖的字符串型 ROS 参数。
     "checkpoint", "urdf_path", "device", "expected_urdf_sha256",
     "image_topic", "joint_topic", "gripper_topic", "output_topic", "reset_service",
-    "postprocessors",
+    "postprocessors", "end_camera_extrinsic", "deploy_tcp_extrinsic",
 )
 
 

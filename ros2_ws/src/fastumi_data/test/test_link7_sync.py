@@ -90,7 +90,7 @@ def test_pose_uses_image_time_plus_offset_and_gripper_uses_image_time() -> None:
     t0 = (episode.selection.image_timestamps_ns[0] - START) / 1e9
     expected_x = (episode.selection.image_timestamps_ns - START) / 1e9 - t0
     np.testing.assert_allclose(episode.qpos[:, 0], expected_x, atol=1e-9)
-    first_world_x = episode.world_from_start_link7[0, 3]
+    first_world_x = episode.world_from_start_tcp[0, 3]
     assert first_world_x == pytest.approx(t0 + offset_ns / 1e9, abs=1e-9)
     expected_gripper = (episode.selection.image_timestamps_ns - START) / 3e9
     np.testing.assert_allclose(episode.qpos[:, 7], expected_gripper, atol=1e-6)

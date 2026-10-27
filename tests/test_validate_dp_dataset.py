@@ -307,6 +307,29 @@ def test_link7_dataset_passes_with_decoded_images(tmp_path):
     assert result["timing"][0]["fitted_frame_rate_hz"] == pytest.approx(30.06, rel=1e-6)
 
 
+# 当前 convert_mcap 输出的 UMI TCP 格式与 Link7 格式只差这些根属性。
+TCP_ATTRS = dict(
+    format="fastumi-tcp-v1", pose_frame="episode_start_tcp", end_frame="tcp",
+    tcp_definition="gripper_grasp_center", tool_offset="deployment_calibration",
+)
+
+
+def test_tcp_dataset_passes_and_rejects_link7_frame_mix(tmp_path):
+    """fastumi-tcp-v1 通过校验；坐标系或工具偏移沿用 Link7 声明时被拒绝。"""
+    root = make_link7(tmp_path / "tcp.zarr")
+    root.attrs.update(TCP_ATTRS)
+    result = validate_dataset(tmp_path / "tcp.zarr", "rm75_umi", val_ratio=0)
+    assert result["valid"], result["errors"]
+    assert result["timing"][0]["selection_path"] == "same_rate"
+    for attribute, value in (("end_frame", "Link7"), ("pose_frame", "episode_start_link7"),
+                             ("tool_offset", np.eye(4).tolist())):
+        root.attrs.update(TCP_ATTRS)
+        root.attrs[attribute] = value
+        result = validate_dataset(tmp_path / "tcp.zarr", "rm75_umi", val_ratio=0)
+        assert not result["valid"]
+        assert attribute in {item["field"] for item in result["errors"]}
+
+
 def test_link7_frame_drops_follow_nominal_time_and_warn(tmp_path):
     """丢帧处名义时间按 (1+dropped)/30 跳变，校验通过并给出 FRAME_DROP 提示。"""
     make_link7(tmp_path / "link7.zarr", dropped={0: {5: 1, 6: 2}})

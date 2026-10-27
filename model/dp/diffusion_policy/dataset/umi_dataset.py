@@ -35,15 +35,17 @@ from umi.common.pose_util import mat_to_pose10d, pose_to_mat
 
 register_codecs()
 
-# convert_mcap 输出的示教 Link7 格式及其夹爪归一化契约。
+# convert_mcap 输出的示教格式（旧 Link7 与当前 UMI TCP）及其夹爪归一化契约。
 LINK7_DEMO_FORMAT = "fastumi-rm75-link7-v1"
+TCP_DEMO_FORMAT = "fastumi-tcp-v1"
+DEMO_FORMATS = (LINK7_DEMO_FORMAT, TCP_DEMO_FORMAT)
 LINK7_GRIPPER_CONTRACT = "fixed-gripper-0-1-v1"
 
 
 def uses_fixed_gripper_range(attrs) -> bool:
     """返回数据集是否对夹爪观测与动作使用固定 [0,1] 输入边界。
 
-    ``rm75-umi-pose-v2`` 沿用 URDF 关节限位契约；``fastumi-rm75-link7-v1`` 必须声明
+    ``rm75-umi-pose-v2`` 沿用 URDF 关节限位契约；``convert_mcap`` 示教格式必须声明
     ``normalization_contract=fixed-gripper-0-1-v1`` 且 ``gripper_lower=0``、
     ``gripper_upper=1``。其他格式使用数据统计边界。
 
@@ -55,16 +57,16 @@ def uses_fixed_gripper_range(attrs) -> bool:
         if attrs.get("normalization_contract") != "urdf-joint-limits-v1":
             raise ValueError("Missing source URDF normalization contract")
         return True
-    if format_name == LINK7_DEMO_FORMAT:
+    if format_name in DEMO_FORMATS:
         if attrs.get("normalization_contract") != LINK7_GRIPPER_CONTRACT:
             raise ValueError(
-                f"{LINK7_DEMO_FORMAT} requires normalization_contract={LINK7_GRIPPER_CONTRACT}, "
+                f"{format_name} requires normalization_contract={LINK7_GRIPPER_CONTRACT}, "
                 f"got {attrs.get('normalization_contract')!r}")
         lower, upper = attrs.get("gripper_lower"), attrs.get("gripper_upper")
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
                for value in (lower, upper)) or (lower, upper) != (0, 1):
             raise ValueError(
-                f"{LINK7_DEMO_FORMAT} requires gripper_lower=0 and gripper_upper=1, "
+                f"{format_name} requires gripper_lower=0 and gripper_upper=1, "
                 f"got {lower!r}, {upper!r}")
         return True
     return False

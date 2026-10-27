@@ -3,6 +3,8 @@
 * H.264 按 bag 顺序全部解码，参考帧跨 episode 保留；raw/JPEG 在活动与后滚动期间
   解码，其余消息只计数。每个解码帧获得递增的 ``source_image_index``。
 * episode 内、时间位于 START/STOP 事件之间的解码帧逐帧写入磁盘暂存，内存有界。
+  指定 ``image_size`` 时（LeRobot 模式）解码后立即 letterbox 到该边长再暂存，HDF5
+  不再保存原分辨率图像。
 * Tracker 位姿、状态和夹爪在 START 前保留短暂预滚动；STOP 后在 ``POST_ROLL_NS``
   内继续收集支撑样本和 Header 时间仍在该 episode 内的迟到图像，再处理。下一条
   START 不提前结束上一条的后滚动。
@@ -29,7 +31,8 @@ from fastumi_data.frame_spool import FrameSpool
 from fastumi_data.gripper_source import DEFAULT_GRIPPER_SOURCE, GripperSource
 from fastumi_data.image_modes import MODE_H264, MODE_RAW, mode_for_message_type
 from fastumi_data.json_report import write_json_report
-from fastumi_data.link7_calibration import CalibrationError, Link7Calibration
+from fastumi_data.link7_arrays import letterbox_rgb_uint8
+from fastumi_data.link7_calibration import CalibrationError, TcpCalibration
 from fastumi_data.link7_config import ResolvedProcessing
 from fastumi_data.link7_hdf5 import write_link7_episode_hdf5
 from fastumi_data.link7_sync import synchronize_link7_episode
@@ -135,7 +138,7 @@ class RecordSummary:
 
 
 class Link7RecordConverter:
-    """把一条记录转换为逐 episode 的 Link7 HDF5 与 JSON 报告。"""
+    """把一条记录转换为逐 episode 的 TCP 轨迹 HDF5 与 JSON 报告。"""
 
     def __init__(
         self,
@@ -144,16 +147,19 @@ class Link7RecordConverter:
         output_dir: Path,
         work_dir: Path,
         processing: ResolvedProcessing,
-        calibration: Link7Calibration,
+        calibration: TcpCalibration,
         nominal_source_fps: float,
         base_metadata: Dict[str, Any],
         log: Callable[[str], None] = print,
         gripper_source: GripperSource = DEFAULT_GRIPPER_SOURCE,
         reject_log: Optional[Callable[[str], None]] = None,
+        image_size: Optional[int] = None,
     ) -> None:
         """保存转换参数；``output_dir`` 下写 ``episodes/`` 与 ``reports/``。
 
         ``log`` 接收过程行；``reject_log`` 单独接收 episode 被拒绝的行，缺省沿用 ``log``。
+        ``image_size`` 非空时每个解码帧先 letterbox 为 ``(image_size, image_size, 3)``
+        再暂存和写入 HDF5；``None`` 保留源分辨率。
         """
         self._record_id = record_id
         self._bag_uri = Path(bag_uri)
@@ -167,6 +173,8 @@ class Link7RecordConverter:
         self._log = log
         self._reject_log = reject_log or log
         self._gripper_source = gripper_source
+        # 暂存前 letterbox 的边长（像素）；None 表示保留源分辨率。
+        self._image_size = image_size
         self._gripper_count = 0
         self._offset_ns = int(round(calibration.tracker_time_offset_ms * 1.0e6))
         self._active: Optional[_ActiveEpisode] = None
@@ -242,7 +250,7 @@ class Link7RecordConverter:
                 episode.poses,
                 episode.grippers,
                 episode.statuses,
-                self._calibration.tracker_to_link7,
+                self._calibration.tracker_to_tcp,
                 self._fps,
                 self._processing.sync,
                 tracker_time_offset_ns=self._offset_ns,
@@ -414,13 +422,20 @@ class Link7RecordConverter:
             targets = list(self._pending)
             if self._active is not None:
                 targets.append(self._active)
+            # 同一帧可能同时属于后滚动与活动 episode，只缩放一次。
+            image = None
             for episode in targets:
                 start_ns = stamp_to_ns(episode.start.header.stamp)
                 if frame.stamp_ns < start_ns:
                     continue
                 if episode.stop_ns is not None and frame.stamp_ns > episode.stop_ns:
                     continue
-                episode.spool.append(frame.stamp_ns, index, frame.image)
+                if image is None:
+                    image = (
+                        frame.image if self._image_size is None
+                        else letterbox_rgb_uint8(frame.image, self._image_size)
+                    )
+                episode.spool.append(frame.stamp_ns, index, image)
 
     def _handle_image(self, decoder: BagImageDecoder, serialized: bytes, bag_ns: int) -> None:
         """解码活动与后滚动期间的图像；H.264 始终解码以维持参考帧。"""

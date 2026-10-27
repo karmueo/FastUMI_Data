@@ -223,7 +223,7 @@ def analyze(source: Path, output: Path, cal: dict, *extra: str, calibrated: bool
     command = ["--input", str(source), "--output-dir", str(output), "--plots", "none", *extra]
     if calibrated:
         command += ["--tracker-camera-extrinsic", str(cal["tracker"]),
-                    "--end-camera-extrinsic", str(cal["end"])]
+                    "--umi-tcp-extrinsic", str(cal["umi_tcp"])]
     code = aq.run(command)
     path = output / "report.json"
     return code, (json.loads(path.read_text(encoding="utf-8")) if path.exists() else None)
@@ -374,7 +374,7 @@ def test_gripper_gap_threshold_decides_rejection(tmp_path, calibration) -> None:
     make_record(data, "task", "b_gap", sensor_override=invalid_range(30, 36))
     code = aq.run(["--input", str(data), "--output-dir", str(tmp_path / "out"), "--plots", "all",
                    "--tracker-camera-extrinsic", str(calibration["tracker"]),
-                   "--end-camera-extrinsic", str(calibration["end"])])
+                   "--umi-tcp-extrinsic", str(calibration["umi_tcp"])])
     report = json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
     assert code == 1
     single, gap = record_of(report, "a_single"), record_of(report, "b_gap")
@@ -674,7 +674,7 @@ def test_worker_crash_only_fails_the_crashing_record(tmp_path, calibration) -> N
     args = aq.build_parser().parse_args([
         "--input", str(data), "--plots", "none",
         "--tracker-camera-extrinsic", str(calibration["tracker"]),
-        "--end-camera-extrinsic", str(calibration["end"])])
+        "--umi-tcp-extrinsic", str(calibration["umi_tcp"])])
     entries = aq.discover_records(data)
     ctx = aq.Context(None, args, None, None, None, entries[-1].record_id)
     partial = tmp_path / "partial"
@@ -717,7 +717,7 @@ def test_output_is_published_atomically_and_plot_policy(tmp_path, calibration) -
     output = tmp_path / "out"
     code = aq.run(["--input", str(data), "--output-dir", str(output),
                    "--tracker-camera-extrinsic", str(calibration["tracker"]),
-                   "--end-camera-extrinsic", str(calibration["end"])])
+                   "--umi-tcp-extrinsic", str(calibration["umi_tcp"])])
     assert code == 1
     assert not (tmp_path / "out.partial").exists()
     assert not list(output.rglob("*.tmp"))

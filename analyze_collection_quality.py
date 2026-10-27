@@ -15,7 +15,7 @@
     python analyze_collection_quality.py --input ros2_ws/dataset/umi_jingbao
 
 同步预检复用 ``ros2_ws/src/fastumi_data`` 源码中的解码器、配置解析、标定核对和
-Link7 同步函数，因此结果与 ``convert_mcap`` 的选帧、插值和门限一致。ROS、解码、
+示教轨迹同步函数，因此结果与 ``convert_mcap`` 的选帧、插值和门限一致。ROS、解码、
 绘图依赖在分析开始时才加载，``--help`` 不需要 ROS。
 
 多条记录默认按记录并行分析（``--jobs``）：每条记录仍在单个进程内顺序处理，报告内容、
@@ -60,7 +60,7 @@ except ImportError:  # 仅影响 --help 之外的分析；load_runtime 会给出
 REPOSITORY_ROOT = Path(__file__).resolve().parent
 PACKAGE_SOURCE = REPOSITORY_ROOT / "ros2_ws" / "src" / "fastumi_data"
 DEFAULT_TRACKER_EXTRINSIC = REPOSITORY_ROOT / "config" / "calibration" / "T_cam_tracker.yaml"
-DEFAULT_END_EXTRINSIC = REPOSITORY_ROOT / "config" / "calibration" / "T_cam_end.yaml"
+DEFAULT_UMI_TCP_EXTRINSIC = REPOSITORY_ROOT / "config" / "calibration" / "T_u_cam_tcp.yaml"
 DEFAULT_PROCESSING = PACKAGE_SOURCE / "config" / "processing.yaml"
 
 EXIT_OK = 0
@@ -594,7 +594,7 @@ def load_runtime() -> SimpleNamespace:
         from fastumi_data.link7_calibration import (
             CalibrationError,
             check_timestamp_source,
-            load_link7_calibration,
+            load_tcp_calibration,
         )
         from fastumi_data.link7_config import (
             ConfigError,
@@ -624,7 +624,7 @@ def load_runtime() -> SimpleNamespace:
         deserialize_message=deserialize_message,
         frame_selection=frame_selection,
         get_message=get_message,
-        load_link7_calibration=load_link7_calibration,
+        load_tcp_calibration=load_tcp_calibration,
         mode_for_message_type=mode_for_message_type,
         open_reader=open_reader,
         read_header_stamp_ns=read_header_stamp_ns,
@@ -1564,7 +1564,7 @@ def analyze_episode(
     ]
     offset_ns = int(round(ctx.calibration.tracker_time_offset_ms * 1.0e6))
     result = rt.synchronize_link7_episode(
-        image_stamps.tolist(), poses, grippers, statuses, ctx.calibration.tracker_to_link7,
+        image_stamps.tolist(), poses, grippers, statuses, ctx.calibration.tracker_to_tcp,
         nominal_fps, processing.sync, tracker_time_offset_ns=offset_ns,
     )
     sync: Dict[str, Any] = {"stats": result.stats}
@@ -1954,7 +1954,7 @@ def render_markdown(report: Dict[str, Any]) -> str:
             f"- Tracker 序列号：`{calibration['tracker_serial']}`（{calibration['tracker_serial_source']}）",
             f"- Tracker 查询时间偏移：{calibration['tracker_time_offset_ms']:.3f} ms",
             f"- Tracker–相机外参：`{calibration['tracker_camera_extrinsic_path']}`",
-            f"- 末端–相机外参：`{calibration['end_camera_extrinsic_path']}`",
+            f"- UMI 相机–TCP 外参：`{calibration['umi_tcp_extrinsic_path']}`",
             "- 身份与时间链路匹配只说明外参适用于该记录，**不代表物理标定精度已验收**。",
         ]
     else:
@@ -2136,8 +2136,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="覆盖标称源帧率；不从实测速率推断")
     parser.add_argument("--tracker-camera-extrinsic", default="",
                         help="T_cam_tracker 外参；缺省为仓库 config/calibration 下的默认外参")
-    parser.add_argument("--end-camera-extrinsic", default="",
-                        help="T_cam_end 外参；缺省为仓库 config/calibration 下的默认外参")
+    parser.add_argument("--umi-tcp-extrinsic", default="",
+                        help="T_u_cam_tcp 外参；缺省为仓库 config/calibration 下的默认外参")
     parser.add_argument("--tracker-serial", default="",
                         help="外参缺少设备绑定时声明标定所用 Tracker 序列号；不能覆盖既有绑定")
     parser.add_argument("--jobs", type=int, default=0,
@@ -2162,9 +2162,9 @@ def default_output_dir(input_path: Path, stamp: datetime) -> Path:
 def load_calibration(rt: SimpleNamespace, args: argparse.Namespace) -> Tuple[Any, Optional[Dict[str, Any]], Dict[str, Any]]:
     """加载外参；失败时返回问题条目，使同步预检标记为未完成而基础检查照常执行。"""
     tracker = Path(args.tracker_camera_extrinsic).expanduser() if args.tracker_camera_extrinsic else DEFAULT_TRACKER_EXTRINSIC
-    end = Path(args.end_camera_extrinsic).expanduser() if args.end_camera_extrinsic else DEFAULT_END_EXTRINSIC
+    umi_tcp = Path(args.umi_tcp_extrinsic).expanduser() if args.umi_tcp_extrinsic else DEFAULT_UMI_TCP_EXTRINSIC
     try:
-        calibration = rt.load_link7_calibration(str(tracker), str(end), args.tracker_serial)
+        calibration = rt.load_tcp_calibration(str(tracker), str(umi_tcp), args.tracker_serial)
     except (rt.CalibrationError, OSError) as error:
         return None, issue("CALIBRATION_UNAVAILABLE", str(error)), {"available": False, "error": str(error)}
     summary = {
@@ -2174,8 +2174,8 @@ def load_calibration(rt: SimpleNamespace, args: argparse.Namespace) -> Tuple[Any
         "tracker_time_offset_ms": calibration.tracker_time_offset_ms,
         "tracker_camera_extrinsic_path": calibration.tracker_camera.path,
         "tracker_camera_extrinsic_sha256": calibration.tracker_camera.sha256,
-        "end_camera_extrinsic_path": calibration.end_camera.path,
-        "end_camera_extrinsic_sha256": calibration.end_camera.sha256,
+        "umi_tcp_extrinsic_path": calibration.umi_tcp.path,
+        "umi_tcp_extrinsic_sha256": calibration.umi_tcp.sha256,
         "binding_sha256": calibration.binding.sha256 if calibration.binding else None,
         "time_calibration_timestamp_source": (
             calibration.binding.time_calibration_timestamp_source if calibration.binding else None

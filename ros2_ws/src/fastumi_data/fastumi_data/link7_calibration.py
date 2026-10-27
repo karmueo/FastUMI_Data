@@ -1,10 +1,14 @@
-"""加载示教相机/末端相机手眼外参，核对 Tracker 绑定，组合 Tracker→Link7 变换。
+"""加载示教相机外参与 UMI TCP 外参，核对 Tracker 绑定，组合 Tracker→UMI TCP 变换。
 
-约定 ``T_A_B`` 把 B 坐标映射到 A。两份外参文件中的 ``cam0.T_cam_hand`` 分别为
-``T_Cu_Tracker``（示教 UMI 相机←Tracker）和 ``T_Cd_Link7``（部署相机←Link7），
-两台相机光学坐标轴约定一致，因此::
+约定 ``T_A_B`` 把 B 坐标映射到 A。``T_cam_tracker.yaml`` 的 ``cam0.T_cam_hand`` 为
+``T_Cu_Tracker``（示教 UMI 相机←Tracker），``T_u_cam_tcp.yaml`` 的 ``T_u_cam_tcp`` 为
+``T_Cu_TCP``（示教 UMI 相机←夹爪抓取中心 TCP），因此::
 
-    T_W_Link7(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cd_Link7
+    T_W_TCP(t) = T_W_Tracker(t − offset) × inverse(T_Cu_Tracker) × T_Cu_TCP
+
+示教数据只描述 UMI 的抓取中心轨迹，与部署机械臂无关。部署端把 Link7 换算到自己的
+TCP（``T_cam_end.yaml`` 与 ``T_d_cam_tcp.yaml``）由推理节点负责，两端 TCP 视为同一物理点，
+坐标轴须采用同一约定。模块名中的 ``link7`` 是历史命名，沿用以免大范围改名。
 
 Tracker 外参的 ``time_offset`` 单位为秒，固定按 ``t_camera = t_tracker + offset`` 解释
 （手眼标定报告的 ``t_eye = t_hand + offset``），即同一时刻相机时间戳比 Tracker 晚 offset，
@@ -54,6 +58,16 @@ class HandEyeExtrinsic:
 
 
 @dataclass(frozen=True)
+class TcpExtrinsic:
+    """UMI 相机光学坐标系中的 TCP 位姿外参及原始字节摘要。"""
+
+    path: str
+    sha256: str
+    matrix: np.ndarray
+    """``T_Cu_TCP``，4×4，平移单位米；``p_cam = T_Cu_TCP @ p_tcp``。"""
+
+
+@dataclass(frozen=True)
 class TrackerBinding:
     """Tracker 外参与设备序列号、来源记录和标定时间戳来源的绑定清单。"""
 
@@ -69,13 +83,13 @@ class TrackerBinding:
 
 
 @dataclass(frozen=True)
-class Link7Calibration:
-    """组合后的示教→Link7 外参和全部可追溯元数据。"""
+class TcpCalibration:
+    """组合后的 Tracker→UMI TCP 外参和全部可追溯元数据。"""
 
-    tracker_to_link7: np.ndarray
-    """``inverse(T_Cu_Tracker) × T_Cd_Link7``，把 Link7 坐标映射到 Tracker 坐标。"""
+    tracker_to_tcp: np.ndarray
+    """``inverse(T_Cu_Tracker) × T_Cu_TCP``，把 TCP 坐标映射到 Tracker 坐标。"""
     tracker_camera: HandEyeExtrinsic
-    end_camera: HandEyeExtrinsic
+    umi_tcp: TcpExtrinsic
     binding: Optional[TrackerBinding]
     tracker_serial: str
     tracker_serial_source: str
@@ -89,8 +103,8 @@ class Link7Calibration:
         return {
             "tracker_camera_extrinsic_path": self.tracker_camera.path,
             "tracker_camera_extrinsic_sha256": self.tracker_camera.sha256,
-            "end_camera_extrinsic_path": self.end_camera.path,
-            "end_camera_extrinsic_sha256": self.end_camera.sha256,
+            "umi_tcp_extrinsic_path": self.umi_tcp.path,
+            "umi_tcp_extrinsic_sha256": self.umi_tcp.sha256,
             "tracker_binding_path": self.binding.path if self.binding else "",
             "tracker_binding_sha256": self.binding.sha256 if self.binding else "",
             "expected_tracker_serial": self.tracker_serial,
@@ -99,8 +113,8 @@ class Link7Calibration:
                 self.binding.source_collection_uuid if self.binding else ""
             ),
             "T_Cu_Tracker": self.tracker_camera.matrix.tolist(),
-            "T_Cd_Link7": self.end_camera.matrix.tolist(),
-            "T_Tracker_Link7": self.tracker_to_link7.tolist(),
+            "T_Cu_TCP": self.umi_tcp.matrix.tolist(),
+            "T_Tracker_TCP": self.tracker_to_tcp.tolist(),
             "tracker_time_offset_source_s": self.tracker_camera.time_offset_s,
             "tracker_time_offset_ms": self.tracker_time_offset_ms,
             "time_calibration_timestamp_source": (
@@ -181,6 +195,23 @@ def load_hand_eye_extrinsic(path: str, label: str) -> HandEyeExtrinsic:
     )
 
 
+def load_umi_tcp_extrinsic(path: str) -> TcpExtrinsic:
+    """加载顶层键 ``T_u_cam_tcp`` 的 UMI TCP 外参，保留原始字节摘要。
+
+    Raises:
+        CalibrationError: 文件不可读、缺少矩阵或矩阵不是刚体变换。
+    """
+    file_path = Path(path).expanduser().resolve()
+    data, document = _read_yaml_bytes(file_path, "UMI TCP 外参")
+    if "T_u_cam_tcp" not in document:
+        raise CalibrationError(f"UMI TCP 外参 {file_path} 缺少 T_u_cam_tcp")
+    return TcpExtrinsic(
+        path=str(file_path),
+        sha256=sha256_bytes(data),
+        matrix=_check_transform(document["T_u_cam_tcp"], "T_u_cam_tcp"),
+    )
+
+
 def binding_path_for(extrinsic_path: str) -> Path:
     """返回外参同目录的配套绑定清单路径。"""
     path = Path(extrinsic_path)
@@ -228,13 +259,13 @@ def load_tracker_binding(path: Path, extrinsic: HandEyeExtrinsic) -> TrackerBind
     )
 
 
-def compose_tracker_to_link7(
-    camera_from_tracker: np.ndarray, camera_from_link7: np.ndarray
+def compose_tracker_to_tcp(
+    camera_from_tracker: np.ndarray, camera_from_tcp: np.ndarray
 ) -> np.ndarray:
-    """返回 ``inverse(T_Cu_Tracker) × T_Cd_Link7``，即 ``T_Tracker_Link7``。"""
+    """返回 ``inverse(T_Cu_Tracker) × T_Cu_TCP``，即 ``T_Tracker_TCP``。"""
     tracker = _check_transform(camera_from_tracker, "T_Cu_Tracker")
-    end = _check_transform(camera_from_link7, "T_Cd_Link7")
-    return np.linalg.inv(tracker) @ end
+    tcp = _check_transform(camera_from_tcp, "T_Cu_TCP")
+    return np.linalg.inv(tracker) @ tcp
 
 
 def tracker_query_offset_ms(time_offset_s: float) -> float:
@@ -258,12 +289,12 @@ def _check_time_offset_convention(value: str, label: str) -> None:
     )
 
 
-def load_link7_calibration(
+def load_tcp_calibration(
     tracker_camera_path: str,
-    end_camera_path: str,
+    umi_tcp_path: str,
     declared_tracker_serial: str = "",
-) -> Link7Calibration:
-    """加载两份外参，解析 Tracker 身份和时间偏移并组合 Link7 变换。
+) -> TcpCalibration:
+    """加载两份外参，解析 Tracker 身份和时间偏移并组合 Tracker→TCP 变换。
 
     身份优先级：外参文件内 ``tracker_serial`` 与同目录绑定清单；两者同时存在时
     必须一致。均缺失时必须由 ``declared_tracker_serial`` 声明（记为用户声明）；
@@ -271,14 +302,14 @@ def load_link7_calibration(
 
     Args:
         tracker_camera_path: ``T_cam_tracker`` 外参路径。
-        end_camera_path: ``T_cam_end`` 外参路径。
+        umi_tcp_path: ``T_u_cam_tcp`` 外参路径。
         declared_tracker_serial: 命令行 ``--tracker-serial``，可为空。
 
     Raises:
         CalibrationError: 任一身份、摘要、旧时间偏移声明或矩阵检查失败。
     """
     tracker = load_hand_eye_extrinsic(tracker_camera_path, "Tracker 相机外参")
-    end = load_hand_eye_extrinsic(end_camera_path, "末端相机外参")
+    umi_tcp = load_umi_tcp_extrinsic(umi_tcp_path)
     binding_file = binding_path_for(tracker.path)
     binding = (
         load_tracker_binding(binding_file, tracker) if binding_file.is_file() else None
@@ -327,12 +358,10 @@ def load_link7_calibration(
     if time_offset_s is None:
         time_offset_s = 0.0
         notes.append("Tracker 外参没有 time_offset，按 0 处理")
-    if end.time_offset_s is not None:
-        notes.append("末端相机外参的 time_offset 属于部署标定，不参与示教同步")
-    return Link7Calibration(
-        tracker_to_link7=compose_tracker_to_link7(tracker.matrix, end.matrix),
+    return TcpCalibration(
+        tracker_to_tcp=compose_tracker_to_tcp(tracker.matrix, umi_tcp.matrix),
         tracker_camera=tracker,
-        end_camera=end,
+        umi_tcp=umi_tcp,
         binding=binding,
         tracker_serial=serial,
         tracker_serial_source=serial_source,
@@ -347,7 +376,7 @@ def normalize_timestamp_source(value: Any) -> str:
     return LEGACY_TIMESTAMP_SOURCE if text == "unrecorded" else text
 
 
-def check_timestamp_source(calibration: Link7Calibration, record_source: Any) -> str:
+def check_timestamp_source(calibration: TcpCalibration, record_source: Any) -> str:
     """要求记录的图像时间戳来源与时间偏移标定所用来源一致。
 
     不同时间戳链路的时间偏移不能互相套用（实测 V4L2 缓冲区时间比回调 ``now()`` 早约

@@ -333,6 +333,7 @@ def test_finetune_and_resume_are_mutually_exclusive(tmp_path, tiny_instances):
     "train_diffusion_unet_timm_umi_workspace",
     "train_diffusion_unet_timm_vr_joint_workspace",
     "train_diffusion_unet_timm_vr_umi_workspace",
+    "train_diffusion_unet_timm_fastumi_tcp_workspace",
 ])
 def test_training_configs_inherit_finetune_path(name):
     config_dir = Path(__file__).parents[1] / "diffusion_policy" / "config"
@@ -374,3 +375,17 @@ def test_link7_script_passes_finetune_overrides(tmp_path):
     assert "optimizer.lr=3e-5" in arguments
     assert "training.num_epochs=20" in arguments
     assert f"task.dataset_path={dataset}" in arguments
+
+
+def test_tcp_config_only_changes_end_frame_contract():
+    """TCP 配置继承 Link7 位姿配置，只把末端契约改为 tcp 并预留示教相机←TCP 外参。"""
+    config_dir = Path(__file__).parents[1] / "diffusion_policy" / "config"
+    with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+        link7 = compose(config_name="train_diffusion_unet_timm_vr_umi_workspace")
+        tcp = compose(config_name="train_diffusion_unet_timm_fastumi_tcp_workspace")
+    assert tcp.task.contract.end_frame == "tcp"
+    assert tcp.task.contract.tool_offset == "deployment_calibration"
+    assert "umi_camera_from_tcp" in tcp.task.contract and tcp.task.contract.umi_camera_from_tcp is None
+    for key in ("base_frame", "frequency_hz", "action_reference", "gripper_representation"):
+        assert tcp.task.contract[key] == link7.task.contract[key]
+    assert tcp.shape_meta == link7.shape_meta and tcp.task.pose_repr == link7.task.pose_repr
