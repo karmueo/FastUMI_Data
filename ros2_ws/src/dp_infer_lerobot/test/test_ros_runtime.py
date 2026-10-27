@@ -12,10 +12,11 @@ rclpy = pytest.importorskip('rclpy')
 from std_srvs.srv import Trigger
 from dp_infer.common import InferenceContext
 from dp_infer.core import decode_actions as legacy_decode
-from dp_infer.node import DpInferenceNode
+from dp_infer.node import DpInferenceNode, stamp_ns
 from dp_infer_lerobot.core import decode_actions
 from dp_infer_lerobot.deployment import sha256_file
 from dp_infer_lerobot.node import LerobotInferenceNode
+from fastumi_rm75.placo_control import decode_trajectory
 
 
 @pytest.fixture(params=['legacy', 'lerobot'])
@@ -72,6 +73,40 @@ def test_short_horizon_expires_before_generic_timeout(runtime):
     node.future.set_result(sequence)
     node.tick()
     assert bool(published) == (kind == 'legacy')
+
+
+@pytest.mark.parametrize('steps', [1, 2, 8, 32])
+def test_sequential_execution_preserves_requested_actions(runtime, steps):
+    """两种后端的动作数、执行时间和控制器接收结果一致，包含单步与超长请求。"""
+    node, published, kind = runtime
+    node.task_state = 'running'
+    node._sequential = True
+    node._execution_steps = steps
+    node.link7_correction = np.eye(4)
+    context, _ = prediction(node, kind)
+    count = 16 if kind == 'legacy' else 8
+    actions = np.tile(np.r_[0.01, 0, 0, [1, 0, 0, 0, 1, 0], .7], (count, 1))
+    if kind == 'legacy':
+        # 旧后端的每个预测点均相对于观测位姿，而非逐步累积。
+        actions[:, 0] = np.arange(1, count + 1) * 0.01
+    sequence = (legacy_decode if kind == 'legacy' else decode_actions)(actions, context)
+    node.future, node.active_context = Future(), context
+    node.future.set_result(sequence)
+    node.tick()
+
+    assert len(published) == 1
+    message = published[0]
+    executed = min(steps, count)
+    assert len(message.poses) == executed + (kind == 'lerobot')
+    assert message.poses[-1].position.x == pytest.approx(executed * 0.01)
+    assert stamp_ns(message.time_from_start[-1]) == round(executed * 1e9 / 30)
+    published_ns = stamp_ns(message.header.stamp)
+    assert node.execution_end_ns == published_ns + stamp_ns(message.time_from_start[-1]) + node._settle_ns
+
+    # 模拟发布后收到消息：旧后端的每个动作都应有未来时刻，LeRobot 的 T0 是起始锚点。
+    trajectory = decode_trajectory(message, published_ns + 1_000_000, np.eye(4), .7)
+    assert len(trajectory.positions) == executed
+    assert trajectory.positions[-1, 0] == pytest.approx(executed * 0.01)
 
 
 def test_start_stop_recording_and_return_use_shared_lifecycle(runtime):

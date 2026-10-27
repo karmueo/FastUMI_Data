@@ -13,6 +13,8 @@ class LerobotBackend:
     parameter_defaults = {"num_inference_steps": 16, "deployment_config": "",
                           "record_dir_name": "dp_infer_lerobot", "task_control_enabled": True}
     point_count = 9
+    # 首点是观测时的起始位姿，后续八点对应八个动作增量。
+    sequence_starts_with_anchor = True
     visual_guard = False
     preprocess_image = staticmethod(core.letterbox_rgb)
     decode_compressed = staticmethod(core.compressed_image_to_rgb)

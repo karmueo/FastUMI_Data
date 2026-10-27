@@ -15,6 +15,8 @@ class LegacyBackend:
     node_name = "dp_infer"
     parameter_defaults = {}
     point_count = 16
+    # 每个输出点都是待执行的动作，不含额外的起始位姿。
+    sequence_starts_with_anchor = False
     visual_guard = True
     preprocess_image = staticmethod(core.letterbox_rgb)
     decode_compressed = staticmethod(core.compressed_image_to_rgb)

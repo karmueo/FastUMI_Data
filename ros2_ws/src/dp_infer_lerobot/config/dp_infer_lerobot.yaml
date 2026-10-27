@@ -10,3 +10,9 @@ dp_infer_lerobot:
     result_timeout_s: 0.5
     controller_reset_timeout_s: 1.0
     postprocessors: ""
+    # true：观测+推理→整段执行完并稳定 execution_settle_s 秒→再观测；false 为流水线默认模式。
+    # 串行模式下 header 为发布时刻，不再执行上述 8/30 秒与 result_timeout_s 约束。
+    sequential_execution: false
+    execution_settle_s: 0.3
+    # 串行模式每段执行的动作数，最小为 1；轨迹额外保留起始锚点，超过输出动作数时执行全部动作。
+    execution_action_steps: 8

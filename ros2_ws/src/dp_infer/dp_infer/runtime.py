@@ -25,7 +25,7 @@ from fastumi_interfaces.srv import (CancelRecording, CancelRecordingRequest, Res
                                     SetNumInferenceSteps, StartRecording, StopRecording)
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
-from dp_infer.common import (InferenceContext, JOINT_NAMES, image_to_rgb,
+from dp_infer.common import (ActionSequence, InferenceContext, JOINT_NAMES, image_to_rgb,
                              ordered_joints)
 from dp_infer.synchronizer import ObservationBuffer
 from dp_infer.visual_guard import ball_center_bgr, ball_near_jaws
@@ -43,8 +43,14 @@ def close_guard_allowed(rgb):
     return ball_near_jaws(center, bgr.shape[1], bgr.shape[0])
 
 
+def truncate_sequence(sequence, steps):
+    """只保留前 steps 个轨迹点；超过序列长度时保留全部，包括已有的起始锚点。"""
+    return ActionSequence(sequence.positions[:steps], sequence.quaternions[:steps],
+                          sequence.gripper_openness[:steps], sequence.time_from_start[:steps])
+
+
 def sequence_message(sequence, context):
-    """将已校验的核心结果转换为 ROS 消息；header 保留原始观测时间。"""
+    """将已校验的核心结果转换为 ROS 消息；header 使用上下文时间。"""
     message = PolicyActionSequence()
     message.header.stamp.sec, message.header.stamp.nanosec = divmod(context.stamp_ns, 1_000_000_000)
     message.header.frame_id = "base_link"
@@ -96,6 +102,10 @@ class PolicyRuntimeNode(Node):
             "recording_cancel_request_service": "/fastumi/recording/cancel_request",
             "input_timeout_s": 0.2, "history_tolerance_s": 0.015,
             "max_inference_hz": 10.0, "result_timeout_s": 0.5, "postprocessors": "",
+            # 串行模式：观测→推理→整段执行完（末点 + 稳定时间）后才进行下一次观测。
+            "sequential_execution": False, "execution_settle_s": 0.3,
+            # 串行模式每段只执行前 N 个动作，与训练 n_action_steps 一致。
+            "execution_action_steps": 8,
             # Link7 部署修正文件；空值语义由模型后端决定。
             "link7_correction_file": "",
         }
@@ -110,6 +120,15 @@ class PolicyRuntimeNode(Node):
         reset_timeout = float(self.parameter("controller_reset_timeout_s"))
         if not np.isfinite(reset_timeout) or reset_timeout <= 0:
             raise ValueError("controller_reset_timeout_s must be positive and finite")
+        settle = float(self.parameter("execution_settle_s"))
+        if not np.isfinite(settle) or settle < 0:
+            raise ValueError("execution_settle_s must be finite and non-negative")
+        self._sequential = bool(self.parameter("sequential_execution"))
+        self._settle_ns = round(settle * 1e9)  # 序列末点之后等待机械臂稳定的纳秒数。
+        steps = self.parameter("execution_action_steps")
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+            raise ValueError("execution_action_steps must be a positive integer")
+        self._execution_steps = steps  # 串行模式每段执行的动作数。
         self.period_s = 1 / rate  # 按单调时钟限制启动推理的最高频率。
         self.result_timeout_ns = round(result_timeout * 1e9)  # 相对采集时刻的最大结果年龄。
         urdf_value = self.parameter("urdf_path")
@@ -139,6 +158,8 @@ class PolicyRuntimeNode(Node):
         self.pending = None  # 最新待推理的冻结观测及上下文，覆盖旧候选。
         self.active_context = None  # 唯一在途任务的上下文。
         self.last_started_s = float("-inf")  # 上一次推理启动的单调时钟。
+        # 串行模式下已发布序列预计执行完并稳定的 ROS 纳秒时刻；None 表示允许观测。
+        self.execution_end_ns = None
         self.last_clock_ns = self.get_clock().now().nanoseconds  # 检测 ROS 时钟回退。
         self.sequence_id = 0  # 生命周期内递增，不随 episode 重置归零。
         self.active_num_inference_steps = self._requested_steps  # 在途推理使用的去噪步数。
@@ -205,6 +226,7 @@ class PolicyRuntimeNode(Node):
         self.get_logger().info(
             f"DP inference ready: base_link -> Link7, {backend.point_count} points at 30 Hz, "
             f"denoise_steps={self._requested_steps}, "
+            f"mode={f'sequential({self._execution_steps} steps)' if self._sequential else 'streaming'}, "
             f"link7_correction={correction_deg:.2f} deg / "
             f"{np.linalg.norm(self.link7_correction[:3, 3]) * 1000:.1f} mm")
 
@@ -322,6 +344,7 @@ class PolicyRuntimeNode(Node):
         """先使旧预测失效，再请求控制器停止并锁定新 episode。"""
         self.buffer.reset()
         self.pending = None
+        self.execution_end_ns = None
         self._invalidate_close_guard()
         self._reset_acknowledged = not self._require_controller_reset
         self._controller_reset_future = None
@@ -386,6 +409,7 @@ class PolicyRuntimeNode(Node):
         self.operation_id += 1
         self.buffer.reset()
         self.pending = None
+        self.execution_end_ns = None
         self._invalidate_close_guard()
         return self.operation_id
 
@@ -624,29 +648,53 @@ class PolicyRuntimeNode(Node):
                         f"current_episode={self.buffer.episode_id} "
                         f"denoise_steps={self.active_num_inference_steps} "
                         f"inference_ms={inference_ms:.1f}")
-                elif not 0 <= age_ns <= self.result_timeout_ns:
+                elif not self._sequential and not 0 <= age_ns <= self.result_timeout_ns:
                     self.warn(
                         f"Dropped prediction: result expired "
                         f"sequence={context.sequence_id} age_ms={age_ns / 1e6:.1f} "
                         f"limit_ms={self.result_timeout_ns / 1e6:.1f} "
                         f"denoise_steps={self.active_num_inference_steps} "
                         f"inference_ms={inference_ms:.1f}")
-                elif not self.backend.result_is_usable(
+                elif not self._sequential and not self.backend.result_is_usable(
                         sequence, context, self.get_clock().now().nanoseconds):
                     self.warn(f"Dropped prediction: trajectory fully expired sequence={context.sequence_id}")
                 else:
-                    self.publisher.publish(sequence_message(
-                        self.backend.correct_sequence(sequence, self.link7_correction), context))
+                    corrected = self.backend.correct_sequence(sequence, self.link7_correction)
+                    wait_text = ""
+                    if self._sequential:
+                        has_anchor = self.backend.sequence_starts_with_anchor
+                        corrected = truncate_sequence(corrected, self._execution_steps + int(has_anchor))
+                        if not has_anchor:
+                            # 旧后端的首点是动作而非锚点，推迟一帧以免控制器收到时已过期。
+                            corrected.time_from_start = corrected.time_from_start + 1.0 / 30.0
+                        # 推理期间机械臂静止，时间锚点改为发布时刻。
+                        context = InferenceContext(context.reference_pose, now_ns,
+                                                   context.episode_id, context.sequence_id)
+                        duration_ns = round(float(corrected.time_from_start[-1]) * 1e9)
+                        self.execution_end_ns = now_ns + duration_ns + self._settle_ns
+                        self.pending = None
+                        wait_text = f" wait_ms={(duration_ns + self._settle_ns) / 1e6:.1f}"
+                    self.publisher.publish(sequence_message(corrected, context))
                     self.get_logger().info(
                         f"Published sequence={context.sequence_id} episode={context.episode_id} "
-                        f"actions={len(sequence.positions)} denoise_steps={self.active_num_inference_steps} "
+                        f"points={len(corrected.positions)} denoise_steps={self.active_num_inference_steps} "
                         f"inference_ms={inference_ms:.1f} "
-                        f"age_ms={age_ns / 1e6:.1f}")
+                        f"age_ms={age_ns / 1e6:.1f}{wait_text}")
             except Exception as error:
                 self.warn(f"Inference/postprocessing failed: {error}")
             self.future = None
+        if self._sequential:
+            if self.future is not None:
+                return  # 推理在途：不做新观测，避免结果发布前覆盖候选。
+            if self.execution_end_ns is not None and now_ns < self.execution_end_ns:
+                self.buffer.poll(now_ns)  # 只推进同步历史，执行期间的窗口不用于推理。
+                return
         history = self.buffer.poll(now_ns)
+        if (history is not None and self._sequential and self.execution_end_ns is not None
+                and history[0].stamp_ns < self.execution_end_ns):
+            history = None  # 两帧都必须在机械臂执行完并稳定后采集。
         if history is not None:
+            self.execution_end_ns = None
             reference = history[-1].pose.copy()
             reference.setflags(write=False)
             context = InferenceContext(reference, history[-1].stamp_ns, self.buffer.episode_id, 0)

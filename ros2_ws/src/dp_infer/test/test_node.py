@@ -241,6 +241,88 @@ def test_pending_latest_and_clock_rollback(node):
     assert instance.pending is None and messages == []
 
 
+def test_sequential_mode_restamps_and_waits_for_execution(node, monkeypatch):
+    """串行模式按发布时刻重锚并等待整段执行；只用执行结束后的两帧观测再推理。"""
+    instance, messages = node
+    instance._sequential = True
+    submissions = []
+
+    def submit(*args):
+        submissions.append(args)
+        return Future()
+
+    monkeypatch.setattr(instance.worker, "submit", submit)
+    instance.engine.predict = lambda *_: None
+    now = instance.get_clock().now().nanoseconds
+    # 流水线模式会因超过 result_timeout_s 丢弃；串行模式下机械臂静止，照常发布。
+    old = InferenceContext(np.eye(4), now - 600_000_000, instance.buffer.episode_id, 1)
+    instance.future = Future()
+    instance.future.set_result(_prediction(old))
+    instance.active_context = old
+    instance.pending = ({}, old)
+    instance.tick()
+    assert len(messages) == 1 and instance.pending is None and not submissions
+    published_ns = stamp_ns(messages[0].header.stamp)
+    assert published_ns >= now
+    # 默认发布前 8 个动作，首点为 1/30 s、末点为 8/30 s。
+    assert len(messages[0].poses) == len(messages[0].gripper_openness) == 8
+    last_ns = stamp_ns(messages[0].time_from_start[-1])
+    assert stamp_ns(messages[0].time_from_start[0]) == round(1 / 30 * 1e9)
+    assert last_ns == round(8 / 30 * 1e9)
+    assert instance.execution_end_ns == published_ns + last_ns + 300_000_000
+
+    base = instance.get_clock().now().nanoseconds
+    _add_frame(instance.buffer, base - 100_000_000)
+    _add_frame(instance.buffer, base - 66_666_667)
+    instance.tick()
+    assert not submissions and instance.pending is None  # 仍在执行期内。
+
+    instance.execution_end_ns = base - 50_000_000  # 模拟整段动作已执行完。
+    _add_frame(instance.buffer, base - 33_333_334)
+    instance.tick()
+    assert not submissions  # 较早一帧仍在执行结束前采集。
+    assert instance.execution_end_ns == base - 50_000_000
+
+    _add_frame(instance.buffer, base)
+    instance.tick()
+    assert len(submissions) == 1 and submissions[0][2].stamp_ns == base
+    assert instance.execution_end_ns is None
+
+
+def test_truncate_sequence_keeps_leading_steps():
+    from dp_infer.runtime import truncate_sequence
+
+    sequence = _prediction(InferenceContext(np.eye(4), 0, 0, 1))
+    head = truncate_sequence(sequence, 8)
+    assert head.positions.shape == (8, 3) and head.quaternions.shape == (8, 4)
+    assert np.array_equal(head.time_from_start, sequence.time_from_start[:8])
+    assert len(truncate_sequence(sequence, 32).positions) == len(sequence.positions)
+
+
+def test_sequential_mode_holds_observations_during_inference_and_clears_on_reset(node, monkeypatch):
+    """串行推理在途时不采新观测；被丢弃的结果不进入等待并立即重新观测；重置清除等待。"""
+    instance, messages = node
+    instance._sequential = True
+    submissions = []
+    monkeypatch.setattr(instance.worker, "submit", lambda *args: submissions.append(args) or Future())
+    instance.engine.predict = lambda *_: None
+    now = instance.get_clock().now().nanoseconds
+    instance.future = Future()
+    _add_frame(instance.buffer, now - 56_666_667)
+    _add_frame(instance.buffer, now - 23_333_334)
+    instance.tick()
+    assert instance.pending is None
+    stale = InferenceContext(np.eye(4), now, instance.buffer.episode_id - 1, 1)
+    instance.active_context = stale
+    instance.future.set_result(_prediction(stale))
+    instance.tick()
+    assert messages == [] and instance.execution_end_ns is None
+    assert len(submissions) == 1  # 机械臂未执行新序列，直接使用当前观测重新推理。
+    instance.execution_end_ns = now + 1_000_000_000
+    response = asyncio.run(instance.on_reset(Trigger.Request(), Trigger.Response()))
+    assert response.success and instance.execution_end_ns is None
+
+
 def test_close_guard_publishes_vision_permission_and_clears_on_reset(node):
     instance, _ = node
     decisions = []

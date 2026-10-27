@@ -221,6 +221,27 @@ ROS 参数；正在执行的推理仍使用原步数，下一次提交的推理�
 输出始终是 16 个连续动作，与去噪步数不同。服务名可通过 launch 参数
 `set_inference_steps_service` 覆盖。
 
+### 串行执行模式
+
+默认是流水线模式：机械臂执行上一段序列的同时，节点继续用最新观测推理并发布新序列。
+加 `sequential_execution:=true` 切换为“观测→推理→执行完→再观测”：
+
+```bash
+ros2 launch dp_infer dp_infer.launch.py ... sequential_execution:=true execution_settle_s:=0.3 \
+  execution_action_steps:=8
+```
+
+- 每段执行前 `execution_action_steps` 个动作（默认 8，最小为 1；超过模型输出动作数时执行全部动作）。
+  旧后端发布对应数量的目标点，首点安排在发布后 1/30 秒；LeRobot 额外保留起始锚点，
+  因此执行 8 个动作时发布 9 个轨迹点。
+- 推理在途时不采新观测；结果发布后，等待 `末点 time_from_start（8 个动作为 8/30 s）+ execution_settle_s`，
+  之后两帧历史都晚于该时刻的同步观测才会提交下一次推理。
+- 发布序列的 `header.stamp` 改为发布时刻（流水线模式仍为观测采集时刻），控制器执行全部选定动作；
+  推理期间机械臂静止，因此不再按 `result_timeout_s` 丢弃结果，episode 校验保留。
+- 完成判定按时间计算，不读取控制器状态。控制器在末点后 `sequence_hold_s`（默认 0.3 s）仍无新序列时
+  会记录 “policy sequence completed” 并停止控制，下一段序列以实测关节重新锚定，这是预期行为。
+- 停止任务、重置 episode 或 ROS 时钟回退会清除等待状态。`dp_infer_lerobot` 共享同一运行层和同名参数。
+
 `inference_python`、
 `controller_python`、`control_urdf_path` 可覆盖非标准部署路径；
 `device`、`joint_topic`、`gripper_topic`、`output_topic`、`postprocessors` 也可覆盖。

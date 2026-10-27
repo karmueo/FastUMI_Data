@@ -55,3 +55,13 @@ dp_infer:
     result_timeout_s: 0.5
     # 可选后处理器列表，逗号分隔的 module:factory；每个无参工厂须返回含 process 方法的对象，留空表示不用。
     postprocessors: ""
+    # 串行执行模式：false 为默认流水线（边执行边观测推理）；true 时一次观测+推理后，
+    # 等整段动作执行完（末点 time_from_start + execution_settle_s）再采下一次观测。
+    # 串行模式下发布序列的 header 时间为发布时刻，控制器执行选定的动作，且不再按
+    # result_timeout_s 丢弃结果（推理期间机械臂静止）。
+    sequential_execution: false
+    # 串行模式下序列末点之后等待机械臂稳定的时间，单位秒；之后的两帧观测才用于推理。
+    execution_settle_s: 0.3
+    # 串行模式每段执行前 N 个动作（N/30 秒），与训练 n_action_steps=8 一致；最小为 1，
+    # 超过模型输出动作数时执行全部动作。旧后端的首个目标在发布后 1/30 秒执行。
+    execution_action_steps: 8

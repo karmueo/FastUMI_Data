@@ -74,6 +74,15 @@ def _start(context):
     image_type = LaunchConfiguration("image_type").perform(context)
     if image_type not in ("compressed", "raw"):
         raise ValueError("image_type must be compressed or raw")
+    sequential = LaunchConfiguration("sequential_execution").perform(context).lower()
+    if sequential not in ("true", "false"):
+        raise ValueError("sequential_execution must be true or false")
+    settle = float(LaunchConfiguration("execution_settle_s").perform(context))
+    if not 0.0 <= settle < float("inf"):
+        raise ValueError("execution_settle_s must be finite and non-negative")
+    action_steps = int(LaunchConfiguration("execution_action_steps").perform(context))
+    if action_steps < 1:
+        raise ValueError("execution_action_steps must be a positive integer")
     steps = int(LaunchConfiguration("num_inference_steps").perform(context))
     if not 1 <= steps <= 50:
         raise ValueError("num_inference_steps must be in [1, 50]")
@@ -105,6 +114,10 @@ def _start(context):
         "-p", f"record_task:={record}",
         "-p", "record_dir_name:=" + LaunchConfiguration("record_dir_name").perform(context),
         "-p", "record_name:=" + LaunchConfiguration("record_name").perform(context),
+        "-p", f"sequential_execution:={sequential}",
+        # 显式写成浮点，避免 "1" 被 ROS 解析为整数参数。
+        "-p", f"execution_settle_s:={settle!r}",
+        "-p", f"execution_action_steps:={action_steps}",
     ]
     for name, value in overrides.items():
         if value:
@@ -198,6 +211,10 @@ def generate_launch_description():
         "controller_reset_service": "/fastumi/rm75/placo/reset_episode",
         "max_start_displacement_m": "0.0", "max_start_rise_m": "0.0",
         "postprocessors": "",
+        # 串行模式：整段动作执行完并稳定 execution_settle_s 秒后才进行下一次观测+推理。
+        "sequential_execution": "false", "execution_settle_s": "0.3",
+        # 串行模式每段执行的动作数，轨迹另含起始锚点。
+        "execution_action_steps": "8",
     }
     return LaunchDescription([
         *(DeclareLaunchArgument(name, default_value=value)
