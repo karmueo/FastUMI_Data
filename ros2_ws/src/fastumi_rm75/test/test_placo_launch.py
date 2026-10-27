@@ -56,11 +56,14 @@ def test_controller_config_disables_close_gate_by_default():
 
 
 def test_controller_config_uses_measured_gripper_calibration_and_sequence_hold():
-    """两种夹爪物理刻度一致，取恒等映射；夹空阈值位于空夹与夹住读数之间；序列末点短时保持。"""
+    """锁定压紧读数映射到训练抓持开度（0.50–0.73）；夹空阈值位于空夹与夹住读数之间；序列末点短时保持。"""
+    from fastumi_rm75.placo_control import GripperScale
+
     parameters = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
     values = parameters["rm75_placo_controller"]["ros__parameters"]
     assert values["grasp_latch_enabled"] is True
-    assert values["gripper_map_robot_ref"] == pytest.approx(values["gripper_map_policy_ref"])
+    scale = GripperScale(values["gripper_map_policy_ref"], values["gripper_map_robot_ref"])
+    assert 0.50 <= scale.to_policy(values["gripper_map_robot_ref"]) <= 0.73
     assert 0.031 < values["grasp_miss_state"] < 0.32
     assert 0.0 < values["sequence_hold_s"] <= 1.0
 

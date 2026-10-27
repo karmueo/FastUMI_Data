@@ -86,8 +86,8 @@ ros2 service call /fastumi/rm75/disable fastumi_interfaces/srv/SetTeleopGenerati
 宇树驱动是纯位置 PD：命令到达目标宽度后误差为 0，没有夹持力。实机录制中策略收到 0.53
 时两指仍比玩偶宽，抬臂后玩偶留在桌上。控制器因此做两件事：
 
-- **刻度映射**：两点线性，1.0↔1.0，`gripper_map_policy_ref`（训练集抓持开度中位数 0.58）↔
-  `gripper_map_robot_ref`（宇树夹爪达到同一物理宽度时的读数）。透传的策略开度先换算到宇树刻度再下发；
+- **刻度映射**：两点线性，1.0↔1.0，`gripper_map_policy_ref`（训练集抓持开度，当前 0.55）↔
+  `gripper_map_robot_ref`（宇树夹爪锁定夹住目标时的读数，当前 0.19）。透传的策略开度先换算到宇树刻度再下发；
   宇树反馈换算回训练刻度后发布到 `policy_gripper_state_topic`（默认 `/fastumi/policy/gripper_state`），
   `dp_infer` 组合 launch 让推理节点订阅它作为夹爪观测。两个参考点相等时为恒等映射。
 - **闭合锁定**（`grasp_latch_enabled`，默认 `true`）：策略开度持续低于 `grasp_close_threshold`（0.75）
@@ -102,8 +102,11 @@ ros2 service call /fastumi/rm75/disable fastumi_interfaces/srv/SetTeleopGenerati
 
 两种夹爪手指上都贴有同规格 ArUco 码（DICT_4X4_50，id 0/1，16 mm）。以各自鱼眼内参 PnP
 求两码间距并对开度拟合：UMI 训练数据为 80.7·g+47.4 mm，宇树实机为 79.5·g+48.7 mm，
-同一开度的物理宽度一致，因此默认恒等映射（`gripper_map_robot_ref: 0.58`）。不要用夹住目标时
-的读数作 `robot_ref`：锁定命令全闭，会把软质目标压紧到更小的读数（玩偶约 0.32）。
+同一开度的物理宽度一致，所以最初用的是恒等映射（0.58↔0.58）。但锁定命令全闭，会把目标压紧到
+训练中从未出现的读数（玩偶约 0.32；2026-10-26 rollout episode_3 的目标为 0.19，而训练抓持最低 0.50）。
+抓取后策略收到越界的夹爪观测，无法完成放置。因此现在用锁定压紧读数作 `robot_ref`（0.19↔0.55），
+让抓持观测落回训练范围；代价是张开段下发宽度变窄（策略 0.83 → 宇树 0.69，约窄 11 mm）。
+换目标物体后，用下面的方法测出锁定压紧读数，重新设定 `gripper_map_robot_ref`。
 
 夹空阈值取宇树空夹到底读数与锁定夹住目标读数的中点。当前玩偶为 0.031 与 0.32，配置
 `grasp_miss_state: 0.18`；换目标物体后重新测量（只启动 `hardware.launch.py`）：

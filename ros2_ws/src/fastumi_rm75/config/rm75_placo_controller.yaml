@@ -26,10 +26,12 @@ rm75_placo_controller:
     close_min_episode_time_s: 1.5
     # 夹爪刻度映射：两点线性，1.0↔1.0，policy_ref↔robot_ref，两者相等即恒等映射。
     # 控制器把宇树反馈换算到训练刻度后发布到 policy_gripper_state_topic，供推理节点作观测。
-    # 手指 ArUco 码间距实测：UMI 80.7·g+47.4 mm，宇树 79.5·g+48.7 mm，同一开度物理宽度一致，
-    # 故取恒等映射。夹住目标时的读数受锁定压紧影响，不能作为 robot_ref。
-    gripper_map_policy_ref: 0.58
-    gripper_map_robot_ref: 0.58
+    # 手指 ArUco 码间距实测两种夹爪同一开度物理宽度一致，原取恒等映射 0.58↔0.58；但锁定全闭会把
+    # 目标压到训练从未出现的读数（rollout 2026-10-26 episode_3 为 0.19，训练抓持最低 0.50），抓取后
+    # 策略观测越界、无法放入碗中。现以锁定压紧读数 0.19 对应训练抓持开度 0.55，使抓持观测落回训练范围；
+    # 代价是张开段下发宽度变窄（策略 0.83 → 宇树 0.69）。换目标物体后按其压紧读数重新设定 robot_ref。
+    gripper_map_policy_ref: 0.55
+    gripper_map_robot_ref: 0.19
     policy_gripper_state_topic: /fastumi/policy/gripper_state
     # 闭合锁定：策略开度（训练刻度）持续低于 close_threshold 达 close_confirm_s 秒后命令 grasp_command，
     # 借位置环误差产生夹持力；开度回升到 release_threshold 以上才释放。阈值取自训练集：
