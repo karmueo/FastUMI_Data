@@ -1,0 +1,11 @@
+# Python 3.12 / Linux x86_64 / ROS 2 Jazzy；torch 与 torchvision 从 PyTorch cu128 索引安装。
+torch==2.11.0
+torchvision==0.26.0
+numpy==1.26.4
+scipy==1.11.4
+diffusers==0.39.0
+huggingface-hub>=0.34,<2
+safetensors==0.8.0
+einops==0.8.2
+PyYAML>=6,<7
+pytest>=8,<9

@@ -1,0 +1,21 @@
+# LeRobot TCP 扩散策略（dp_umi_v4）推理节点的 ROS 参数及默认输入输出话题；时间单位为秒。
+dp_infer_lerobot:
+  ros__parameters:
+    device: cuda:0
+    # 训练用 DDPM 100 步在 RTX 5090 上约 343 ms，超过 8 个动作覆盖的 267 ms；部署默认 DDIM 16 步（约 59 ms），
+    # 留出 episode 开环误差与 DDPM 100 相当。设为 "" / 0 则沿用 checkpoint 的 DDPM 100 步。
+    noise_scheduler: DDIM
+    num_inference_steps: 16
+    image_topic: /usb_camera/image_raw
+    joint_topic: /joint_states
+    gripper_topic: /gripper/openness
+    output_topic: /fastumi/policy/action_sequence
+    reset_service: /fastumi/policy/reset_episode
+    sync_slop_s: 0.05
+    input_timeout_s: 0.2
+    history_tolerance_s: 0.015
+    max_inference_hz: 10.0
+    result_timeout_s: 0.5
+    postprocessors: ""
+    # 示教 TCP 与部署 TCP 坐标轴允许的最大夹角（度）。
+    max_tcp_axis_deg: 10.0
