@@ -27,7 +27,7 @@ setup(
     data_files=[
         (f"share/{PACKAGE_NAME}/licenses", glob("licenses/*")),
         (f"share/{PACKAGE_NAME}/tools", glob("tools/*.py")),
-        (f"share/{PACKAGE_NAME}", ["requirements-x86.txt"]),
+        (f"share/{PACKAGE_NAME}", ["requirements-x86.txt", "requirements-tensorrt.txt"]),
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE_NAME}"]),
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),
         (f"share/{PACKAGE_NAME}/config", glob("config/*.yaml")),

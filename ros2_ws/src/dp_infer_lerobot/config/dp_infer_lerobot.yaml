@@ -2,6 +2,9 @@
 dp_infer_lerobot:
   ros__parameters:
     device: cuda:0
+    # 推理后端：pytorch 读取 checkpoint；tensorrt_fp32 / tensorrt_fp16 读取 export_dir 指向的
+    # lerobot-export 模型包（engine 与构建 GPU 及 TensorRT 版本绑定，且该精度须已通过导出验证）。
+    backend: pytorch
     # 训练用 DDPM 100 步在 RTX 5090 上约 343 ms，超过 8 个动作覆盖的 267 ms；部署默认 DDIM 16 步（约 59 ms），
     # 留出 episode 开环误差与 DDPM 100 相当。设为 "" / 0 则沿用 checkpoint 的 DDPM 100 步。
     noise_scheduler: DDIM

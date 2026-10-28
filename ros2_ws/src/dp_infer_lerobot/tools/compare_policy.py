@@ -5,9 +5,11 @@
 - ``export-reference``：LeRobot fork 训练环境（如 ``/home/scl/work/lerobot/.venv``）。从 LeRobotDataset
   取留出 episode 的真实样本，用原版 ``DiffusionPolicy`` + 处理链推理，固定初始噪声与随机种子。
 - ``export-candidate``：本包推理环境（``ros2_ws/.venv-dp-lerobot``）。读取参考 NPZ 的同一输入，
-  用 :class:`dp_infer_lerobot.engine.PolicyEngine` 推理。
-- ``compare``：任意含 NumPy 的环境。逐项比较归一化状态、模型动作与最终动作，失败返回非零；
-  报告还给出两者相对示教动作的开环误差。
+  用 :class:`dp_infer_lerobot.engine.PolicyEngine` 推理；``--backend tensorrt_fp32/fp16 --export-dir``
+  改用 LeRobot 导出的 TensorRT 模型包。
+- ``compare``：任意含 NumPy/SciPy 的环境。默认逐项比较归一化状态、模型动作与最终动作（atol/rtol）；
+  ``--physical`` 改为按最终绝对动作的物理门槛验收（位置 mm、旋转角 °、夹爪绝对差，用于 TensorRT），
+  失败返回非零；报告还给出两者相对示教动作的开环误差。
 
 动作 k 对应观测时刻 + k/30 秒，示教真值取同一 episode 的第 t..t+7 帧 action。
 """
@@ -27,6 +29,8 @@ ACTION_STEPS = 8  # 每次推理的动作数。
 HORIZON = 16  # 扩散去噪序列长度。
 MODEL_DIM = 10  # 模型布局动作维度。
 COMPARED = ("normalized_state", "model_actions", "actions")  # compare 子命令逐项比较的数组。
+# --physical 默认门槛，与 LeRobot 导出验证一致：位置 1 mm、旋转 0.5°、夹爪 0.01。
+PHYSICAL_LIMITS = {"position_mm": 1.0, "rotation_deg": 0.5, "gripper": 0.01}
 
 
 def held_out_episodes(dataset, eval_split):
@@ -115,8 +119,10 @@ def export_candidate(args):
 
     sample = np.load(args.sample)
     meta = json.loads(str(sample["meta"]))
+    if args.backend == "pytorch" and not args.checkpoint:
+        raise SystemExit("--checkpoint is required for the pytorch backend")
     engine = PolicyEngine(args.checkpoint, load_profile(args.deployment_config), args.device,
-                          meta["scheduler"], meta["steps"])
+                          meta["scheduler"], meta["steps"], backend=args.backend, export_dir=args.export_dir)
     records = {key: [] for key in (*COMPARED, "latency_ms")}
     for number in range(len(sample["index"])):
         observations = {IMAGE_KEY: sample["image"][number][None], STATE_KEY: sample["state"][number][None]}
@@ -169,6 +175,7 @@ def compare(args):
     hold = np.repeat(reference["state"][:, -1:, :], ACTION_STEPS, axis=1)
     report = {"meta": json.loads(str(candidate["meta"])), "samples": int(len(truth)),
               "atol": args.atol, "rtol": args.rtol, "checks": {},
+              "physical_limits": PHYSICAL_LIMITS if args.physical else None,
               "latency_ms": {"median": float(np.median(candidate["latency_ms"])),
                              "p95": float(np.percentile(candidate["latency_ms"], 95))},
               "openloop": {"reference": summarize(reference["actions"], truth),
@@ -179,7 +186,16 @@ def compare(args):
         difference = np.abs(reference[key] - candidate[key])
         ok = bool(np.allclose(candidate[key], reference[key], atol=args.atol, rtol=args.rtol))
         report["checks"][key] = {"passed": ok, "max_abs": float(difference.max())}
-        passed &= ok
+        if not args.physical:
+            passed &= ok
+    if args.physical:
+        # TensorRT 与 PyTorch 内核不同，逐元素容差不适用；按最终绝对动作的物理偏差验收。
+        errors = pose_errors(candidate["actions"], reference["actions"])
+        for (name, limit), values in zip(PHYSICAL_LIMITS.items(), errors):
+            ok = bool(np.isfinite(candidate["actions"]).all() and values.max() <= limit)
+            report["checks"][f"actions.{name}"] = {"passed": ok, "max": float(values.max()),
+                                                    "p95": float(np.percentile(values, 95))}
+            passed &= ok
     report["passed"] = passed
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.report:
@@ -205,7 +221,9 @@ def main(argv=None):
     ref.add_argument("--device", default="cuda:0")
     ref.add_argument("--output", required=True)
     cand = sub.add_parser("export-candidate")
-    cand.add_argument("--checkpoint", required=True)
+    cand.add_argument("--checkpoint", default="", help="PyTorch 后端必填的 pretrained_model 目录")
+    cand.add_argument("--backend", choices=("pytorch", "tensorrt_fp32", "tensorrt_fp16"), default="pytorch")
+    cand.add_argument("--export-dir", default="", help="TensorRT 后端使用的 lerobot-export 模型包")
     cand.add_argument("--deployment-config", required=True)
     cand.add_argument("--sample", required=True)
     cand.add_argument("--device", default="cuda:0")
@@ -216,6 +234,7 @@ def main(argv=None):
     cmp.add_argument("--report", default="")
     cmp.add_argument("--atol", type=float, default=1e-5)
     cmp.add_argument("--rtol", type=float, default=1e-4)
+    cmp.add_argument("--physical", action="store_true", help="按物理门槛验收最终动作（TensorRT 对照）")
     args = parser.parse_args(argv)
     return {"export-reference": export_reference, "export-candidate": export_candidate,
             "compare": compare}[args.command](args) or 0

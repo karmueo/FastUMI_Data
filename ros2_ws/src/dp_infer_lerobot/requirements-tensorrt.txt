@@ -1,0 +1,5 @@
+# 可选 TensorRT 后端；须与 LeRobot 导出 engine 的版本一致（manifest.json 记录 10.13.3.9.post1）。
+# Linux x86_64 / CUDA 12，从 NVIDIA 官方索引安装：--extra-index-url https://pypi.nvidia.com
+tensorrt-cu12==10.13.3.9.post1
+tensorrt-cu12-libs==10.13.3.9.post1
+tensorrt-cu12-bindings==10.13.3.9.post1

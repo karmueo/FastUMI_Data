@@ -26,6 +26,7 @@ from dp_infer.node import sequence_message, stamp_ns
 from dp_infer.synchronizer import ObservationBuffer
 
 from . import core, deployment
+from .config import validate_backend
 
 
 class LerobotInferenceNode(Node):
@@ -36,6 +37,8 @@ class LerobotInferenceNode(Node):
         super().__init__("dp_infer_lerobot")
         defaults = {
             "checkpoint": "", "deployment_config": "", "device": "cuda:0", "urdf_path": "",
+            # pytorch 读取 checkpoint；tensorrt_fp32/tensorrt_fp16 读取 export_dir 模型包中的 engine。
+            "backend": "pytorch", "export_dir": "",
             # 空字符串沿用训练 DDPM；DDIM 可配合较少步数降低延迟。0 表示 checkpoint 默认步数。
             "noise_scheduler": "", "num_inference_steps": 0,
             "image_topic": "/usb_camera/image_raw", "joint_topic": "/joint_states",
@@ -70,16 +73,20 @@ class LerobotInferenceNode(Node):
         self.link7_from_tool = link7_from_tcp  # T_Link7_TCP，观测右乘、输出右乘其逆。
         self.link7_from_tool.setflags(write=False)
         if engine is None:
-            checkpoint = self.parameter("checkpoint")
-            if not checkpoint or not Path(checkpoint).is_dir():
-                raise ValueError("checkpoint must name an existing pretrained_model directory")
+            backend, checkpoint, export_dir = (self.parameter(name) for name in ("backend", "checkpoint",
+                                                                                  "export_dir"))
+            if validate_backend(backend) is None:
+                if not checkpoint or not Path(checkpoint).is_dir():
+                    raise ValueError("checkpoint must name an existing pretrained_model directory")
+            elif not export_dir or not Path(export_dir).is_dir():
+                raise ValueError("TensorRT backends require export_dir naming a lerobot-export package")
             from .engine import PolicyEngine
 
             processors = load_processors([item.strip() for item in self.parameter("postprocessors").split(",")
                                           if item.strip()])
             engine = PolicyEngine(checkpoint, profile, self.parameter("device"),
                                   self.parameter("noise_scheduler"), self.parameter("num_inference_steps"),
-                                  processors)
+                                  processors, backend, export_dir)
         self.fk = UrdfKinematics(Path(urdf_value), JOINT_NAMES)
         self.engine = engine  # 只由工作线程调用的策略实例。
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dp_infer_lerobot_policy")

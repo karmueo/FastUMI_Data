@@ -163,3 +163,14 @@ def test_tcp_axis_threshold_from_parameter_file(tmp_path, max_axis_deg, accepted
         if instance is not None:
             instance.destroy_node()
         rclpy.shutdown()
+
+
+def test_tensorrt_backend_requires_export_dir(tmp_path):
+    """TensorRT 后端缺少模型包目录时在加载模型前拒绝启动。"""
+    args, _ = _files(tmp_path)
+    rclpy.init(args=[*args, "-p", "backend:=tensorrt_fp16"])
+    try:
+        with pytest.raises(ValueError, match="export_dir"):
+            LerobotInferenceNode()
+    finally:
+        rclpy.shutdown()

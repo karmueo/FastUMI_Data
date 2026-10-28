@@ -42,3 +42,36 @@ def test_launch_defers_tcp_validation_to_node(tmp_path, monkeypatch):
     monkeypatch.setattr(deployment, "load_tool_offset", reject_duplicate_validation)
     actions = module._start(context)
     assert len(actions) == 2
+
+
+def test_launch_validates_tensorrt_package(tmp_path, monkeypatch):
+    """TensorRT 后端改为校验模型包并只向节点传递 export_dir。"""
+    path = Path(__file__).resolve().parents[1] / "launch/dp_infer_lerobot.launch.py"
+    spec = importlib.util.spec_from_file_location("lerobot_launch_trt", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config = tmp_path / "params.yaml"
+    config.write_text("dp_infer_lerobot:\n  ros__parameters:\n    backend: tensorrt_fp16\n")
+    export = tmp_path / "export"
+    (export / "assets").mkdir(parents=True)
+    context = LaunchContext()
+    context.launch_configurations.update({name: "" for name in module.OVERRIDE_NAMES})
+    context.launch_configurations.update({
+        "checkpoint": "", "export_dir": str(export), "inference_python": sys.executable,
+        **{name: str(config) for name in (
+            "deployment_config", "urdf_path", "config_file", "end_camera_extrinsic",
+            "deploy_tcp_extrinsic")},
+    })
+    checked = []  # 记录 validate_export 收到的模型包与精度。
+    monkeypatch.setattr(module, "get_package_share_directory", lambda _: str(tmp_path))
+    monkeypatch.setattr(deployment, "load_profile", lambda _: {})
+    monkeypatch.setattr(deployment, "validate_checkpoint", lambda *_: pytest.fail("checkpoint not used"))
+    monkeypatch.setattr(deployment, "validate_export", lambda root, _, precision: checked.append((root, precision)))
+    monkeypatch.setattr(deployment, "validate_urdf", lambda *_: None)
+    monkeypatch.setattr(DiffusionConfig, "from_file", lambda *_: None)
+    actions = module._start(context)
+    assert checked == [(export.resolve(), "fp16")]
+    command = actions[1].cmd
+    flat = [part[0].text if hasattr(part[0], "text") else str(part) for part in command]
+    assert any(f"export_dir:={export.resolve()}" in item for item in flat)
+    assert not any("checkpoint:=" in item for item in flat)

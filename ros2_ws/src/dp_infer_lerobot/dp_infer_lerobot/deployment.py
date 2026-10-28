@@ -88,6 +88,58 @@ def validate_checkpoint(checkpoint, profile):
             raise ValueError(f"Checkpoint fingerprint mismatch: {name}")
 
 
+def validate_export(export_dir, profile, precision):
+    """核对 ``lerobot-export`` 模型包并绑定到部署档，返回 manifest。
+
+    模型包不含 ``model.safetensors``：``assets/`` 中其余 checkpoint 文件须与部署档指纹一致，
+    manifest 记录的源权重摘要须等于部署档的 ``model.safetensors`` 摘要；manifest 列出的全部文件
+    （含 engine）逐一核对摘要。``validation_report.json`` 必须针对当前 manifest 且所选精度已通过验收。
+
+    Args:
+        export_dir: 模型包根目录（含 ``manifest.json``、``assets/`` 与 engine）。
+        profile: :func:`load_profile` 返回的部署档。
+        precision: ``fp32`` 或 ``fp16``。
+
+    Raises:
+        ValueError: 模型包不完整、被修改、与部署档不符或该精度未通过验证。
+    """
+    root = Path(export_dir)
+    manifest_path, report_path = root / "manifest.json", root / "validation_report.json"
+    if not root.is_dir() or not manifest_path.is_file():
+        raise ValueError("export_dir must name a complete lerobot-export package")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (manifest.get("schema_version") != 1 or manifest.get("status") != "complete"
+            or manifest.get("policy_type") != "diffusion" or manifest.get("batch_size") != 1):
+        raise ValueError("Unsupported or incomplete export package")
+    for name, digest in manifest.get("files", {}).items():
+        path = root / name
+        if not path.resolve().is_relative_to(root.resolve()) or not path.is_file() or sha256_file(path) != digest:
+            raise ValueError(f"Export artifact checksum mismatch: {name}")
+    files = profile.get("checkpoint_files", {})
+    assets = [name for name in required_files(root / "assets") if name != "model.safetensors"]
+    if set(files) != {*assets, "model.safetensors"}:
+        raise ValueError("Deployment profile must bind every required checkpoint file")
+    for name in assets:
+        if manifest["files"].get(f"assets/{name}") != files[name]:
+            raise ValueError(f"Export asset does not match the deployment profile: {name}")
+    if manifest.get("checkpoint_sha256") != files["model.safetensors"]:
+        raise ValueError("Export package was built from different model weights")
+    for stage in ("encoder", "denoiser"):
+        engine = manifest.get("stages", {}).get(stage, {}).get("engines", {}).get(precision)
+        if not engine or f"{engine.get('path')}" not in manifest["files"]:
+            raise ValueError(f"Export package lacks a verified {precision} {stage} engine")
+    if not report_path.is_file():
+        raise ValueError("Export package lacks validation_report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    backend = report.get("backends", {}).get(f"tensorrt_{precision}", {})
+    if (report.get("package_manifest_sha256") != sha256_file(manifest_path)
+            or report.get("checkpoint_sha256") != files["model.safetensors"]):
+        raise ValueError("Validation report does not belong to this export package")
+    if backend.get("passed") is not True:
+        raise ValueError(f"TensorRT {precision} engines have not passed export validation")
+    return manifest
+
+
 def validate_urdf(path, profile):
     """部署 FK 必须使用训练数据记录的同一 URDF。"""
     path = Path(path)

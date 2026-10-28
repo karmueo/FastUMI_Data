@@ -15,6 +15,15 @@ RAW_DIM = 7  # 原始 state/action 维度。
 MODEL_DIM = 10  # 相对位姿后 [xyz, rot6d, gripper] 维度。
 MAX_INFERENCE_STEPS = 100  # 不超过训练时间步数。
 NOISE_SCHEDULERS = ("DDPM", "DDIM")  # 推理可选调度器；DDIM 复用 DDPM 训练的噪声表。
+# 推理后端：PyTorch 读取 checkpoint；TensorRT 读取 lerobot-export 模型包中对应精度的 engine。
+BACKENDS = ("pytorch", "tensorrt_fp32", "tensorrt_fp16")
+
+
+def validate_backend(value):
+    """校验后端名并返回 TensorRT 精度（``fp32``/``fp16``），PyTorch 返回 ``None``。"""
+    if value not in BACKENDS:
+        raise ValueError(f"backend must be one of {BACKENDS}")
+    return value.removeprefix("tensorrt_") if value != "pytorch" else None
 
 # config.json 中必须逐字相等的字段。
 SUPPORTED = {

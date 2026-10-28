@@ -6,6 +6,7 @@
     ROS_DOMAIN_ID=181 ros2_ws/.venv-dp-lerobot/bin/python \\
         ros2_ws/src/dp_infer_lerobot/test/smoke_dp_infer_lerobot.py \\
         --checkpoint <pretrained_model> --sample dataset/validation/dp_lerobot_v4/reference_ddim16.npz \\
+        [--backend tensorrt_fp16 --export-dir <lerobot-export 模型包>] \\
         --report dataset/validation/dp_lerobot_v4/smoke_ddim16.json
 """
 
@@ -110,7 +111,9 @@ def spin_for(executor, seconds):
 def main():
     """启动 launch、回放、重置并输出报告；失败时返回非零。"""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", default="", help="PyTorch 后端的 pretrained_model 目录")
+    parser.add_argument("--backend", default="", help="pytorch / tensorrt_fp32 / tensorrt_fp16，空则沿用参数文件")
+    parser.add_argument("--export-dir", default="", help="TensorRT 后端的 lerobot-export 模型包")
     parser.add_argument("--sample", required=True)
     parser.add_argument("--urdf", default="assets/rm_75.urdf")
     parser.add_argument("--end-camera", default="config/calibration/T_cam_end.yaml")
@@ -126,10 +129,17 @@ def main():
     args = parser.parse_args()
     if not np.isfinite(args.max_result_age_s) or args.max_result_age_s <= 0:
         parser.error("--max-result-age-s must be positive and finite")
+    if not args.checkpoint and not args.export_dir:
+        parser.error("--checkpoint or --export-dir is required")
     command = ["ros2", "launch", "dp_infer_lerobot", "dp_infer_lerobot.launch.py",
-               f"checkpoint:={Path(args.checkpoint).resolve()}", f"urdf_path:={Path(args.urdf).resolve()}",
+               f"urdf_path:={Path(args.urdf).resolve()}",
                f"end_camera_extrinsic:={Path(args.end_camera).resolve()}",
                f"deploy_tcp_extrinsic:={Path(args.deploy_tcp).resolve()}"]
+    for name, value in (("checkpoint", args.checkpoint), ("export_dir", args.export_dir)):
+        if value:
+            command.append(f"{name}:={Path(value).resolve()}")
+    if args.backend:
+        command.append(f"backend:={args.backend}")
     if args.noise_scheduler:
         command.append(f"noise_scheduler:={args.noise_scheduler}")
     if args.num_inference_steps:

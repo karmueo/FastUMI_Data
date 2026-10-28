@@ -3,7 +3,8 @@
 `dp_infer_lerobot` 部署 LeRobot fork（`/home/scl/work/lerobot`，提交 `6168a52` 增加 SE(3) 相对位姿）
 训练的 UMI TCP 扩散策略，当前绑定 `dp_umi_v4` 的 `checkpoints/012000/pretrained_model`。
 推理网络、归一化和相对位姿处理从 fork 摘录到包内，
-运行时不依赖 LeRobot 训练框架。
+运行时不依赖 LeRobot 训练框架。除默认的 PyTorch 后端外，也可加载 `lerobot-export` 导出的
+TensorRT 模型包（编码器 + 单步 U-Net engine，见第 3.1 节）。
 
 ROS 层沿用本分支 `dp_infer`：订阅 USB 相机、RM75 七轴关节和归一化夹爪开度，按图像时间同步两帧观测，
 在单工作线程推理，发布 `/fastumi/policy/action_sequence`（`PolicyActionSequence`，`base_link → Link7`）。
@@ -65,7 +66,16 @@ head -1 install/dp_infer_lerobot/lib/dp_infer_lerobot/dp_infer_lerobot_node
 cd ..
 ```
 
-入口首行应指向 `.venv-dp-lerobot/bin/python`。推理只需要 checkpoint 中的 `config.json`、
+入口首行应指向 `.venv-dp-lerobot/bin/python`。使用 TensorRT 后端时再安装与导出端一致的
+TensorRT 10.13.3.9.post1（CUDA 12 版，NVIDIA 官方索引；PyTorch 后端不需要）：
+
+```bash
+uv pip install --python ros2_ws/.venv-dp-lerobot/bin/python \
+  --extra-index-url https://pypi.nvidia.com -r ros2_ws/src/dp_infer_lerobot/requirements-tensorrt.txt
+ros2_ws/.venv-dp-lerobot/bin/python -c "import tensorrt; print(tensorrt.__version__)"
+```
+
+推理只需要 checkpoint 中的 `config.json`、
 `model.safetensors`、两个处理链 JSON 及其 `state_file` 指向的 safetensors，不联网下载权重。
 
 ## 3. 启动
@@ -96,7 +106,34 @@ ros2 service call /fastumi/policy/reset_episode std_srvs/srv/Trigger '{}'
 | `deployment_config` | 随包 `dp_umi_v4_deployment.yaml` |
 | `noise_scheduler` / `num_inference_steps` | 参数文件为 `DDIM` / `16`；`DDPM` / `100` 为训练设置 |
 | `device` | `cuda:0` |
+| `backend` | 参数文件为 `pytorch`；`tensorrt_fp32` / `tensorrt_fp16` 见 3.1 节 |
+| `export_dir` | TensorRT 后端必填，`lerobot-export` 模型包目录 |
 | 话题与服务 | 与 `dp_infer` 相同：`/usb_camera/image_raw`、`/joint_states`、`/gripper/openness`、`/fastumi/policy/action_sequence`、`/fastumi/policy/reset_episode` |
+
+### 3.1 TensorRT 后端
+
+模型包按 LeRobot fork 的 `docs/umi/模型部署.md` 用 `lerobot-export`
+导出并经 `lerobot-validate-export` 验证（默认 `outputs/export/dp_umi_v4/012000`）。节点只把编码器和 U-Net
+换成 engine，前后处理、相对位姿及 DDPM/DDIM 调度器仍用本包实现，因此 `noise_scheduler`/`num_inference_steps`
+（默认 DDIM 16 步）同样生效；不需要原始 `model.safetensors`：
+
+```bash
+export DP_EXPORT=/home/scl/work/lerobot/outputs/export/dp_umi_v4/012000
+ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
+  backend:=tensorrt_fp16 export_dir:="$DP_EXPORT" urdf_path:="$PWD/assets/rm_75.urdf" \
+  end_camera_extrinsic:="$PWD/config/calibration/T_cam_end.yaml" \
+  deploy_tcp_extrinsic:="$PWD/config/calibration/T_d_cam_tcp.yaml"
+```
+
+启动时 launch 与节点都会校验模型包，任一不符拒绝启动：
+
+- `manifest.json` 完整，列出的文件（含 engine）SHA-256 一致；接口形状与本包模型契约一致；
+- `assets/` 中配置与处理器文件指纹等于部署档，`checkpoint_sha256` 等于部署档的 `model.safetensors`；
+- `validation_report.json` 属于当前 manifest，且所选精度（`tensorrt_fp32`/`tensorrt_fp16`）已通过导出验证；
+- engine 记录的 GPU 型号/计算能力与 TensorRT 版本与本机一致（engine 不可跨 GPU 或 TRT 版本使用，需在目标机重建）。
+
+`tensorrt_fp32` 关闭 TF32，耗时与 PyTorch（卷积用 TF32）相当；`tensorrt_fp16` 约快 4 倍（见第 5 节）。
+首次推理含 CUDA/TensorRT 初始化（约 0.4 s），超时结果会被丢弃。
 
 `header.stamp` 是最新观测图像的采集时间，`time_from_start[k]=k/30`；下游应结合当前时间选取有效目标。
 同时最多一次推理，待处理窗口只保留最新值，最高提交 10 Hz；结果超过 `result_timeout_s`（0.5 s）或
@@ -133,6 +170,20 @@ python3 ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py compare \
   --report $OUT/report_ddim16.json
 ```
 
+TensorRT 对照复用同一参考样本，`compare --physical` 按最终绝对动作验收（位置 ≤ 1 mm、旋转 ≤ 0.5°、
+夹爪 ≤ 0.01，与 LeRobot 导出验证门槛一致；TRT 与 PyTorch 内核不同，不使用逐元素容差）：
+
+```bash
+PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
+ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py export-candidate \
+  --backend tensorrt_fp16 --export-dir "$DP_EXPORT" \
+  --deployment-config ros2_ws/src/dp_infer_lerobot/config/dp_umi_v4_deployment.yaml \
+  --sample $OUT/reference_ddim16.npz --output $OUT/candidate_trt_fp16_ddim16.npz
+python3 ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py compare --physical \
+  --reference $OUT/reference_ddim16.npz --candidate $OUT/candidate_trt_fp16_ddim16.npz \
+  --report $OUT/report_trt_fp16_ddim16.json
+```
+
 ROS 回放冒烟（真实模型，不接硬件；以 30 Hz 发布样本图像、固定关节和夹爪，检查消息结构、
 header 对应已发布图像、时效以及重置后无旧 episode 结果）：
 默认要求启动、稳定运行及重置后每条消息在接收时的年龄处于 `[0, 0.5]` 秒（包含传输延迟）；
@@ -144,11 +195,13 @@ ROS_DOMAIN_ID=181 ros2_ws/.venv-dp-lerobot/bin/python \
   --checkpoint "$DP_CHECKPOINT" --sample $OUT/reference_ddim16.npz --report $OUT/smoke_ddim16.json
 ```
 
+TensorRT 后端改为 `--backend tensorrt_fp16 --export-dir "$DP_EXPORT"`（不传 `--checkpoint`）。
+
 ## 5. 本机验证记录（2026-10-28）
 
 环境：x86_64 / RTX 5090 / ROS 2 Jazzy / Python 3.12.3 / torch 2.11.0+cu128 / NumPy 1.26.4。
 
-- 单元与假引擎 ROS 测试 15 项通过。
+- 单元与假引擎 ROS 测试 29 项通过（含 TensorRT 采样循环与 PyTorch 逐位一致、模型包校验、后端参数）。
 - 数值对照：留出 episode 114、118、122、126、314、318、322、326，共 32 个样本。DDIM 16 步与
   DDPM 100 步（同种子）下，归一化状态、模型动作、最终动作与原版**逐位一致**（最大差 0）。
 - 开环误差（8 步平均 / 第 8 步；位置 mm、旋转 °）：
@@ -163,6 +216,16 @@ ROS_DOMAIN_ID=181 ros2_ws/.venv-dp-lerobot/bin/python \
   DDPM 100 发布 22 条（2.75 Hz），年龄中位 391 ms，已超过 8 个动作覆盖的 267 ms，不适合在线部署。
   两者重置后旧 episode 消息均为 0。
 - 卷积保持 PyTorch 默认 TF32（与 LeRobot 一致）；全 FP32 卷积单步 U-Net 约 11 ms，TF32 约 3.3 ms。
+
+- TensorRT（10.13.3.9.post1，`cuda:0`，DDIM 16，同 32 个样本与初始噪声，相对 LeRobot 原版）：
+
+| 后端 | 最大位置差 | 最大旋转差 | 最大夹爪差 | 单次推理中位 / P95 | ROS 回放 |
+| --- | --- | --- | --- | --- | --- |
+| TensorRT FP32 | 0.036 mm | 0.0063° | 0.00014 | 60.8 / 61.5 ms | — |
+| TensorRT FP16 | 0.149 mm | 0.019° | 0.00022 | 15.1 / 16.1 ms | 9.4 Hz，年龄中位 42 ms / 最大 65 ms，重置后旧消息 0 |
+
+  两者开环误差与原版一致（位置 6.93 / 6.94 mm，旋转 0.94°）。FP16 回放节点内推理中位约 20 ms，
+  首次调用约 380 ms（初始化）。
 
 开环误差在留出示教数据上计算，不代表闭环抓取成功率；回放使用固定关节，只验证链路与时效。
 实机部署前仍需现场核对图像/关节/夹爪时效、TCP 外参和输出位姿，并在人工监督下验收。
