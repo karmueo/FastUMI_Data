@@ -121,3 +121,55 @@ def test_reset_stops_old_trajectory_and_rejects_queued_old_episode():
     Rm75PlacoController._on_policy(
         node, SimpleNamespace(episode_id=2, sequence_id=99))
     assert events == ["episode reset", "episode reset"]
+
+
+def test_current_pose_mode_starts_from_stationary_joints_without_home():
+    """当前位姿起步：任意静止位置且夹爪张开即可开始，运动中或夹爪未张开时仍拒绝。"""
+    away = [value + 0.35 for value in load_initial_joint_positions()]  # 约 20° 偏离 initial_pose。
+    node, warnings = _gate(away, 0.99)
+    node._start_from_current = True
+    node._hold_reference = np.asarray(away)
+    assert Rm75PlacoController._start_state_ready(node, 0)
+    assert node._start_verified_episode == 0
+
+    for gripper, joint_age, reference in (
+        (0.5, 1.0, away),  # 夹爪未张开。
+        (0.99, 0.1, away),  # 静止不足 start_joint_settle_s。
+        (0.99, 1.0, [value - 0.1 for value in away]),  # 已偏离静止锚点。
+        (0.99, 1.0, None),  # 尚无静止锚点。
+    ):
+        node, warnings = _gate(away, gripper, joint_age=joint_age)
+        node._start_from_current = True
+        node._hold_reference = None if reference is None else np.asarray(reference)
+        assert not Rm75PlacoController._start_state_ready(node, 0)
+        assert node._start_verified_episode is None
+        assert warnings and "stationary" in warnings[-1]
+
+
+def test_current_pose_mode_restarts_settle_timer_when_joints_move():
+    """静止计时相对锚点：小抖动保持计时，累计偏离超过容差或重置后重新计时。"""
+    from sensor_msgs.msg import JointState
+
+    from fastumi_rm75.placo_control import JOINT_NAMES
+
+    start = np.asarray(load_initial_joint_positions()) + 0.35
+    node = SimpleNamespace(
+        _joint_lower=np.full(7, -10.0), _joint_upper=np.full(7, 10.0),
+        _trajectory=None, _command_positions=np.zeros(7), _start_verified_episode=None,
+        _start_from_current=True, _hold_reference=None, _home_since=None,
+        _start_joint_tolerance=0.035, _feedback_positions=None, _feedback_monotonic=0.0)
+
+    def feed(positions):
+        message = JointState(name=list(JOINT_NAMES), position=[float(value) for value in positions])
+        Rm75PlacoController._on_joint_state(node, message)
+
+    feed(start)
+    first = node._home_since
+    assert first is not None and np.allclose(node._hold_reference, start)
+    feed(start + 0.02)  # 抖动在容差内。
+    assert node._home_since == first
+    feed(start + 0.05)  # 相对锚点超过 0.035 rad。
+    assert node._home_since > first and np.allclose(node._hold_reference, start + 0.05)
+    node._home_since = None  # 重置或故障后清除计时。
+    feed(start + 0.05)
+    assert node._home_since is not None

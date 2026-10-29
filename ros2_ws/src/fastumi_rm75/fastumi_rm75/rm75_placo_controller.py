@@ -72,6 +72,9 @@ class Rm75PlacoController(Node):
         self.declare_parameter("joint_state_timeout_s", 0.25)
         self.declare_parameter("sequence_hold_s", 0.3)
         self.declare_parameter("require_start_state", False)
+        # true：起始门控不再要求回到 initial_pose.yaml，改为要求七轴在当前位置静止
+        # start_joint_settle_s 秒（偏离锚点不超过 start_joint_tolerance_rad）且夹爪张开。
+        self.declare_parameter("start_from_current_pose", False)
         self.declare_parameter("start_joint_tolerance_rad", Parameter.Type.DOUBLE)
         self.declare_parameter("start_joint_settle_s", Parameter.Type.DOUBLE)
         self.declare_parameter("start_gripper_min", Parameter.Type.DOUBLE)
@@ -150,6 +153,7 @@ class Rm75PlacoController(Node):
                     else parameter.value)
 
         self._require_start_state = bool(self.get_parameter("require_start_state").value)
+        self._start_from_current = bool(self.get_parameter("start_from_current_pose").value)
         self._start_joints = np.asarray(
             load_initial_joint_positions(), dtype=np.float64)
         self._start_joint_tolerance = float(start_value("start_joint_tolerance_rad"))
@@ -345,6 +349,10 @@ class Rm75PlacoController(Node):
         self._close_approval_monotonic = float("-inf")
         self._episode_started_at = None
         self._home_since = None
+        # 当前位姿起步模式下的静止锚点关节角（rad，(7,)）；偏离超过容差即重新计时。
+        self._hold_reference = None
+        # 起始包络已按实测起点更新的 episode；None 表示仍为 initial_pose 起点。
+        self._start_xyz_episode = None
         self._start_verified_episode = None
         self._faulted_episode = None
         self._command_positions = None
@@ -368,7 +376,8 @@ class Rm75PlacoController(Node):
             "RM75 Placo controller ready: "
             f"dry_run={self._dry_run}, rate={rate_hz:g} Hz, "
             f"velocity_scale={velocity_scale:g}, "
-            f"require_start_state={self._require_start_state}"
+            f"require_start_state={self._require_start_state}, "
+            f"start_from_current_pose={self._start_from_current}"
         )
 
     def _feedback_is_fresh(self) -> bool:
@@ -401,12 +410,20 @@ class Rm75PlacoController(Node):
         self._feedback_positions = positions
         self._feedback_monotonic = time.monotonic()
         if self._start_verified_episode is None:
-            home_error = np.max(np.abs(positions - self._start_joints))
-            if home_error <= self._start_joint_tolerance:
-                if self._home_since is None:
+            if getattr(self, "_start_from_current", False):
+                # 静止检测：始终相对锚点比较，缓慢漂移累计超过容差也会重新计时。
+                if (self._hold_reference is None or self._home_since is None
+                        or np.max(np.abs(positions - self._hold_reference))
+                        > self._start_joint_tolerance):
+                    self._hold_reference = positions
                     self._home_since = self._feedback_monotonic
             else:
-                self._home_since = None
+                home_error = np.max(np.abs(positions - self._start_joints))
+                if home_error <= self._start_joint_tolerance:
+                    if self._home_since is None:
+                        self._home_since = self._feedback_monotonic
+                else:
+                    self._home_since = None
         if self._trajectory is None and self._command_positions is None:
             self._set_robot_joints(positions)
 
@@ -464,13 +481,22 @@ class Rm75PlacoController(Node):
         )
 
     def _start_state_ready(self, episode_id: int) -> bool:
-        """每个 episode 仅在七轴已回位、静止且夹爪张开后允许首次实机控制。"""
+        """每个 episode 仅在七轴已回位（或在当前位置静止）且夹爪张开后允许首次实机控制。
+
+        ``start_from_current_pose`` 为真时以静止锚点代替 initial_pose.yaml 起点，
+        其余条件（静止时长、夹爪新鲜且张开）不变。
+        """
         if self._dry_run or not self._require_start_state:
             return True
         if self._start_verified_episode == episode_id:
             return True
         now = time.monotonic()
-        joint_error = np.max(np.abs(self._feedback_positions - self._start_joints))
+        current = getattr(self, "_start_from_current", False)
+        reference = self._hold_reference if current else self._start_joints
+        if reference is None:
+            reference = self._feedback_positions
+            self._home_since = None
+        joint_error = np.max(np.abs(self._feedback_positions - reference))
         ready = (joint_error <= self._start_joint_tolerance
                  and self._home_since is not None
                  and now - self._home_since >= self._start_settle_s
@@ -479,8 +505,10 @@ class Rm75PlacoController(Node):
                  and self._gripper_state >= self._start_gripper_min)
         if not ready:
             self.get_logger().warning(
-                "Policy ignored until RM75 and gripper return to the start state "
-                f"(max joint error={np.rad2deg(joint_error):.1f} deg, "
+                ("Policy ignored until RM75 is stationary and the gripper is open "
+                 if current else
+                 "Policy ignored until RM75 and gripper return to the start state ")
+                + f"(max joint error={np.rad2deg(joint_error):.1f} deg, "
                 f"gripper={self._gripper_state})",
                 throttle_duration_sec=1.0,
             )
@@ -705,6 +733,11 @@ class Rm75PlacoController(Node):
         # 新序列以最新实测关节为锚点，避免连续预测时沿已发出但尚未到达的命令累积误差。
         self._set_robot_joints(self._feedback_positions)
         anchor_transform = self._robot.get_T_world_frame(self._end_frame).copy()
+        if getattr(self, "_start_from_current", False) and self._start_xyz_episode != episode_id:
+            # 当前位姿起步：起始包络（max_start_displacement_m / max_start_rise_m）以本 episode
+            # 首条序列时的实测 Link7 位置（base_link，m）为起点。
+            self._start_xyz = anchor_transform[:3, 3].copy()
+            self._start_xyz_episode = episode_id
         try:
             trajectory = decode_trajectory(
                 message,

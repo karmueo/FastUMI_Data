@@ -10,6 +10,9 @@ rm75_placo_controller:
     # 发布间隔 0.2 s，而每条序列仅覆盖 0.5 s，立即停臂会使机械臂走走停停；0 恢复立即停止。
     sequence_hold_s: 0.3
     require_start_state: true
+    # false：每个 episode 首次实机控制前须回到 initial_pose.yaml 起点。
+    # true：允许从当前关节位置起步，仍要求七轴静止 start_joint_settle_s 秒、夹爪张开且反馈新鲜。
+    start_from_current_pose: false
     task_control_enabled: false
     # 起始关节角只读取 fastumi_bringup/config/initial_pose.yaml，无需 launch 或命令行另设。
     start_joint_tolerance_rad: 0.035
