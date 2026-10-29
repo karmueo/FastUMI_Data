@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 from fractions import Fraction
-from typing import List
+from typing import List, TYPE_CHECKING
 
 import cv2
-from ffmpeg_image_transport_msgs.msg import FFMPEGPacket
 import numpy as np
 from sensor_msgs.msg import CompressedImage, Image
+
+if TYPE_CHECKING:
+    from ffmpeg_image_transport_msgs.msg import FFMPEGPacket
 
 # 合成图像尺寸，宽高均为 16 的倍数以避免编码器填充。
 WIDTH = 64
@@ -115,6 +117,8 @@ def h264_packets(
 
 def ffmpeg_message(index: int, data: bytes, pts: int | None = None) -> FFMPEGPacket:
     """把一个访问单元包装为 ``FFMPEGPacket``。"""
+    from ffmpeg_image_transport_msgs.msg import FFMPEGPacket
+
     message = FFMPEGPacket()
     _set_header(message, index)
     message.width, message.height = WIDTH, HEIGHT

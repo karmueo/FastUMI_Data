@@ -10,6 +10,9 @@ Tracker 到 TCP 标定，以及 MCAP→30 Hz UMI TCP 轨迹 HDF5→LeRobot v3.0 
 `convert_mcap` 同频逐帧转换为 30 Hz 数据并导出 LeRobot 数据集，再用 LeRobot 的相对位姿 Diffusion Policy
 训练；`--output-format zarr` 仍可导出旧 Zarr，通过 `model/dp/train_vr_umi.sh` 的现有 30 Hz 配置训练。
 
+抓取/放置两阶段独立训练请使用根目录 `split_pick_place.py`，完整步骤见
+[抓取 / 放置数据集后处理](../../../docs/pick_place.md)。工具按首次合拢与随后打开的时间中点分段，支持本地复核窗口与两套 LeRobot 导出。
+
 本包使用工作区共享的 `.venv-numpy1`，因为 MCAP 图像转换依赖系统
 `cv_bridge`。每个运行终端先加载 Jazzy、`.venv-numpy1` 和工作区
 `install/setup.bash`；环境创建与分阶段构建见
