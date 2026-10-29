@@ -191,7 +191,8 @@ class DiffusionModel(nn.Module):
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
 
-    def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None,
+                         action_steps: int | None = None) -> Tensor:
         """
         This function expects `batch` to have:
         {
@@ -212,8 +213,9 @@ class DiffusionModel(nn.Module):
         actions = self.conditional_sample(batch_size, global_cond=global_cond, noise=noise)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
+        # 部署可通过 action_steps 多取 horizon 中后续的预测点（最多 horizon - n_obs_steps + 1）。
         start = n_obs_steps - 1
-        end = start + self.config.n_action_steps
+        end = start + (action_steps or self.config.n_action_steps)
         actions = actions[:, start:end]
 
         return actions
@@ -656,17 +658,19 @@ class InferencePolicy(nn.Module):
         self.diffusion = DiffusionModel(config)
 
     @torch.inference_mode()
-    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None,
+                             action_steps: int | None = None) -> Tensor:
         """输入已归一化观测，返回归一化模型布局动作块。
 
         Args:
             batch: ``observation.images.front`` 为 (B, 2, 3, 224, 224)，
                 ``observation.state`` 为 (B, 2, 10)。
             noise: 可选初始噪声 (B, horizon, 10)，用于离线数值对照。
+            action_steps: 截取的动作数；None 为训练的 n_action_steps。
 
         Returns:
-            (B, n_action_steps, 10)，从当前观测帧开始的动作。
+            (B, action_steps, 10)，从当前观测帧开始的动作。
         """
         inputs = dict(batch)
         inputs[OBS_IMAGES] = torch.stack([inputs[key] for key in self.config.image_features], dim=-4)
-        return self.diffusion.generate_actions(inputs, noise=noise)
+        return self.diffusion.generate_actions(inputs, noise=noise, action_steps=action_steps)

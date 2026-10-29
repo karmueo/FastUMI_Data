@@ -286,6 +286,36 @@ def test_onnx_reference_requires_source_report_for_same_package(tmp_path):
         tool.check_onnx_reference(source, manifest, allow_unverified=True)
 
 
+@pytest.mark.parametrize("variant", sorted(VARIANTS))
+def test_onnx_reference_engine_predicts_default_action_chunk(tmp_path, monkeypatch, variant):
+    """无权重参考引擎须完成真实采样与后处理，输出有限的 (1, 8, 7) base→TCP 动作。"""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    tool = _tool("build_tensorrt_engines_reference_test")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_checkpoint(assets, *_stats())
+    cfg = _config(assets, variant=variant)
+    manifest = dict(_manifest(cfg), source_package={"path": str(tmp_path)})
+    # 仅替换 ONNX 文件执行；保留配置、参考引擎创建、调度器和前后处理，避免漏测初始化字段。
+    session = SimpleNamespace(run=lambda stage, inputs: torch.zeros(
+        manifest["stages"][stage]["output"]["shape"], dtype=torch.float32))
+    monkeypatch.setattr(tool, "OnnxSession", lambda *_: session)
+    monkeypatch.setattr(tool, "check_onnx_reference", lambda *_: "verified")
+    args = SimpleNamespace(reference="onnx", output=str(tmp_path), device="cpu",
+                           noise_scheduler="DDIM", steps=2, allow_unverified_onnx=False)
+    engine, _ = tool.reference_engine(args, {}, manifest)
+    observations = {IMAGE_KEY: np.zeros((1, 2, 3, 224, 224), np.float32),
+                    STATE_KEY: np.zeros((1, 2, 7), np.float32)}
+    prediction, debug = engine.predict_raw(
+        observations, noise=np.zeros((1, 16, 10), np.float32), return_debug=True)
+    assert engine.action_steps == cfg.n_action_steps
+    assert prediction.shape == (1, 8, 7) and np.isfinite(prediction).all()
+    assert debug["model_actions"].shape == (1, 8, 10)
+
+
 @pytest.mark.parametrize('existing_cache', [False, True])
 def test_build_package_prepares_and_reuses_timing_cache(tmp_path, monkeypatch, existing_cache):
     """首次缓存目录自动创建，已有缓存被复用；构建成功后同时保存缓存和完整 manifest，无需 GPU。"""

@@ -124,3 +124,25 @@ def test_first_policy_rejects_missing_gripper_feedback(controller):
     assert controller._trajectory is None
     controller._joint_publisher.publish.assert_not_called()
     controller._gripper_publisher.publish.assert_not_called()
+
+
+def test_lookahead_advances_pose_but_not_gripper(controller):
+    """lookahead_s 只提前采样 Link7 位姿；夹爪仍按当前时间，避免机械臂未到位就提前闭合。"""
+    node = controller
+    node._lookahead_ns = 100_000_000
+    message = policy_message(0.9)
+    # 两个未来点：1.1 s 时 x=0.32、开度 0.9；1.2 s 时 x=0.34、开度 0.6（base_link，m）。
+    message.poses[0].position.x, message.poses[1].position.x = 0.32, 0.34
+    message.gripper_openness = [0.9, 0.6]
+    Rm75PlacoController._on_policy(node, message)
+    node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+        nanoseconds=1_100_000_000, to_msg=lambda: Time(sec=1, nanosec=100_000_000)))
+    Rm75PlacoController._tick(node)
+    assert node._effector_task.T_world_frame[0, 3] == pytest.approx(0.34)
+    command = node._gripper_publisher.publish.call_args.args[0]
+    assert command.data == pytest.approx(node._gripper_scale.to_robot(0.9))
+    # 前瞻超出末点时保持末点位姿。
+    node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+        nanoseconds=1_150_000_000, to_msg=lambda: Time(sec=1, nanosec=150_000_000)))
+    Rm75PlacoController._tick(node)
+    assert node._effector_task.T_world_frame[0, 3] == pytest.approx(0.34)

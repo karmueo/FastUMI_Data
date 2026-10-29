@@ -157,12 +157,14 @@ class TensorRTPolicy:
         self.num_inference_steps = cfg.num_inference_steps
 
     @torch.inference_mode()
-    def predict_action_chunk(self, batch, noise=None):
-        """输入归一化观测，返回归一化模型布局动作块 ``(1, 8, 10)``。
+    def predict_action_chunk(self, batch, noise=None, action_steps=None):
+        """输入归一化观测，返回归一化模型布局动作块 ``(1, action_steps, 10)``。
 
         Args:
             batch: ``observation.images.front`` 为 (1, 2, 3, 224, 224)，``observation.state`` 为 (1, 2, 10)。
             noise: 可选初始噪声 (1, 16, 10)；为空时从全局 CUDA RNG 采样，与 PyTorch 路径一致。
+            action_steps: 截取的动作数；None 为训练的 n_action_steps（8）。denoiser 输出完整 horizon，
+                多取只是保留后续预测点，不改变 engine。
         """
         cfg = self.config
         cond = self.session.run("encoder", {
@@ -180,4 +182,4 @@ class TensorRTPolicy:
             })
             sample = self.noise_scheduler.step(prediction, timestep, sample).prev_sample
         start = cfg.n_obs_steps - 1
-        return sample[:, start:start + cfg.n_action_steps]
+        return sample[:, start:start + (action_steps or cfg.n_action_steps)]

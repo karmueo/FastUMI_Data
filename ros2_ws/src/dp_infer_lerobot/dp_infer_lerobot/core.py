@@ -1,4 +1,4 @@
-"""构造训练一致的 TCP 观测，并把模型输出的绝对 TCP 动作整理为带观测时间的八点序列。
+"""构造训练一致的 TCP 观测，并把模型输出的绝对 TCP 动作整理为带观测时间的 8～15 点序列。
 
 坐标约定：
 - 观测位姿 ``Observation.pose`` 为 ``base_link → TCP``。共享运行层用 ``FK(q) @ inv(C)`` 生成观测，
@@ -7,6 +7,8 @@
   模型内部只使用相对当前帧的位姿，因此 base 坐标系的选取不影响结果。
 - :func:`decode_actions` 输出 ``base_link → TCP`` 序列；发布前由 :func:`correct_sequence` 右乘
   ``C`` 得到 ``base_link → Link7``，四元数 xyzw，第 k 个点对应观测时刻 + k/30 秒。
+- 训练执行 8 个动作；部署可多发布 horizon 中后续的预测点（最多 15 个，约 467 ms），供控制器前瞻
+  抵消 RM75 低跟随滞后。过期判定始终以第 8 点（观测 + 7/30 秒）为准，不因多发布而放宽。
 """
 
 import numpy as np
@@ -17,7 +19,8 @@ from dp_infer.common import ActionSequence
 from .config import IMAGE_KEY, RAW_DIM, STATE_KEY
 
 FREQUENCY_HZ = 30  # 训练数据与输出动作的固定频率。
-ACTION_STEPS = 8  # 每次推理输出的动作数（n_action_steps）。
+ACTION_STEPS = 8  # 训练每次执行的动作数（n_action_steps），也是过期判定的基准。
+MAX_ACTION_STEPS = 15  # horizon 16 - (n_obs_steps 2 - 1)：可发布的最多预测点数。
 IMAGE_SHAPE = (3, 224, 224)  # letterbox 后的 CHW 图像形状。
 LAST_POINT_NS = round((ACTION_STEPS - 1) * 1e9 / FREQUENCY_HZ)  # 末点相对观测时刻的纳秒偏移。
 
@@ -75,12 +78,19 @@ def build_observations(history, start_pose=None):
     return {IMAGE_KEY: images, STATE_KEY: state.astype(np.float32)}
 
 
-def validate_sequence(sequence, count=ACTION_STEPS):
+def validate_sequence(sequence, count=None):
     """校验并规范化 ``count`` 点序列：四元数归一且相邻同号，时间为 k/30，夹爪截断到 [0,1]。
 
+    Args:
+        count: 期望点数；None 时取序列自身长度，须在 [ACTION_STEPS, MAX_ACTION_STEPS] 内。
+
     Raises:
-        ValueError: 形状、数值、四元数或时间不合法。
+        ValueError: 点数、形状、数值、四元数或时间不合法。
     """
+    if count is None:
+        count = len(np.asarray(sequence.positions))
+    if not ACTION_STEPS <= count <= MAX_ACTION_STEPS:
+        raise ValueError(f"Sequence must contain {ACTION_STEPS}..{MAX_ACTION_STEPS} points")
     for name, shape in (("positions", (count, 3)), ("quaternions", (count, 4)),
                         ("gripper_openness", (count,)), ("time_from_start", (count,))):
         values = np.asarray(getattr(sequence, name), dtype=np.float64).copy()
@@ -101,25 +111,26 @@ def validate_sequence(sequence, count=ACTION_STEPS):
 
 
 def decode_actions(actions, context=None):
-    """把 ``[8,7]`` 绝对 TCP 动作转换为 base→TCP 目标序列。
+    """把 ``[N,7]``（N 为 8～15）绝对 TCP 动作转换为 base→TCP 目标序列。
 
     Args:
         actions: 后处理后的原始布局动作，第 0 个对应观测时刻。
         context: 兼容引擎调用约定；TCP→Link7 换算由 :func:`correct_sequence` 完成。
     """
     actions = np.asarray(actions, dtype=np.float64)
-    if actions.shape != (ACTION_STEPS, RAW_DIM) or not np.isfinite(actions).all():
-        raise ValueError(f"Expected finite [{ACTION_STEPS},{RAW_DIM}] actions")
+    if (actions.ndim != 2 or not ACTION_STEPS <= actions.shape[0] <= MAX_ACTION_STEPS
+            or actions.shape[1] != RAW_DIM or not np.isfinite(actions).all()):
+        raise ValueError(f"Expected finite [{ACTION_STEPS}..{MAX_ACTION_STEPS},{RAW_DIM}] actions")
     poses = raw_to_pose(actions)
     return validate_sequence(ActionSequence(
         poses[:, :3, 3], Rotation.from_matrix(poses[:, :3, :3]).as_quat(),
-        actions[:, 6], np.arange(ACTION_STEPS) / FREQUENCY_HZ))
+        actions[:, 6], np.arange(len(actions)) / FREQUENCY_HZ))
 
 
 def correct_sequence(sequence, correction):
-    """全部八点右乘 ``C = inverse(T_Link7_TCP)``，把 base→TCP 目标换算为 base→Link7。"""
+    """全部点右乘 ``C = inverse(T_Link7_TCP)``，把 base→TCP 目标换算为 base→Link7。"""
     sequence = validate_sequence(sequence)
-    poses = np.tile(np.eye(4), (ACTION_STEPS, 1, 1))
+    poses = np.tile(np.eye(4), (len(sequence.positions), 1, 1))
     poses[:, :3, :3] = Rotation.from_quat(sequence.quaternions).as_matrix()
     poses[:, :3, 3] = sequence.positions
     poses = poses @ rigid_matrix(correction)
@@ -129,6 +140,6 @@ def correct_sequence(sequence, correction):
 
 
 def result_is_usable(sequence, context, now_ns):
-    """采集时间不后移；末点（观测 + 7/30 秒）恰好到期也拒绝发布。"""
+    """采集时间不后移；第 8 点（观测 + 7/30 秒）恰好到期也拒绝发布，与发布点数无关。"""
     validate_sequence(sequence)
     return context.stamp_ns <= now_ns < context.stamp_ns + LAST_POINT_NS

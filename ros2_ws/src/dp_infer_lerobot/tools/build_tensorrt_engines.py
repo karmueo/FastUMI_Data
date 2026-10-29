@@ -435,6 +435,8 @@ def reference_engine(args, profile, manifest):
     engine = PolicyEngine.__new__(PolicyEngine)
     engine.backend, engine.device, engine.postprocessors = "onnx_cpu", torch.device(args.device), ()
     engine.cfg = DiffusionConfig.from_file(assets / "config.json", args.noise_scheduler or None, args.steps)
+    # 参考误差按训练执行窗口评估；绕过构造函数时也须初始化 predict_raw 使用的动作数。
+    engine.action_steps = engine.cfg.n_action_steps
     engine.processors = TorchProcessors(assets, engine.device)
     engine.policy = TensorRTPolicy(engine.cfg, manifest, OnnxSession(source, manifest, engine.device),
                                    engine.device)

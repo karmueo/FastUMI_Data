@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import IMAGE_KEY, MODEL_DIM, RAW_DIM, STATE_KEY, DiffusionConfig, validate_backend, validate_steps
-from .core import ACTION_STEPS, IMAGE_SHAPE, decode_actions, validate_sequence
+from .core import ACTION_STEPS, IMAGE_SHAPE, MAX_ACTION_STEPS, decode_actions, validate_sequence
 from .deployment import validate_checkpoint, validate_export
 
 
@@ -13,7 +13,7 @@ class PolicyEngine:
     """单线程使用的无队列模型；共享 ROS 运行层负责提供完整两帧观测窗口。"""
 
     def __init__(self, checkpoint, profile, device="cuda:0", noise_scheduler="", num_inference_steps=0,
-                 processors=(), backend="pytorch", export_dir=""):
+                 processors=(), backend="pytorch", export_dir="", action_steps=ACTION_STEPS):
         """校验指纹后构建网络：PyTorch 严格加载 checkpoint 权重，TensorRT 加载模型包 engine。
 
         Args:
@@ -25,6 +25,8 @@ class PolicyEngine:
             processors: 可选后处理扩展，``process(sequence, context)``，输入为 base→TCP 序列。
             backend: ``pytorch``、``tensorrt_fp32`` 或 ``tensorrt_fp16``。
             export_dir: TensorRT 后端使用的本机模型包目录（``tools/build_tensorrt_engines.py`` 生成）。
+            action_steps: 每次发布的动作点数，8 为训练执行数；最多 horizon - n_obs_steps + 1（15），
+                多出的点是同一次去噪中 horizon 的后续预测，用于控制器前瞻。
 
         Raises:
             ValueError/RuntimeError: 指纹、配置、权重、engine 或 CUDA 不可用。
@@ -48,6 +50,11 @@ class PolicyEngine:
             root = Path(export_dir) / "assets"  # 与 checkpoint 指纹一致的配置及处理器统计量。
         self.cfg = DiffusionConfig.from_file(root / "config.json", noise_scheduler or None,
                                              num_inference_steps or None)
+        limit = min(MAX_ACTION_STEPS, self.cfg.horizon - self.cfg.n_obs_steps + 1)
+        if (isinstance(action_steps, bool) or not isinstance(action_steps, int)
+                or not self.cfg.n_action_steps <= action_steps <= limit):
+            raise ValueError(f"action_steps must be an integer in [{self.cfg.n_action_steps}, {limit}]")
+        self.action_steps = action_steps
         if precision is None:
             self.policy = self._load_torch_policy(root)
         else:
@@ -103,7 +110,7 @@ class PolicyEngine:
         self.predict_raw(observations)
 
     def predict_raw(self, observations, noise=None, return_debug=False, num_inference_steps=None):
-        """执行一次推理，返回 CPU ``[1,8,7]`` 原始布局绝对动作（base→TCP）。
+        """执行一次推理，返回 CPU ``[1,action_steps,7]`` 原始布局绝对动作（base→TCP）。
 
         Args:
             observations: :func:`core.build_observations` 的输出。
@@ -129,10 +136,10 @@ class PolicyEngine:
                 raise ValueError("Expected finite [1,16,10] initial noise")
         with torch.inference_mode():
             batch, reference = self.processors.preprocess(inputs[IMAGE_KEY], inputs[STATE_KEY])
-            model_actions = self.policy.predict_action_chunk(batch, noise=noise)
+            model_actions = self.policy.predict_action_chunk(batch, noise=noise, action_steps=self.action_steps)
             prediction = self.processors.postprocess(model_actions, reference).cpu().numpy()
-        if prediction.shape != (1, ACTION_STEPS, RAW_DIM) or not np.isfinite(prediction).all():
-            raise ValueError("Expected finite [1,8,7] prediction")
+        if prediction.shape != (1, self.action_steps, RAW_DIM) or not np.isfinite(prediction).all():
+            raise ValueError(f"Expected finite [1,{self.action_steps},7] prediction")
         if return_debug:
             debug = {f"normalized.{key}": value.cpu().numpy() for key, value in batch.items()}
             debug["model_actions"] = model_actions.cpu().numpy()
@@ -140,7 +147,7 @@ class PolicyEngine:
         return prediction
 
     def predict(self, observations, context, num_inference_steps=None):
-        """推理并转换为 base→TCP 八点序列，再依次执行后处理扩展；Link7 换算由运行层完成。"""
+        """推理并转换为 base→TCP 序列（action_steps 点），再依次执行后处理扩展；Link7 换算由运行层完成。"""
         prediction = self.predict_raw(observations, num_inference_steps=num_inference_steps)
         sequence = decode_actions(prediction[0], context)
         for processor in self.postprocessors:

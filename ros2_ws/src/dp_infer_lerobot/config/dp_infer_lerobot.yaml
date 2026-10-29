@@ -28,3 +28,6 @@ dp_infer_lerobot:
     execution_settle_s: 0.3
     # 串行模式每段执行的动作数，最小为 1；超过输出动作数时执行全部 8 个动作。
     execution_action_steps: 8
+    # 每次发布的动作点数（8～15）。8 为训练执行数；多出的是同一次去噪中 horizon 的后续预测，
+    # 配合控制器 lookahead_s 抵消 RM75 低跟随滞后。流水线过期判定仍按第 8 点（7/30 秒）。
+    published_action_steps: 8

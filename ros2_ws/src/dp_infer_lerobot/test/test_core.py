@@ -73,6 +73,21 @@ def test_result_is_usable_until_last_action():
     assert not core.result_is_usable(sequence, context, 1_000 + core.LAST_POINT_NS)
 
 
+def test_longer_sequences_keep_eighth_point_expiry():
+    """多发布 horizon 后续点（最多 15）时时间仍为 k/30；过期判定仍以第 8 点为准，16 点被拒绝。"""
+    actions = np.tile(np.r_[0.4, 0, 0.3, 0, 0, 0, 0.5], (core.MAX_ACTION_STEPS, 1))
+    actions[:, 0] += np.arange(core.MAX_ACTION_STEPS) * 0.001
+    sequence = core.decode_actions(actions)
+    assert len(sequence.positions) == core.MAX_ACTION_STEPS
+    np.testing.assert_allclose(sequence.time_from_start, np.arange(core.MAX_ACTION_STEPS) / 30)
+    corrected = core.correct_sequence(sequence, np.eye(4))
+    np.testing.assert_allclose(corrected.positions[:, 0], actions[:, 0])
+    context = InferenceContext(np.eye(4), 1_000, 0, 1)
+    assert not core.result_is_usable(sequence, context, 1_000 + core.LAST_POINT_NS)
+    with pytest.raises(ValueError, match="actions"):
+        core.decode_actions(np.vstack([actions, actions[:1]]))
+
+
 def test_config_parses_contract_and_rejects_changes(tmp_path):
     """接受 dp_umi_v4 配置并派生 crop212/10 维；架构字段变化或步数越界被拒绝。"""
     raw = dict(SUPPORTED, num_inference_steps=None, use_amp=False, use_peft=False)

@@ -19,7 +19,7 @@ from .config import validate_backend
 
 
 class LerobotBackend:
-    """独立模型契约：两帧 TCP 状态 + 图像输入，输出 8 个 30 Hz 绝对 TCP 目标。"""
+    """独立模型契约：两帧 TCP 状态 + 图像输入，输出 8～15 个 30 Hz 绝对 TCP 目标（默认 8）。"""
 
     node_name = "dp_infer_lerobot"
     parameter_defaults = {
@@ -32,6 +32,8 @@ class LerobotBackend:
         "end_camera_extrinsic": "", "deploy_tcp_extrinsic": "",
         "max_tcp_axis_deg": deployment.DEFAULT_MAX_TCP_AXIS_DEG,
         "record_dir_name": "dp_infer_lerobot", "task_control_enabled": True,
+        # 每次发布的动作点数：8 为训练执行数；最多 15（horizon 后续预测），配合控制器 lookahead_s。
+        "published_action_steps": core.ACTION_STEPS,
     }
     point_count = core.ACTION_STEPS
     # 首点是观测时刻的预测动作，不含额外的起始锚点。
@@ -66,9 +68,12 @@ class LerobotBackend:
 
         processors = load_processors([
             item.strip() for item in parameter("postprocessors").split(",") if item.strip()])
-        return PolicyEngine(checkpoint, self._load_profile(parameter), parameter("device"),
-                            parameter("noise_scheduler"), parameter("num_inference_steps"), processors,
-                            backend, export_dir)
+        steps = parameter("published_action_steps")
+        engine = PolicyEngine(checkpoint, self._load_profile(parameter), parameter("device"),
+                              parameter("noise_scheduler"), parameter("num_inference_steps"), processors,
+                              backend, export_dir, steps)
+        self.point_count = steps  # 运行层就绪日志中的点数。
+        return engine
 
     def validate_deployment(self, urdf_path, engine, parameter):
         """注入假引擎时仍校验部署契约及训练 URDF 指纹（FK 必须与训练数据一致）。"""

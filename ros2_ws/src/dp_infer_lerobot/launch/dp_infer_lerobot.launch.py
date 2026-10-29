@@ -111,6 +111,15 @@ def _start(context):
     action_steps = int(LaunchConfiguration("execution_action_steps").perform(context))
     if action_steps < 1:
         raise ValueError("execution_action_steps must be a positive integer")
+    published_steps = int(LaunchConfiguration("published_action_steps").perform(context))
+    if not 8 <= published_steps <= 15:
+        raise ValueError("published_action_steps must be in [8, 15]")
+    lookahead = float(LaunchConfiguration("lookahead_s").perform(context))
+    if not 0.0 <= lookahead <= 0.5:
+        raise ValueError("lookahead_s must be in [0, 0.5]")
+    # 串行运行层会按 execution_action_steps 截断序列，无法保留流水线前瞻所需的后续点。
+    if sequential == "true" and lookahead > 0:
+        raise ValueError("lookahead_s must be 0 when sequential_execution is true")
     steps = int(LaunchConfiguration("num_inference_steps").perform(context))
     scheduler = LaunchConfiguration("noise_scheduler").perform(context).strip()
 
@@ -148,6 +157,7 @@ def _start(context):
         # 显式写成浮点，避免 "1" 被 ROS 解析为整数参数。
         "-p", f"execution_settle_s:={settle!r}",
         "-p", f"execution_action_steps:={action_steps}",
+        "-p", f"published_action_steps:={published_steps}",
     ]
     from dp_infer_lerobot.config import DiffusionConfig, validate_steps
     from dp_infer_lerobot.deployment import load_profile, validate_checkpoint, validate_export, validate_urdf
@@ -202,6 +212,8 @@ def _start(context):
             "-p", f"policy_gripper_state_topic:={policy_gripper_topic}",
             "-p", f"grasp_latch_enabled:={grasp_latch}",
             "-p", f"start_from_current_pose:={start_current}",
+            # 显式写成浮点，避免 "0" 被 ROS 解析为整数参数。
+            "-p", f"lookahead_s:={lookahead!r}",
             "-p", f"policy_topic:={overrides['output_topic']}",
             "-p", f"require_close_approval:={close_approval}",
             "-p", f"close_approval_topic:={overrides['close_guard_topic']}",
@@ -256,6 +268,9 @@ def generate_launch_description():
         "sequential_execution": "false", "execution_settle_s": "0.3",
         # 串行模式每段执行的动作数，最多 8。
         "execution_action_steps": "8",
+        # 低跟随提速：推理多发布 horizon 后续预测点（8～15），控制器按 lookahead_s 前瞻采样位姿。
+        # 默认 8 / 0.0 保持原行为；建议 15 / 0.2 起逐步增大到 0.3。
+        "published_action_steps": "8", "lookahead_s": "0.0",
     }
     return LaunchDescription([
         *(DeclareLaunchArgument(name, default_value=value)

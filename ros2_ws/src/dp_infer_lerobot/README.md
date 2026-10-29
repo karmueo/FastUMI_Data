@@ -47,8 +47,7 @@ TCP 为夹爪抓取中心，坐标轴沿用 `config/calibration/T_d_cam_tcp.yaml
 更换模型或数据后重新生成并审核（只有模型包、没有权重时把 `--checkpoint` 换成 `--export-dir <模型包>`）：
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python -m dp_infer_lerobot.deployment make-profile \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python -m dp_infer_lerobot.deployment make-profile \
   --checkpoint "$DP_CHECKPOINT" \
   --dataset-meta <lerobot 数据集>/meta/fastumi.json \
   --urdf assets/rm_75.urdf --model-name dp_umi_v4_012000 \
@@ -69,7 +68,23 @@ uv pip install --python .venv-dp-lerobot/bin/python \
   torch==2.8.0 torchvision==0.23.0
 uv pip install --python .venv-dp-lerobot/bin/python \
   -r src/dp_infer_lerobot/requirements-orin.txt
+# 以可编辑方式装入本仓库源码包，离线工具和测试无需再手动设置 PYTHONPATH
+uv pip install --python .venv-dp-lerobot/bin/python --no-deps \
+  -e src/dp_infer -e src/dp_infer_lerobot -e src/fastumi_rm75
+# 在 venv 中放一个 ros2 包装：激活 venv 后 `ros2` 即用本 venv 的解释器运行
+cat > .venv-dp-lerobot/bin/ros2 <<'SH'
+#!/bin/sh
+# 用本 venv 的解释器运行 ROS 2 CLI：系统 ros2 的 shebang 固定为 /usr/bin/python3，会加载 NumPy 2。
+exec "$(dirname "$(readlink -f "$0")")/python" /opt/ros/humble/bin/ros2 "$@"
+SH
+chmod +x .venv-dp-lerobot/bin/ros2
 ```
+
+可编辑安装指向 `src/` 下的源码，修改后立即生效。之后的离线工具和测试统一用
+`uv run --no-project --python ros2_ws/.venv-dp-lerobot python ...` 运行（`--no-project` 表示不解析 uv 项目，
+直接使用该 venv）。系统 `/opt/ros/humble/bin/ros2` 的 shebang 固定为 `/usr/bin/python3`，仅激活 venv 不会改变
+它的解释器，所以要靠上面的包装脚本；重建 venv 后需重新创建。source 了 ROS 工作区时，`install/` 中的副本排在 PYTHONPATH 前面、优先于可编辑安装，
+因此需要 ROS 的测试和 launch 加载的是已安装版本：修改源码后先按第 3 节重新构建。
 
 环境使用 NumPy 1.26.4、SciPy 1.13.1、diffusers 0.35.2（含 DDPM/DDIM 调度器），与 ROS 的 NumPy 1 接口配套。
 推理只需要 checkpoint 中的 `config.json`、`model.safetensors`、两个处理链 JSON 及其 `state_file`
@@ -108,8 +123,7 @@ export DP_CHECKPOINT="$PWD/dataset/lerobot/jingbao_models/012000/pretrained_mode
 TensorRT 版本绑定，Orin 上不能使用（节点会报 `device/version mismatch` 并拒绝启动），需要从 ONNX 在本机重建：
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/build_tensorrt_engines.py \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python ros2_ws/src/dp_infer_lerobot/tools/build_tensorrt_engines.py \
   --source dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v4 \
   --output dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v4/lerobot_trt_orin \
   --checkpoint "$DP_CHECKPOINT" \
@@ -140,8 +154,7 @@ export DP_EXPORT="$PWD/dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v4/ler
 onnxruntime 1.23.2 以 `--no-deps` 装入 `.venv-dp-lerobot`，避免带入 protobuf 7 影响 ROS。
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/build_tensorrt_engines.py \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python ros2_ws/src/dp_infer_lerobot/tools/build_tensorrt_engines.py \
   --source dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v5 \
   --output dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v5/trt_orin_package \
   --reference onnx \
@@ -157,19 +170,18 @@ ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/build_ten
 暂沿用 v4。拿到该文件后重新生成：
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python -m dp_infer_lerobot.deployment make-profile \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python -m dp_infer_lerobot.deployment make-profile \
   --export-dir dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v5 \
   --dataset-meta <scl/jingbao 数据集>/meta/fastumi.json \
   --urdf assets/rm_75.urdf --model-name dp_umi_v5_018500 \
   --output ros2_ws/src/dp_infer_lerobot/config/dp_umi_v5_deployment.yaml
 ```
 
-启动时比 v4 多传 `deployment_config`：
+启动时比 v4 多传 `deployment_config`（终端环境同第 4 节，已激活 `.venv-dp-lerobot`）：
 
 ```bash
 export DP_EXPORT="$PWD/dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_v5/trt_orin_package"
-ros2_ws/.venv-dp-lerobot/bin/python /opt/ros/humble/bin/ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
+ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
   backend:=tensorrt_fp16 export_dir:="$DP_EXPORT" \
   deployment_config:="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_umi_v5_deployment.yaml" \
   urdf_path:="$PWD/assets/rm_75.urdf" end_camera_extrinsic:="$PWD/config/calibration/T_cam_end.yaml" \
@@ -190,16 +202,39 @@ v5 的 U-Net 比 v4 窄，FP16 DDIM16 比 v4（79.8 ms）快约 40%。
 
 先按[现有硬件启动步骤](../dp_infer/README.md#启动)启动 RM75、Unitree 和腕部相机，
 确认相机图像、`/joint_states` 和 `/motion_control/gripper_state` 新鲜有效。在已加载 ROS 和工作区环境、
-与硬件使用相同 `ROS_DOMAIN_ID` 的终端（仓库根目录）中启动：
+与硬件使用相同 `ROS_DOMAIN_ID` 的终端（仓库根目录）中，依次加载 ROS、工作区和模型 venv 后启动。
+venv 必须最后激活，`which ros2` 应指向 `ros2_ws/.venv-dp-lerobot/bin/ros2`。
+默认使用 TensorRT FP16 后端，`DP_EXPORT` 为第 3.1 节在本机构建的模型包，`DP_PROFILE` 为同一模型的部署档
+（以下以 pick baseline 为例，换模型时两者一起换）：
 
 ```bash
-ros2_ws/.venv-dp-lerobot/bin/python /opt/ros/humble/bin/ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
-  checkpoint:="$DP_CHECKPOINT" urdf_path:="$PWD/assets/rm_75.urdf" \
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+source ros2_ws/.venv-dp-lerobot/bin/activate
+export DP_EXPORT="$PWD/dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_pick_baseline_v1/last/trt_orin_package"
+export DP_PROFILE="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_umi_pick_baseline_v1_deployment.yaml"
+ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
+  backend:=tensorrt_fp16 export_dir:="$DP_EXPORT" deployment_config:="$DP_PROFILE" \
+  urdf_path:="$PWD/assets/rm_75.urdf" \
   end_camera_extrinsic:="$PWD/config/calibration/T_cam_end.yaml" \
-  deploy_tcp_extrinsic:="$PWD/config/calibration/T_d_cam_tcp.yaml" dry_run:=true
+  deploy_tcp_extrinsic:="$PWD/config/calibration/T_d_cam_tcp.yaml" \
+  noise_scheduler:=DDIM num_inference_steps:=16 \
+  published_action_steps:=15 lookahead_s:=0.2 dry_run:=true
 ```
 
-TensorRT 后端把 `checkpoint:=` 换成 `backend:=tensorrt_fp16 export_dir:="$DP_EXPORT"`，其余参数相同。
+`published_action_steps:=15 lookahead_s:=0.2` 用于补偿 RM75 低跟随（`movej_canfd follow=False`）约 80 ms 纯延迟
+加 0.4 s 一阶滤波造成的滞后：推理多发布 horizon 中后续 7 个预测点（共 15 点 ≈ 467 ms），控制器按
+“当前时间 + 0.2 s”采样位姿，夹爪不前瞻；过期判定仍以第 8 点为准。两者**必须一起设置**：只设 `lookahead_s`
+而仍发布 8 点时，前瞻会越过序列末点，形成约 10 Hz 的来回拉扯。0.2 s 平稳后可试 `0.3`（上限 0.5）；
+回到原行为时去掉这两个参数（默认 `8` / `0.0`）。启动后确认日志中有 `15 points at 30 Hz`、`lookahead_s=0.2`，
+运行时每条为 `points=15`，否则不要开始任务。该组合在实机上尚待验收，须人工监督并随时准备急停。
+
+PyTorch 后端把 `backend:=tensorrt_fp16 export_dir:="$DP_EXPORT"` 换成 `checkpoint:="$DP_CHECKPOINT"`，
+且须按第 5 节改用串行或把步数降到 2～4。改用 `sequential_execution:=true` 时，须同时去掉
+`published_action_steps:=15 lookahead_s:=0.2`（恢复默认 `8` / `0.0`）：串行运行层按
+`execution_action_steps`（默认 8）截断输出，不能保留前瞻所需的后续预测点；launch 拒绝串行模式启用非零前瞻。
+`num_inference_steps` 不要设得过大：TensorRT FP16 下 DDIM16 约 80 ms，
+100 步约 450 ms，大部分结果会因第 8 点过期被丢弃，机械臂会停顿。
 launch 和节点都会校验模型包，任一不符即拒绝启动：
 
 - manifest 列出的文件（含 engine）SHA-256 一致；
@@ -209,8 +244,8 @@ launch 和节点都会校验模型包，任一不符即拒绝启动：
 
 前后处理、相对位姿与 DDPM/DDIM 调度器仍由本包实现，因此 `noise_scheduler`、`num_inference_steps` 和运行时调步服务同样生效。
 
-必须显式用模型环境解释器运行 `ros2`：仅激活虚拟环境时，`ros2` 的系统 Python 仍可能加载用户目录的
-NumPy 2，导致 SciPy 报 `numpy.dtype size changed`。默认使用 JPEG `/wrist_camera/image_raw/compressed`，
+必须用模型环境解释器运行 `ros2`：系统 `ros2` 的 shebang 固定为 `/usr/bin/python3`，会加载 NumPy 2，
+导致 SciPy 报 `numpy.dtype size changed`；第 2 节的 `ros2` 包装脚本保证激活 venv 后使用正确解释器。默认使用 JPEG `/wrist_camera/image_raw/compressed`，
 并启动 dry-run Placo 控制器；仅推理时加 `start_controller:=false`，raw 图像设置
 `image_type:=raw image_topic:=<raw 话题>`。
 
@@ -246,6 +281,7 @@ ros2 service call /fastumi/policy/set_inference_steps \
 | `noise_scheduler` / `num_inference_steps` | `DDIM` / `16`；空调度器沿用模型训练时的调度器；步数上限 v4 为 100、v5 为 50 |
 | `sequential_execution` | `false`（流水线）；`true` 为串行模式（见第 5 节），PyTorch 16 步须用串行 |
 | `execution_settle_s` / `execution_action_steps` | `0.3` / `8` |
+| `published_action_steps` / `lookahead_s` | `8` / `0.0`：低跟随提速时设为 `15` / `0.2`～`0.3`。推理多发布 horizon 中后续预测点（最多 15 点 ≈ 467 ms），控制器按“当前时间 + lookahead_s”采样位姿（夹爪不前瞻）；过期判定仍以第 8 点为准 |
 | `device` | `cuda:0` |
 | `start_controller` / `dry_run` | `true` / `true` |
 | `grasp_latch` | `false`，直接跟随模型连续开度 |
@@ -287,8 +323,7 @@ PyTorch FP16 autocast 只再快约 10% 且位置偏差约 1.5 mm，未采用；�
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python -m pytest -q --import-mode=importlib \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python -m pytest -q --import-mode=importlib \
   ros2_ws/src/dp_infer_lerobot/test/test_core.py \
   ros2_ws/src/dp_infer_lerobot/test/test_processors.py \
   ros2_ws/src/dp_infer_lerobot/test/test_deployment.py \
@@ -303,8 +338,7 @@ ros2_ws/.venv-dp-lerobot/bin/python -m pytest -q --import-mode=importlib \
 ```bash
 source /opt/ros/humble/setup.bash && source ros2_ws/install/setup.bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ROS_DOMAIN_ID=181 \
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:ros2_ws/src/fastumi_rm75:$PYTHONPATH \
-ros2_ws/.venv-dp-lerobot/bin/python -m pytest -q --import-mode=importlib ros2_ws/src/dp_infer_lerobot/test
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python -m pytest -q --import-mode=importlib ros2_ws/src/dp_infer_lerobot/test
 ```
 
 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 防止系统 `launch_testing` 插件额外收集需要 Placo 的无关测试。
@@ -326,8 +360,7 @@ TensorRT 后端改为 `--backend tensorrt_fp16 --export-dir "$DP_EXPORT"`（不�
 性能基准（三种后端 × DDIM 2/4/8/16，端到端与分阶段耗时、相对 PyTorch 误差）：
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/benchmark_policy.py \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python ros2_ws/src/dp_infer_lerobot/tools/benchmark_policy.py \
   --checkpoint "$DP_CHECKPOINT" --export-dir "$DP_EXPORT" \
   --video dataset/lerobot/jingbao/videos/observation.images.cam0/chunk-000/file-000.mp4 \
   --output dataset/validation/dp_lerobot_v4/benchmark_orin.json
@@ -342,8 +375,7 @@ OUT=dataset/validation/dp_lerobot_v4
 <lerobot 环境>/bin/python ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py export-reference \
   --checkpoint "$DP_CHECKPOINT" --repo-id scl/jingbao_all --dataset-root <lerobot 数据集> \
   --scheduler DDIM --steps 16 --output $OUT/reference_ddim16.npz
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
-ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py export-candidate \
+uv run --no-project --python ros2_ws/.venv-dp-lerobot python ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py export-candidate \
   --checkpoint "$DP_CHECKPOINT" \
   --deployment-config ros2_ws/src/dp_infer_lerobot/config/dp_umi_v4_deployment.yaml \
   --sample $OUT/reference_ddim16.npz --output $OUT/candidate_ddim16.npz

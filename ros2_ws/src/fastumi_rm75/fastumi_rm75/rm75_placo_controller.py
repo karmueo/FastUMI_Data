@@ -71,6 +71,8 @@ class Rm75PlacoController(Node):
         self.declare_parameter("velocity_scale", 0.25)
         self.declare_parameter("joint_state_timeout_s", 0.25)
         self.declare_parameter("sequence_hold_s", 0.3)
+        # 位姿按“当前时间 + lookahead_s”采样，抵消 RM75 低跟随约 0.5 s 的滞后；夹爪不前瞻。
+        self.declare_parameter("lookahead_s", 0.0)
         self.declare_parameter("require_start_state", False)
         # true：起始门控不再要求回到 initial_pose.yaml，改为要求七轴在当前位置静止
         # start_joint_settle_s 秒（偏离锚点不超过 start_joint_tolerance_rad）且夹爪张开。
@@ -135,6 +137,10 @@ class Rm75PlacoController(Node):
             self.get_parameter("joint_state_timeout_s").value
         )
         sequence_hold_s = float(self.get_parameter("sequence_hold_s").value)
+        lookahead_s = float(self.get_parameter("lookahead_s").value)
+        if not np.isfinite(lookahead_s) or not 0.0 <= lookahead_s <= 0.5:
+            raise ValueError("lookahead_s must be in [0, 0.5]")
+        self._lookahead_ns = int(round(lookahead_s * 1e9))
         start_defaults = {
             "start_joint_tolerance_rad": 0.035,
             "start_joint_settle_s": 0.5,
@@ -375,7 +381,7 @@ class Rm75PlacoController(Node):
         self.get_logger().warning(
             "RM75 Placo controller ready: "
             f"dry_run={self._dry_run}, rate={rate_hz:g} Hz, "
-            f"velocity_scale={velocity_scale:g}, "
+            f"velocity_scale={velocity_scale:g}, lookahead_s={lookahead_s:g}, "
             f"require_start_state={self._require_start_state}, "
             f"start_from_current_pose={self._start_from_current}"
         )
@@ -810,9 +816,12 @@ class Rm75PlacoController(Node):
         if trajectory_exhausted(self._trajectory, now_ns, self._sequence_hold_ns):
             self._stop_control("policy sequence completed")
             return
-        position, quaternion, policy_gripper = sample_trajectory(
-            self._trajectory, now_ns
+        # 位姿前瞻：低跟随滞后约 0.5 s，提前取目标使实际位置按时到达；超出末点时保持末点。
+        # 夹爪由宇树独立执行、无此滞后，仍按当前时间采样，避免机械臂未到位就提前闭合。
+        position, quaternion, _ = sample_trajectory(
+            self._trajectory, now_ns + getattr(self, "_lookahead_ns", 0)
         )
+        _, _, policy_gripper = sample_trajectory(self._trajectory, now_ns)
         close_allowed = self._close_is_allowed()
         gripper = None
         if self._grasp_latch is not None:

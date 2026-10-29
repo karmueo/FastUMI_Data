@@ -14,6 +14,7 @@ from dp_infer_lerobot.config import DiffusionConfig
 
 
 def test_launch_replaces_backend_preserves_interfaces_and_defaults_to_dry_run(tmp_path, monkeypatch):
+    """验证启动命令及参数组合，串行模式不能启用会越过执行窗口的位姿前瞻。"""
     path = Path(__file__).resolve().parents[1] / 'launch/dp_infer_lerobot.launch.py'
     spec = spec_from_file_location('lerobot_launch_test', path)
     module = module_from_spec(spec)
@@ -48,6 +49,29 @@ def test_launch_replaces_backend_preserves_interfaces_and_defaults_to_dry_run(tm
     assert 'require_close_approval:=false' in commands[1]
     assert 'start_from_current_pose:=true' in commands[1]
     assert 'sequential_execution:=false' in commands[0]
+    assert 'published_action_steps:=8' in commands[0] and 'lookahead_s:=0.0' in commands[1]
+    context.launch_configurations['published_action_steps'] = '15'
+    context.launch_configurations['lookahead_s'] = '0.3'
+    commands = [[perform_substitutions(context, value) for value in action.cmd]
+                for action in module._start(context) if isinstance(action, ExecuteProcess)]
+    assert 'published_action_steps:=15' in commands[0] and 'lookahead_s:=0.3' in commands[1]
+    context.launch_configurations['sequential_execution'] = 'true'
+    # 串行默认只执行八点，即使请求发布十五点，也不能保留流水线的前瞻设置。
+    for count in ('8', '15'):
+        context.launch_configurations['published_action_steps'] = count
+        with pytest.raises(ValueError, match='lookahead_s.*sequential_execution'):
+            module._start(context)
+    context.launch_configurations['published_action_steps'] = '8'
+    context.launch_configurations['lookahead_s'] = '0.0'
+    commands = [[perform_substitutions(context, value) for value in action.cmd]
+                for action in module._start(context) if isinstance(action, ExecuteProcess)]
+    assert 'sequential_execution:=true' in commands[0] and 'lookahead_s:=0.0' in commands[1]
+    context.launch_configurations['sequential_execution'] = 'false'
+    for name, value, valid in (('published_action_steps', '16', '8'), ('lookahead_s', '0.6', '0.0')):
+        context.launch_configurations[name] = value
+        with pytest.raises(ValueError, match=name):
+            module._start(context)
+        context.launch_configurations[name] = valid
     context.launch_configurations['start_from_current_pose'] = 'false'
     commands = [[perform_substitutions(context, value) for value in action.cmd]
                 for action in module._start(context) if isinstance(action, ExecuteProcess)]
