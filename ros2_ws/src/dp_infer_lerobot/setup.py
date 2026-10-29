@@ -37,7 +37,7 @@ setup(
     zip_safe=False,
     maintainer="FastUMI Maintainer",
     maintainer_email="maintainer@example.com",
-    description="部署 LeRobot 局部增量模型，发布兼容 RM75 的策略序列。",
+    description="部署 LeRobot TCP 相对位姿扩散策略，发布兼容 RM75 的 Link7 策略序列。",
     license="Apache-2.0",
     cmdclass={"install_scripts": RosInstallScripts},
     entry_points={"console_scripts": [

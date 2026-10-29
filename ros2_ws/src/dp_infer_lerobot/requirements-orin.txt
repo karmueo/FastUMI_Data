@@ -1,4 +1,6 @@
 # Python3.10 / Linux aarch64; install Jetson torch/torchvision separately as documented.
+# TensorRT 后端使用 JetPack 6.2.1 系统包 python3-libnvinfer（TensorRT 10.3），venv 以 --system-site-packages
+# 创建即可导入；不要从 pip 安装 tensorrt，否则与本机构建的 engine 版本不一致。
 torch==2.8.0
 torchvision==0.23.0
 numpy==1.26.4
@@ -7,7 +9,6 @@ diffusers==0.35.2
 huggingface-hub>=0.34,<1
 safetensors==0.8.0
 einops==0.8.2
-Pillow>=10,<12
 PyYAML>=6,<7
 opencv-python-headless>=4.8,<4.12
 pytest>=8,<9

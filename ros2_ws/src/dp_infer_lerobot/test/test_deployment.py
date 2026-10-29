@@ -1,8 +1,6 @@
-"""部署指纹与标定测试，只读取小配置，不加载真实模型。"""
+"""验证部署档契约、checkpoint 指纹、URDF 与 TCP 外参检查。"""
 
 import copy
-import hashlib
-import json
 from pathlib import Path
 
 import numpy as np
@@ -10,76 +8,70 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
-from dp_infer_lerobot.config import DiffusionConfig, SUPPORTED, validate_steps
-from dp_infer_lerobot.deployment import (correction_from_profile, load_correction, load_profile,
-                                         matrix_sha256, validate_urdf)
+from dp_infer_lerobot import deployment
 
-CONFIG = Path(__file__).resolve().parents[1] / 'config'
-
-
-def test_profile_matches_new_training_calibration_and_installed_urdf():
-    profile = load_profile(CONFIG / 'jingbao_deployment.yaml')
-    cal = profile['calibration']
-    assert cal['T_Cd_Link7_training_sha256'] == cal['T_Cd_Link7_deploy_sha256']
-    # Existing correction generator uses standard json separators, not compact JSON.
-    expected = hashlib.sha256(json.dumps(np.round(cal['T_Cd_Link7_training'], 12).tolist()).encode()).hexdigest()
-    assert matrix_sha256(cal['T_Cd_Link7_training']) == expected
-    correction = load_correction(CONFIG / 'link7_correction.yaml', profile)
-    assert np.degrees(Rotation.from_matrix(correction[:3, :3]).magnitude()) == pytest.approx(1.015371, abs=1e-5)
-    np.testing.assert_allclose(correction[:3, 3] * 1000, [-1.374356, 1.813137, -2.402907], atol=1e-5)
-    validate_urdf(CONFIG.parents[1] / 'fastumi_rm75/assets/rm_75_kinematic.urdf', profile)
+PROFILE = Path(__file__).resolve().parents[1] / "config/dp_umi_v4_deployment.yaml"  # 随包部署档。
+REPO = Path(__file__).resolve().parents[4]  # 仓库根目录。
 
 
-def test_reject_old_model_correction_and_modified_measurement():
-    profile = load_profile(CONFIG / 'jingbao_deployment.yaml')
-    with pytest.raises(ValueError, match='fingerprint'):
-        load_correction(CONFIG.parents[1] / 'dp_infer/config/link7_correction.yaml', profile)
-    bad = copy.deepcopy(profile)
-    bad['calibration']['T_Cd_Link7_training'][0][3] += .01
-    with pytest.raises(ValueError, match='fingerprint'):
-        correction_from_profile(bad)
+def _write(tmp_path, profile):
+    """写出部署档 YAML 并返回路径。"""
+    path = tmp_path / "profile.yaml"
+    path.write_text(yaml.safe_dump(profile))
+    return path
 
 
-def test_only_supported_model_configuration_is_accepted(tmp_path):
-    cfg = copy.deepcopy(SUPPORTED)
-    cfg['num_inference_steps'] = 16
-    path = tmp_path / 'config.json'
-    path.write_text(json.dumps(cfg))
-    assert DiffusionConfig.from_file(path).action_feature.shape == (10,)
-    cfg['input_features']['observation.state']['shape'] = [7]
-    path.write_text(json.dumps(cfg))
-    with pytest.raises(ValueError, match='input_features'):
-        DiffusionConfig.from_file(path)
-    for steps in (0, 51, True, 8.5):
-        with pytest.raises(ValueError):
-            validate_steps(steps)
+def test_packaged_profile_loads_and_contract_is_strict(tmp_path):
+    """随包部署档可加载；契约任一字段变化即拒绝。"""
+    profile = deployment.load_profile(PROFILE)
+    assert profile["contract"]["end_frame"] == "tcp"
+    changed = copy.deepcopy(profile)
+    changed["contract"]["end_frame"] = "Link7"
+    with pytest.raises(ValueError, match="contract"):
+        deployment.load_profile(_write(tmp_path, changed))
 
 
-def test_checkpoint_binding_rejects_mixed_weights_and_external_processor(tmp_path):
-    from dp_infer_lerobot.deployment import REQUIRED_FILES, sha256_file, validate_checkpoint
-    from dp_infer_lerobot.processors import FEATURES, NORM_MAP
+def test_checkpoint_and_urdf_fingerprints(tmp_path):
+    """文件集合或内容与部署档不符时拒绝；URDF 必须是训练记录的同一份。"""
+    profile = deployment.load_profile(PROFILE)
+    with pytest.raises(ValueError, match="pretrained directory"):
+        deployment.validate_checkpoint(tmp_path / "missing", profile)
+    urdf = tmp_path / "arm.urdf"
+    urdf.write_text("<robot/>")
+    with pytest.raises(ValueError, match="URDF"):
+        deployment.validate_urdf(urdf, profile)
+    profile = dict(profile, urdf_sha256=deployment.sha256_file(urdf))
+    deployment.validate_urdf(urdf, profile)
 
-    pre_name, post_name = 'pre.safetensors', 'post.safetensors'
-    normalize = {'registry_name': 'normalizer_processor', 'state_file': pre_name,
-                 'config': {'eps': 1e-8, 'features': FEATURES, 'norm_map': NORM_MAP}}
-    device = {'registry_name': 'device_processor', 'config': {'device': 'cuda', 'float_dtype': None}}
-    pre = {'name': 'policy_preprocessor', 'steps': [
-        {'registry_name': 'rename_observations_processor', 'config': {'rename_map': {}}},
-        {'registry_name': 'to_batch_processor', 'config': {}}, device, normalize]}
-    post = {'name': 'policy_postprocessor', 'steps': [
-        {'registry_name': 'unnormalizer_processor', 'state_file': post_name,
-         'config': {'eps': 1e-8, 'features': {'action': FEATURES['action']}, 'norm_map': NORM_MAP}}, device]}
-    for name in REQUIRED_FILES | {pre_name, post_name}:
-        (tmp_path / name).write_bytes(b'synthetic-file-for-fingerprint-test')
-    (tmp_path / 'normalization_stats.json').write_text(json.dumps({'source': 'train'}))
-    (tmp_path / 'policy_preprocessor.json').write_text(json.dumps(pre))
-    (tmp_path / 'policy_postprocessor.json').write_text(json.dumps(post))
-    profile = {'checkpoint_files': {p.name: sha256_file(p) for p in tmp_path.iterdir()}}
-    validate_checkpoint(tmp_path, profile)
-    (tmp_path / 'model.safetensors').write_bytes(b'other-model')
-    with pytest.raises(ValueError, match='fingerprint'):
-        validate_checkpoint(tmp_path, profile)
-    pre['steps'][-1]['state_file'] = '../outside.safetensors'
-    (tmp_path / 'policy_preprocessor.json').write_text(json.dumps(pre))
-    with pytest.raises(ValueError, match='local'):
-        validate_checkpoint(tmp_path, profile)
+
+def test_tool_offset_requires_files_and_matching_axes(tmp_path):
+    """缺少外参文件拒绝；与示教 TCP 轴向相差 180° 拒绝，一致时返回 T_Link7_TCP。"""
+    camera_from_link7 = np.eye(4)
+    camera_from_link7[:3, 3] = [0.0, 0.09, -0.016]
+    camera_from_tcp = np.eye(4)
+    camera_from_tcp[:3, :3] = Rotation.from_rotvec([1.6, 0, 0]).as_matrix()
+    camera_from_tcp[:3, 3] = [0.0, 0.074, 0.21]
+    end = tmp_path / "T_cam_end.yaml"
+    end.write_text(yaml.safe_dump({"cam0": {"T_cam_hand": camera_from_link7.tolist()}}))
+    tcp = tmp_path / "T_d_cam_tcp.yaml"
+    tcp.write_text(yaml.safe_dump({"T_d_cam_tcp": camera_from_tcp.tolist()}))
+    profile = {"umi_camera_from_tcp": camera_from_tcp.tolist()}
+    with pytest.raises(ValueError, match="require"):
+        deployment.load_tool_offset(profile, "", str(tcp), 10.0)
+    link7_from_tcp, offset_mm, angle = deployment.load_tool_offset(profile, str(end), str(tcp), 10.0)
+    np.testing.assert_allclose(link7_from_tcp, np.linalg.inv(camera_from_link7) @ camera_from_tcp, atol=1e-12)
+    assert offset_mm == pytest.approx(0) and angle == pytest.approx(0)
+    flipped = camera_from_tcp.copy()
+    flipped[:3, :3] = flipped[:3, :3] @ Rotation.from_rotvec([0, 0, np.pi]).as_matrix()
+    with pytest.raises(ValueError, match="axis convention"):
+        deployment.load_tool_offset({"umi_camera_from_tcp": flipped.tolist()}, str(end), str(tcp), 10.0)
+
+
+def test_repository_urdf_and_calibration_match_profile():
+    """仓库训练 URDF 指纹与部署档一致；当前部署外参与示教 TCP 轴向一致，Link7→TCP 约 226 mm。"""
+    profile = deployment.load_profile(PROFILE)
+    deployment.validate_urdf(REPO / "assets/rm_75.urdf", profile)
+    link7_from_tcp, offset_mm, angle = deployment.load_tool_offset(
+        profile, REPO / "config/calibration/T_cam_end.yaml", REPO / "config/calibration/T_d_cam_tcp.yaml")
+    assert 0.22 < np.linalg.norm(link7_from_tcp[:3, 3]) < 0.23
+    assert offset_mm < 20 and angle < deployment.DEFAULT_MAX_TCP_AXIS_DEG

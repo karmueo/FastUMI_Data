@@ -3,7 +3,7 @@
 <package format="3">
   <name>dp_infer_lerobot</name>
   <version>0.1.0</version>
-  <description>订阅相机、七轴关节和夹爪开度，发布 Link7 扩散策略推荐序列。</description>
+  <description>订阅相机、七轴关节和夹爪开度，运行 LeRobot TCP 扩散策略并发布 Link7 推荐序列。</description>
   <maintainer email="maintainer@example.com">FastUMI Maintainer</maintainer>
   <license>Apache-2.0</license>
 

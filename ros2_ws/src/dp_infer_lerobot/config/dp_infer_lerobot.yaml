@@ -1,6 +1,14 @@
-# 时间均为秒；真实轨迹终点另受采集时间+8/30秒严格约束。
+# LeRobot TCP 扩散策略（dp_umi_v4）推理节点参数；时间均为秒。
+# 流水线模式下结果须在采集时间 + 7/30 秒（8 个动作的末点）之前到达，另受 result_timeout_s 约束。
 dp_infer_lerobot:
   ros__parameters:
+    device: cuda:0
+    # 推理后端：pytorch 读取 checkpoint；tensorrt_fp32 / tensorrt_fp16 读取 export_dir 指向的本机模型包
+    # （tools/build_tensorrt_engines.py 生成；engine 与构建 GPU 及 TensorRT 版本绑定，且该精度须已通过验证）。
+    backend: pytorch
+    # 训练为 DDPM 100 步；部署用 DDIM 复用同一噪声表少步去噪。设为 "" 沿用 DDPM。
+    # Orin 实测单次推理：DDIM16 约 650 ms、8 步约 370 ms、4 步约 180 ms、2 步约 110 ms。
+    noise_scheduler: DDIM
     num_inference_steps: 16
     task_control_enabled: true
     sync_slop_s: 0.05
@@ -10,9 +18,13 @@ dp_infer_lerobot:
     result_timeout_s: 0.5
     controller_reset_timeout_s: 1.0
     postprocessors: ""
-    # true：观测+推理→整段执行完并稳定 execution_settle_s 秒→再观测；false 为流水线默认模式。
-    # 串行模式下 header 为发布时刻，不再执行上述 8/30 秒与 result_timeout_s 约束。
+    # 示教 TCP 与部署 TCP 坐标轴允许的最大夹角（度）。
+    max_tcp_axis_deg: 10.0
+    # true：观测+推理→整段执行完并稳定 execution_settle_s 秒→再观测；false 为流水线模式。
+    # 串行模式下 header 为发布时刻，不再执行上述 7/30 秒与 result_timeout_s 约束。
+    # 默认流水线（launch 同名参数会覆盖此值）：TensorRT FP16 DDIM16 约 80 ms，满足 233 ms；
+    # PyTorch 16 步约 650 ms 会全部过期，PyTorch 后端须改用串行或把 num_inference_steps 降到 2～4。
     sequential_execution: false
     execution_settle_s: 0.3
-    # 串行模式每段执行的动作数，最小为 1；轨迹额外保留起始锚点，超过输出动作数时执行全部动作。
+    # 串行模式每段执行的动作数，最小为 1；超过输出动作数时执行全部 8 个动作。
     execution_action_steps: 8

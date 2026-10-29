@@ -1,0 +1,45 @@
+# 模型、训练数据契约与示教 TCP 外参的冻结部署档；更换模型或数据后重新生成并审核。
+version: 1
+model_name: dp_umi_v4_012000
+contract:
+  fps: 30
+  state_layout: xyz_rotvec_gripper
+  action_layout: xyz_rotvec_gripper
+  action_source: demonstration_trajectory
+  end_frame: tcp
+  tcp_definition: gripper_grasp_center
+  deployment_tool_offset: deployment_calibration
+  position_unit: m
+  rotation_unit: rad
+  gripper_representation: normalized_0_1
+  image_size: 224
+  image_preprocessing: letterbox_inter_area_black_border
+checkpoint_files:
+  config.json: c3a24f41447a3a89792f95fbd02a7581e74a6b8712b745830037c9bc9b199a85
+  model.safetensors: 1a02efa99a9a35c37aff38769302da19f693ae505fa8f09a1785319a1ad3a951
+  policy_preprocessor.json: 78fd2d9c5b5016d69d8c6f7c6620e387ed218f916211a07fa0848fb55bd5be69
+  policy_postprocessor.json: 96cfc3b123e57e84cf4d45a768446600446c9eaf9512fd454494bbde954bf014
+  policy_preprocessor_step_4_normalizer_processor.safetensors: cf3702650795c0c2057fc4b24cbb7b229086455f7c0bf6c4b9391f7ff47946fc
+  policy_postprocessor_step_0_unnormalizer_processor.safetensors: ab360eb894a3c3b326c86e5aa3e35319af22ddf2154c8cc48233429d8c263874
+urdf_sha256: c37545834f0d6a4719548e51337a258be0c3b95bb6b79467d835875a205bb056
+umi_camera_from_tcp:
+- - 0.9997670430417793
+  - -0.002663922532012177
+  - -0.02141875729914766
+  - 0.00046229215568154236
+- - -0.021578395598934475
+  - -0.10119407285839027
+  - -0.9946326620726399
+  - 0.06564346959496552
+- - 0.00048217307290440654
+  - 0.9948631378913754
+  - -0.10122798216922756
+  - 0.20737177055247244
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+sources:
+  dataset_repo_id: scl/jingbao_all
+  dataset_meta_sha256: b83831916ed37593af2a8876645d90b65f2174ed41289739e4bd6f4cb01452c9
+  umi_tcp_extrinsic_sha256: 51f7d3373a63fb6321fdf85bd5b8ff01eca8da14ca7a18f8cc1ce55deb77f718

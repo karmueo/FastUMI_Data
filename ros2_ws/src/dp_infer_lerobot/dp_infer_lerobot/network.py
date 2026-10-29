@@ -15,9 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""LeRobot 0.6.0 推理网络摘录；移除训练/Hub/队列包装，保留原权重键及计算。
+"""LeRobot fork（6168a52，SE(3) 相对位姿）扩散策略推理网络摘录。
 
-上游来源和摘要见 THIRD_PARTY_NOTICES.md；修改版本仅支持配套配置验证器接受的模型。
+只移除训练损失、策略队列、Hub 基类与可选依赖检查，其余计算与权重键保持上游原样，
+以便 ``model.safetensors`` 按 ``diffusion.*`` 严格加载并逐位复现上游推理。
+配置对象由 :mod:`dp_infer_lerobot.config` 提供。
 """
 
 import math
@@ -26,32 +28,36 @@ from collections.abc import Callable
 import einops
 import numpy as np
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 import torchvision
-from torch import Tensor, nn
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from .config import DiffusionConfig
 
-OBS_STATE = "observation.state"
-OBS_IMAGES = "observation.images"
-OBS_ENV_STATE = "observation.environment_state"
+OBS_STATE = "observation.state"  # 模型布局的状态历史键，形状 (B, n_obs_steps, 10)。
+OBS_IMAGES = "observation.images"  # 堆叠后的相机历史键，形状 (B, n_obs_steps, 相机数, 3, H, W)。
+OBS_ENV_STATE = "observation.environment_state"  # 本模型未使用，保留上游分支。
 
 
-def get_device_from_parameters(module):
-    """取得网络参数设备。"""
-    return next(module.parameters()).device
+def get_device_from_parameters(module: nn.Module) -> torch.device:
+    """取得模块首个参数所在设备（摘自 lerobot/policies/utils.py）。"""
+    return next(iter(module.parameters())).device
 
 
-def get_dtype_from_parameters(module):
-    """取得网络参数类型。"""
-    return next(module.parameters()).dtype
+def get_dtype_from_parameters(module: nn.Module) -> torch.dtype:
+    """取得模块首个参数的数据类型（摘自 lerobot/policies/utils.py）。"""
+    return next(iter(module.parameters())).dtype
 
 
-def get_output_shape(module, input_shape):
-    """按上游方法计算编码器输出形状；只在创建模型时执行。"""
+def get_output_shape(module: nn.Module, input_shape: tuple) -> tuple:
+    """用全零输入试算模块输出形状，只在构建模型时调用（摘自 lerobot/policies/utils.py）。"""
+    dummy_input = torch.zeros(size=input_shape)
     with torch.inference_mode():
-        return tuple(module(torch.zeros(input_shape)).shape)
+        output = module(dummy_input)
+    return tuple(output.shape)
 
 
 def _make_noise_scheduler(name: str, **kwargs: dict):
@@ -59,12 +65,12 @@ def _make_noise_scheduler(name: str, **kwargs: dict):
     Factory for noise scheduler instances of the requested type. All kwargs are passed
     to the scheduler.
     """
-
-    if name == "DDIM":
+    if name == "DDPM":
+        return DDPMScheduler(**kwargs)
+    elif name == "DDIM":
         return DDIMScheduler(**kwargs)
     else:
         raise ValueError(f"Unsupported noise scheduler type {name}")
-
 
 
 class DiffusionModel(nn.Module):
@@ -73,7 +79,8 @@ class DiffusionModel(nn.Module):
         self.config = config
 
         # Build observation encoders (depending on which observations are provided).
-        global_cond_dim = self.config.robot_state_feature.shape[0]
+        # 启用相对位姿时 state 中每个位姿组扩展为 9 维（位置 + rot6d）
+        global_cond_dim = self.config.model_state_dim
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -125,7 +132,7 @@ class DiffusionModel(nn.Module):
             noise
             if noise is not None
             else torch.randn(
-                size=(batch_size, self.config.horizon, self.config.action_feature.shape[0]),
+                size=(batch_size, self.config.horizon, self.config.model_action_dim),
                 dtype=dtype,
                 device=device,
                 generator=generator,
@@ -212,8 +219,6 @@ class DiffusionModel(nn.Module):
         return actions
 
 
-
-
 class SpatialSoftmax(nn.Module):
     """
     Spatial Soft Argmax operation described in "Deep Spatial Autoencoders for Visuomotor Learning" by Finn et al.
@@ -283,7 +288,6 @@ class SpatialSoftmax(nn.Module):
         feature_keypoints = expected_xy.view(-1, self._out_c, 2)
 
         return feature_keypoints
-
 
 
 class DiffusionRgbEncoder(nn.Module):
@@ -374,7 +378,6 @@ class DiffusionRgbEncoder(nn.Module):
         return x
 
 
-
 def _replace_submodules(
     root_module: nn.Module, predicate: Callable[[nn.Module], bool], func: Callable[[nn.Module], nn.Module]
 ) -> nn.Module:
@@ -408,7 +411,6 @@ def _replace_submodules(
     return root_module
 
 
-
 class DiffusionSinusoidalPosEmb(nn.Module):
     """1D sinusoidal positional embeddings as in Attention is All You Need."""
 
@@ -426,7 +428,6 @@ class DiffusionSinusoidalPosEmb(nn.Module):
         return emb
 
 
-
 class DiffusionConv1dBlock(nn.Module):
     """Conv1d --> GroupNorm --> Mish"""
 
@@ -441,7 +442,6 @@ class DiffusionConv1dBlock(nn.Module):
 
     def forward(self, x):
         return self.block(x)
-
 
 
 class DiffusionConditionalUnet1d(nn.Module):
@@ -468,7 +468,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
         # just reverse these.
-        in_out = [(config.action_feature.shape[0], config.down_dims[0])] + list(
+        in_out = [(config.model_action_dim, config.down_dims[0])] + list(
             zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
         )
 
@@ -523,7 +523,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         self.final_conv = nn.Sequential(
             DiffusionConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
-            nn.Conv1d(config.down_dims[0], config.action_feature.shape[0], 1),
+            nn.Conv1d(config.down_dims[0], config.model_action_dim, 1),
         )
 
     def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:
@@ -547,29 +547,41 @@ class DiffusionConditionalUnet1d(nn.Module):
         else:
             global_feature = timesteps_embed
 
+        use_gc = self.config.gradient_checkpointing and self.training
+
         # Run encoder, keeping track of skip features to pass to the decoder.
         encoder_skip_features: list[Tensor] = []
         for resnet, resnet2, downsample in self.down_modules:
-            x = resnet(x, global_feature)
-            x = resnet2(x, global_feature)
+            if use_gc:
+                x = checkpoint(resnet, x, global_feature, use_reentrant=False)
+                x = checkpoint(resnet2, x, global_feature, use_reentrant=False)
+            else:
+                x = resnet(x, global_feature)
+                x = resnet2(x, global_feature)
             encoder_skip_features.append(x)
             x = downsample(x)
 
         for mid_module in self.mid_modules:
-            x = mid_module(x, global_feature)
+            if use_gc:
+                x = checkpoint(mid_module, x, global_feature, use_reentrant=False)
+            else:
+                x = mid_module(x, global_feature)
 
         # Run decoder, using the skip features from the encoder.
         for resnet, resnet2, upsample in self.up_modules:
             x = torch.cat((x, encoder_skip_features.pop()), dim=1)
-            x = resnet(x, global_feature)
-            x = resnet2(x, global_feature)
+            if use_gc:
+                x = checkpoint(resnet, x, global_feature, use_reentrant=False)
+                x = checkpoint(resnet2, x, global_feature, use_reentrant=False)
+            else:
+                x = resnet(x, global_feature)
+                x = resnet2(x, global_feature)
             x = upsample(x)
 
         x = self.final_conv(x)
 
         x = einops.rearrange(x, "b d t -> b t d")
         return x
-
 
 
 class DiffusionConditionalResidualBlock1d(nn.Module):
@@ -632,17 +644,29 @@ class DiffusionConditionalResidualBlock1d(nn.Module):
 
 
 class InferencePolicy(nn.Module):
-    """无内部时序队列；调用者必须传入完整的两帧观测窗口。"""
+    """无内部队列的推理包装，保持上游 ``diffusion.*`` 权重命名空间。
+
+    调用者必须一次给出完整的 ``n_obs_steps`` 帧观测窗口；本类不缓存历史。
+    """
 
     def __init__(self, config):
+        """按已校验的配置构建网络；不加载任何权重。"""
         super().__init__()
         self.config = config
         self.diffusion = DiffusionModel(config)
 
     @torch.inference_mode()
-    def predict_action_chunk(self, batch, noise=None):
-        """输入 [B,2,3,224,224] 图像及 [B,2,1] 状态，返回 [B,8,10]。"""
+    def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+        """输入已归一化观测，返回归一化模型布局动作块。
+
+        Args:
+            batch: ``observation.images.front`` 为 (B, 2, 3, 224, 224)，
+                ``observation.state`` 为 (B, 2, 10)。
+            noise: 可选初始噪声 (B, horizon, 10)，用于离线数值对照。
+
+        Returns:
+            (B, n_action_steps, 10)，从当前观测帧开始的动作。
+        """
         inputs = dict(batch)
-        inputs[OBS_IMAGES] = torch.stack(
-            [inputs[key] for key in self.config.image_features], dim=-4)
+        inputs[OBS_IMAGES] = torch.stack([inputs[key] for key in self.config.image_features], dim=-4)
         return self.diffusion.generate_actions(inputs, noise=noise)

@@ -1,1 +1,1 @@
-"""LeRobot 0.6.0 RM75 局部增量模型的独立部署后端。"""
+"""LeRobot TCP 相对位姿扩散策略（dp_umi_v4 / dp_umi_v5）的独立 ROS 2 部署后端。"""
