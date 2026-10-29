@@ -464,46 +464,79 @@ export TASK_INPUT="${COLLECT_ROOT}/${TASK}_binary"
 
 ## 6. 转换 DP 训练数据
 
-**U3：采集 PC，Jazzy/NumPy 1 环境，仓库根目录。** 主流程转换连续开度，选用副本时先设置上一节的 `TASK_INPUT`。
+**U3：采集 PC，Jazzy/NumPy 1 环境，仓库根目录。** 本节导出供 LeRobot Diffusion Policy 训练使用的 **LeRobot v3.0 数据集**。主流程转换连续开度，选用二值化副本时先设置上一节的 `TASK_INPUT`。
+
+采集 PC 还需准备已安装 LeRobot 的独立 Python 环境。将 `LEROBOT_ROOT` 改为本机 LeRobot 仓库路径，并设置数据集标识；`--repo-id` 必须为 `<用户或组织>/<数据集名>`，只写入元数据，不上传数据。
 
 ```bash
 cd "$FASTUMI_ROOT"
+export LEROBOT_ROOT="$HOME/work/lerobot"
+export DATASET_REPO_ID="local/${TASK}"
+test -x "$LEROBOT_ROOT/.venv/bin/python"
+
 python -m fastumi_data.mcap_converter "$TASK_INPUT" \
   --output-dir "$CONVERT_DIR" \
   --tracker-camera-extrinsic "$CALIB_DIR/T_cam_tracker.yaml" \
   --umi-tcp-extrinsic "$CALIB_DIR/T_u_cam_tcp.yaml" \
   --tracker-serial "$TRACKER_SERIAL" --urdf "$TRAIN_URDF" \
-  --gripper-source auto --jobs 1 --output-format zarr
+  --gripper-source auto --jobs 1 \
+  --output-format lerobot --repo-id "$DATASET_REPO_ID" \
+  --lerobot-python "$LEROBOT_ROOT/.venv/bin/python" \
+  --max-fill-gap 2
 ```
 
-本节沿用 Diffusion Policy 的 Zarr 训练流程，须显式加 `--output-format zarr`（`convert_mcap` 现在默认导出 LeRobot v3.0 数据集，需要 `--repo-id` 和 LeRobot Python，见 [LeRobot 数据集说明](../ros2_ws/src/fastumi_data/README.md#lerobot-数据集)）。使用模块入口以确保读取当前环境中的 Zarr 依赖；`ros2 run ... convert_mcap` 的已安装入口可能使用缺少 Zarr 的系统解释器。输出目录必须尚不存在。多记录可按内存/磁盘条件增加 `--jobs`；初次验证保留串行。
+输出目录必须尚不存在，最终数据集位于 `$CONVERT_DIR/lerobot`。转换主进程使用 ROS/NumPy 1 环境，写入器自动以隔离模式调用指定的 LeRobot Python；无需切换当前终端到 LeRobot 环境，也无需 Zarr/JPEG XL 依赖。转换前会预检 LeRobot、视频编码和解码能力，预检失败时不创建输出目录。多记录可按内存/磁盘条件增加 `--jobs`，或使用 `--jobs 0` 自动并行（上限 8）；初次验证保留串行。
 
 服务化采集从 `session.yaml` 读取标称源帧率。历史记录缺失时，确认实际采集配置后加 `--source-camera-fps 30`，不根据观察到的低帧率猜测标称值。不要给 JPEG MCAP 套用 raw 图像处理配置。
+
+### 6.1 数据格式与输出
+
+| 字段 | 格式与语义 |
+| --- | --- |
+| `observation.state` | `float32[7]`：`[x, y, z, rx, ry, rz, gripper]`；位置单位米，旋转为轴角旋转向量（弧度），夹爪范围 `[0,1]` |
+| `action` | 与 `observation.state` 布局相同，保存同一图像时刻的示教位姿，数值相等，不提前一帧 |
+| `observation.images.front` | RGB，等比例缩放并居中补黑至 224×224，以 H.264 MP4 保存 |
+| `task` | 任务文本，依次取 episode 任务名、记录任务名、记录标识 |
+
+位姿统一表达在 **episode 起始 UMI TCP（夹爪抓取中心）坐标系**，是该坐标系中的绝对位姿。转换阶段不计算逐步相对位姿，也不转换为 rot6d；训练时通过 `--policy.use_relative_pose=true` 和 `--policy.relative_pose_state_starts='[0]'` 完成 SE(3) 相对位姿预处理，模型内部 state/action 为 10 维。
+
+LeRobot 按连续 **30 Hz** 生成时间和索引。默认连续缺失不超过 2 帧时补齐：图像取最近邻，位置线性插值，姿态用四元数 SLERP，连续夹爪线性插值、二值夹爪取最近邻。更长缺口切分为独立片段；片段从零计时，位姿仍沿用原 episode 起始 TCP 坐标系。补齐后少于 16 帧的片段丢弃，不外推首尾，也不放宽质量门限。
 
 ```text
 <CONVERT_DIR>/
 ├── manifest.json                 本次参数、来源、外参与 URDF 摘要、处理结果
 ├── snapshots/calibration/        两份外参及可用绑定
-├── snapshots/urdf/rm_75.urdf      与部署传递同一份 URDF
+├── snapshots/urdf/rm_75.urdf      URDF 快照，仅用于记录与追溯
 ├── records/<任务>/<记录>/
-│   ├── episodes/*.hdf5           RGB（Zarr 模式源分辨率，LeRobot 模式 224 letterbox）和 UMI TCP 示教轨迹
-│   ├── reports/*.json           每条 episode 接受/拒绝与时间质量报告
-│   └── record_report.json
-└── dataset.zarr                 合并后的 30 Hz 训练数据
+│   ├── episodes/*.hdf5           224×224 RGB 和 UMI TCP 示教轨迹
+│   ├── reports/*.json            每条 episode 接受/拒绝与时间质量报告
+│   └── record_report.json        包含 LeRobot 补帧、切分和丢弃结果
+└── lerobot/                      训练时的 dataset.root
+    ├── meta/info.json            格式版本、帧率、特征维度及帧数
+    ├── meta/fastumi.json         坐标系、单位、时间语义与逐 episode 溯源
+    ├── data/                    状态、动作等表格数据
+    └── videos/                  图像视频
 ```
 
-**检查：**终端汇总有效/拒绝数量，逐条检查拒绝原因。内部同步缺口或跟踪异常会拒绝 episode；至少保留 16 帧。零有效 episode 返回失败；其他硬错误同样中止且不发布最终 Zarr。即使转换成功，也要检查被跳过的数据，`complete=true` 只表示导出完成。
+### 6.2 检查与训练衔接
 
-在已安装训练依赖的环境运行校验器（采集 PC 也可以单独准备第 1.3 节的训练环境）：
+转换器在写入完成后自动重新打开数据集，核对长度、数值及首/中/末帧的视频解码误差，全部通过后才发布 `lerobot/`。检查终端的有效/拒绝数量，以及 `manifest.json`、逐 episode 报告和 `record_report.json` 中的拒绝、补帧与切分原因；导出成功不代表时间标定已经验证。零有效 episode 或导出异常会返回失败；失败时保留 `.lerobot_staging/` 供诊断。
 
 ```bash
-cd "$FASTUMI_ROOT/model/dp"
-env -u PYTHONPATH uv run --no-sync python ../../datatool/validate_dp_dataset.py \
-  --input "$CONVERT_DIR/dataset.zarr" --type rm75_umi \
-  --report "$FASTUMI_ROOT/dataset/_analysis/${RUN_ID}_dataset.json"
+cat "$CONVERT_DIR/lerobot/meta/info.json"
+cat "$CONVERT_DIR/lerobot/meta/fastumi.json"
 ```
 
-应无错误；检查 30 Hz、起始 TCP 相对坐标（`fastumi-tcp-v1`）、夹爪 `[0,1]`、URDF 摘要、时间递增、图像解码及训练窗口。单条 episode 仅作数据调试时加 `--val-ratio 0`，常规训练保留至少两条并使用默认验证划分。转换细节见 [MCAP→TCP 说明](../ros2_ws/src/fastumi_data/README.md#mcaptcp-训练数据convert_mcap)。
+确认格式版本为 v3.0、帧率为 30、`observation.state` 和 `action` 均为 7 维、图像为 224×224，且有效 episode 与总帧数符合预期。结合 `meta/fastumi.json` 核对起始 TCP 坐标系、单位、外参和来源。
+
+训练按 LeRobot 仓库中的 `docs/umi/umi_dp训练.md` 执行，将其中的数据集参数替换为：
+
+```bash
+--dataset.repo_id="$DATASET_REPO_ID" \
+--dataset.root="$CONVERT_DIR/lerobot" \
+```
+
+训练文档中的相对位姿设置及 `n_obs_steps=2`、`horizon=16`、`n_action_steps=8`、`drop_n_last_frames=7` 保持配套使用。此处输出对应 LeRobot 训练流程；本教程第 8 节及后续基于 `model/dp` 的旧训练、导出与部署命令不适用于这份数据集。转换参数和契约详见 [MCAP→TCP 说明](../ros2_ws/src/fastumi_data/README.md#mcaptcp-训练数据convert_mcap) 与 [LeRobot 数据集说明](../ros2_ws/src/fastumi_data/README.md#lerobot-数据集)。
 
 **采集 PC 与训练机分开时：**先在训练机创建 `dataset/processed/`；将整个转换目录传过去，包括快照和报告，使用新的 `RUN_ID`，目标目录应为空或不存在：
 
@@ -513,7 +546,7 @@ export TRAIN_REPO=/absolute/path/to/FastUMI_Data
 rsync -av --ignore-existing "$CONVERT_DIR" "$TRAIN_HOST:$TRAIN_REPO/dataset/processed/"
 ```
 
-训练机按第 1.1 节填写本机 `.env` 并加载后，重新运行上面的校验命令。
+训练机按第 1.1 节填写本机 `.env` 并加载，设置与转换时一致的 `DATASET_REPO_ID`，核对上述元数据；训练命令中的 `dataset.root` 应指向训练机实际的 `$CONVERT_DIR/lerobot`。
 
 ## 7. 可选：Rerun 查看
 
