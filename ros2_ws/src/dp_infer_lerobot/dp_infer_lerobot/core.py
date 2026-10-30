@@ -1,11 +1,7 @@
-"""构造训练一致的 TCP 观测，并把模型输出的绝对 TCP 动作换算为 Link7 目标序列。
+"""在当前帧相对或固定回合起点契约下构造 TCP 观测并还原 Link7 目标。
 
-坐标约定：
-- 观测位姿 ``Observation.pose`` 为 ``base_link → TCP``（``FK(q) @ T_Link7_TCP``），米制 4×4。
-- 模型 state/action 原始布局 ``[x, y, z, rx, ry, rz, gripper]``：位置米、轴角弧度、归一化夹爪。
-  模型内部只使用相对当前帧的位姿，因此 base 坐标系的选取不影响结果。
-- 输出 ``base_link → Link7`` 目标：``T_base_TCP @ inverse(T_Link7_TCP)``，四元数 xyzw，
-  第 k 个点对应观测时刻 + k/30 秒。
+观测是 base_link→TCP 的 4×4 矩阵；新契约使用 inv(T_base_start) @ T_base_TCP，
+位置单位米、旋转为弧度轴角。输出为 base_link→Link7、米及 xyzw 四元数，时间为 k/30 秒。
 """
 
 import numpy as np
@@ -36,12 +32,14 @@ def raw_to_pose(raw):
     return poses
 
 
-def build_observations(history, start_pose=None):
+def build_observations(history, start_pose=None, pose_frame="current_tcp", gripper_threshold=0.75):
     """把两帧同步观测转换为模型原始输入。
 
     Args:
         history: 两个 ``dp_infer.core.Observation``，时间递增；pose 为 base→TCP。
-        start_pose: 兼容 ``dp_infer`` 调用约定，本模型不使用。
+        start_pose: 新契约使用的固定回合起点 T_base_start；旧契约忽略。
+        pose_frame: ``current_tcp`` 或 ``episode_start_tcp``。
+        gripper_threshold: 新契约的在线夹爪二值化阈值。
 
     Returns:
         ``{IMAGE_KEY: [1,2,3,224,224], STATE_KEY: [1,2,7]}`` float32。
@@ -52,7 +50,23 @@ def build_observations(history, start_pose=None):
     if len(history) != 2:
         raise ValueError("Exactly two synchronized observations are required")
     images = np.stack([np.asarray(item.image, dtype=np.float32) for item in history])[None]
-    state = np.stack([np.r_[pose_to_raw(item.pose), item.gripper] for item in history])[None]
+    if pose_frame not in ("current_tcp", "episode_start_tcp"):
+        raise ValueError("Unsupported pose frame")
+    if not np.isfinite(gripper_threshold) or not 0 <= gripper_threshold <= 1:
+        raise ValueError("Gripper threshold must be finite and within [0,1]")
+    grippers = np.asarray([item.gripper for item in history], dtype=np.float64)
+    if not np.isfinite(grippers).all() or np.any((grippers < 0) | (grippers > 1)):
+        raise ValueError("Invalid gripper state")
+    if pose_frame == "episode_start_tcp":
+        start = np.asarray(start_pose, dtype=np.float64)
+        if start.shape != (4, 4) or not np.isfinite(start).all():
+            raise ValueError("Expected finite episode start pose")
+        transform = np.linalg.inv(start)
+        grippers = (grippers >= gripper_threshold).astype(np.float64)
+    else:
+        transform = np.eye(4)
+    state = np.stack([np.r_[pose_to_raw(transform @ item.pose), gripper]
+                      for item, gripper in zip(history, grippers)])[None]
     if images.shape != (1, 2, *IMAGE_SHAPE) or not np.isfinite(images).all() or np.any(
             (images < 0) | (images > 1)):
         raise ValueError(f"Invalid observation {IMAGE_KEY}")
@@ -87,17 +101,21 @@ def validate_sequence(sequence, count=ACTION_STEPS):
     return sequence
 
 
-def decode_actions(actions, context):
-    """把 ``[8,7]`` 绝对 TCP 动作换算为 base→Link7 目标序列。
+def decode_actions(actions, context, pose_frame="current_tcp"):
+    """把 ``[8,7]`` TCP 动作按指定坐标系换算为 base→Link7 目标序列。
 
     Args:
-        actions: 后处理后的原始布局动作，第 0 个对应观测时刻。
-        context: ``dp_infer.core.InferenceContext``，使用其 ``link7_from_tool``（T_Link7_TCP）。
+        actions: 后处理后的原始布局动作，第 0 个对应观测时刻；新契约相对于回合起点。
+        context: 冻结参考位姿和 ``link7_from_tool``（T_Link7_TCP）。
+        pose_frame: 动作使用的坐标系契约。
     """
     actions = np.asarray(actions, dtype=np.float64)
     if actions.shape != (ACTION_STEPS, RAW_DIM) or not np.isfinite(actions).all():
         raise ValueError(f"Expected finite [{ACTION_STEPS},{RAW_DIM}] actions")
-    link7 = raw_to_pose(actions) @ np.linalg.inv(context.link7_from_tool)
+    if pose_frame not in ("current_tcp", "episode_start_tcp"):
+        raise ValueError("Unsupported pose frame")
+    base_from_frame = context.reference_pose if pose_frame == "episode_start_tcp" else np.eye(4)
+    link7 = base_from_frame @ raw_to_pose(actions) @ np.linalg.inv(context.link7_from_tool)
     return validate_sequence(ActionSequence(
         link7[:, :3, 3], Rotation.from_matrix(link7[:, :3, :3]).as_quat(),
         actions[:, 6], np.arange(ACTION_STEPS) / FREQUENCY_HZ))

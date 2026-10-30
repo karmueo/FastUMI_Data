@@ -85,7 +85,8 @@ def _start(context):
     validate_urdf(urdf_path, profile)
     # 外参轴向校验由节点执行，使用参数文件中实际生效的 max_tcp_axis_deg。
     DiffusionConfig.from_file(assets / "config.json", overrides["noise_scheduler"] or None,
-                              int(overrides["num_inference_steps"] or 0) or None)
+                              int(overrides["num_inference_steps"] or 0) or None,
+                              profile["contract"].get("pose_frame", "current_tcp"))
     command = [
         str(inference_python), "-m", "dp_infer_lerobot.node", "--ros-args",
         "--params-file", str(config_file),

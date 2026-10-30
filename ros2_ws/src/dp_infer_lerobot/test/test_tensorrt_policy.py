@@ -144,3 +144,19 @@ def test_validate_export_binds_package_to_profile(tmp_path):
     (root / "denoiser_fp16.engine").write_bytes(b"tampered")
     with pytest.raises(ValueError, match="checksum"):
         deployment.validate_export(root, profile, "fp16")
+
+
+def test_episode_start_manifest_shapes(tmp_path):
+    """7 维编码器、条件及去噪器形状和动作截取均须匹配导出契约。"""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(dict(SUPPORTED, use_relative_pose=False, num_inference_steps=None)))
+    cfg = DiffusionConfig.from_file(path, pose_frame="episode_start_tcp")
+    stages = expected_stages(cfg)
+    assert stages["encoder"][0][STATE_KEY][0] == [1, 2, 7]
+    assert stages["encoder"][1][1] == [1, 142]
+    assert stages["denoiser"][0]["sample"][0] == [1, 16, 7]
+    check_manifest(_manifest(cfg), cfg)
+    bad = _manifest(cfg)
+    bad["stages"]["encoder"]["inputs"][STATE_KEY]["shape"] = [1, 2, 10]
+    with pytest.raises(ValueError, match="interface"):
+        check_manifest(bad, cfg)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import IMAGE_KEY, MODEL_DIM, RAW_DIM, STATE_KEY, DiffusionConfig, validate_backend
+from .config import IMAGE_KEY, RAW_DIM, STATE_KEY, DiffusionConfig, validate_backend
 from .core import ACTION_STEPS, decode_actions, validate_sequence
 from .deployment import validate_checkpoint, validate_export
 
@@ -47,7 +47,8 @@ class PolicyEngine:
             manifest = validate_export(export_dir, profile, precision)
             root = Path(export_dir) / "assets"  # 与 checkpoint 指纹一致的配置及处理器统计量。
         self.cfg = DiffusionConfig.from_file(root / "config.json", noise_scheduler or None,
-                                             num_inference_steps or None)
+                                             num_inference_steps or None,
+                                             profile["contract"].get("pose_frame", "current_tcp"))
         if precision is None:
             self.policy = self._load_torch_policy(root)
         else:
@@ -55,7 +56,7 @@ class PolicyEngine:
 
             session = TensorRTSession(export_dir, manifest, self.device, precision)
             self.policy = TensorRTPolicy(self.cfg, manifest, session, self.device)
-        self.processors = TorchProcessors(root, self.device)
+        self.processors = TorchProcessors(root, self.device, self.cfg.pose_frame)
         self.postprocessors = tuple(processors)
 
     def _load_torch_policy(self, root):
@@ -82,11 +83,11 @@ class PolicyEngine:
         return f"{self.backend}:{self.cfg.noise_scheduler_type}x{self.cfg.num_inference_steps}"
 
     def predict_raw(self, observations, noise=None, return_debug=False):
-        """执行一次推理，返回 CPU ``[1,8,7]`` 原始布局绝对动作。
+        """执行一次推理，返回 CPU ``[1,8,7]`` 原始布局动作；新模型相对于回合起点。
 
         Args:
             observations: :func:`core.build_observations` 的输出。
-            noise: 可选初始噪声 ``[1,16,10]``，用于离线数值对照。
+            noise: 可选初始噪声 ``[1,16,D]``，D 按部署契约为 10 或 7。
             return_debug: 为真时额外返回归一化输入和模型输出，供对照工具使用。
         """
         import torch
@@ -102,8 +103,8 @@ class PolicyEngine:
             inputs[key] = torch.as_tensor(value, device=self.device)
         if noise is not None:
             noise = torch.as_tensor(np.asarray(noise, dtype=np.float32), device=self.device)
-            if noise.shape != (1, self.cfg.horizon, MODEL_DIM) or not torch.isfinite(noise).all():
-                raise ValueError("Expected finite [1,16,10] initial noise")
+            if noise.shape != (1, self.cfg.horizon, self.cfg.model_action_dim) or not torch.isfinite(noise).all():
+                raise ValueError("Invalid initial noise shape or values")
         with torch.inference_mode():
             batch, reference = self.processors.preprocess(inputs[IMAGE_KEY], inputs[STATE_KEY])
             model_actions = self.policy.predict_action_chunk(batch, noise=noise)
@@ -118,7 +119,7 @@ class PolicyEngine:
 
     def predict(self, observations, context):
         """推理并换算为 Link7 目标序列，再依次执行后处理扩展。"""
-        sequence = decode_actions(self.predict_raw(observations)[0], context)
+        sequence = decode_actions(self.predict_raw(observations)[0], context, self.cfg.pose_frame)
         for processor in self.postprocessors:
             sequence = validate_sequence(processor.process(sequence, context))
         return sequence

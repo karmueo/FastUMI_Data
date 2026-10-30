@@ -27,7 +27,6 @@ IMAGE_KEY = "observation.images.front"  # 相机特征键。
 STATE_KEY = "observation.state"  # 原始 7D 状态键。
 ACTION_STEPS = 8  # 每次推理的动作数。
 HORIZON = 16  # 扩散去噪序列长度。
-MODEL_DIM = 10  # 模型布局动作维度。
 COMPARED = ("normalized_state", "model_actions", "actions")  # compare 子命令逐项比较的数组。
 # --physical 默认门槛，与 LeRobot 导出验证一致：位置 1 mm、旋转 0.5°、夹爪 0.01。
 PHYSICAL_LIMITS = {"position_mm": 1.0, "rotation_deg": 0.5, "gripper": 0.01}
@@ -87,7 +86,7 @@ def export_reference(args):
         item = dataset[index]
         image = item[IMAGE_KEY].numpy().astype(np.float32)  # (2,3,224,224)，[0,1]
         state = item[STATE_KEY].numpy().astype(np.float32)  # (2,7)
-        noise = rng.standard_normal((1, HORIZON, MODEL_DIM)).astype(np.float32)
+        noise = rng.standard_normal((1, HORIZON, 10 if config.use_relative_pose else 7)).astype(np.float32)
         batch = preprocessor({IMAGE_KEY: torch.from_numpy(image[None]), STATE_KEY: torch.from_numpy(state[None])})
         torch.manual_seed(args.seed + number)  # DDPM 每步方差噪声来自全局 RNG。
         with torch.inference_mode():

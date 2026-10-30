@@ -115,6 +115,8 @@ def main():
     parser.add_argument("--backend", default="", help="pytorch / tensorrt_fp32 / tensorrt_fp16，空则沿用参数文件")
     parser.add_argument("--export-dir", default="", help="TensorRT 后端的 lerobot-export 模型包")
     parser.add_argument("--sample", required=True)
+    parser.add_argument("--deployment-config", default="")
+    parser.add_argument("--config-file", default="")
     parser.add_argument("--urdf", default="assets/rm_75.urdf")
     parser.add_argument("--end-camera", default="config/calibration/T_cam_end.yaml")
     parser.add_argument("--deploy-tcp", default="config/calibration/T_d_cam_tcp.yaml")
@@ -135,7 +137,8 @@ def main():
                f"urdf_path:={Path(args.urdf).resolve()}",
                f"end_camera_extrinsic:={Path(args.end_camera).resolve()}",
                f"deploy_tcp_extrinsic:={Path(args.deploy_tcp).resolve()}"]
-    for name, value in (("checkpoint", args.checkpoint), ("export_dir", args.export_dir)):
+    for name, value in (("checkpoint", args.checkpoint), ("export_dir", args.export_dir),
+                        ("deployment_config", args.deployment_config), ("config_file", args.config_file)):
         if value:
             command.append(f"{name}:={Path(value).resolve()}")
     if args.backend:
@@ -170,7 +173,12 @@ def main():
         for received, message in steady:
             check_message(message, probe.sent_stamps, received, args.max_result_age_s)
         ages = [(received - stamp_ns(message.header.stamp)) / 1e6 for received, message in steady]
+        future_counts = [sum(stamp_ns(message.header.stamp) + stamp_ns(offset) > received
+                             for offset in message.time_from_start) for received, message in steady]
         report.update(messages=len(steady), rate_hz=len(steady) / args.duration,
+                      remaining_future_actions={"min": int(min(future_counts)),
+                                                "median": float(np.median(future_counts))},
+                      online_timing_suitable=all(count > 0 for count in future_counts),
                       age_ms={"median": float(np.median(ages)), "max": float(np.max(ages))},
                       episode_ids=sorted({int(message.episode_id) for _, message in steady}))
         old_episode = max(report["episode_ids"])
@@ -210,8 +218,10 @@ def main():
     report["inference_ms"] = [float(part.split("=")[1]) for line in logs.splitlines()
                               for part in line.split() if part.startswith("inference_ms=")]
     if report["inference_ms"]:
-        report["inference_ms"] = {"median": float(np.median(report["inference_ms"])),
-                                  "max": float(np.max(report["inference_ms"]))}
+        timings = report["inference_ms"]
+        steady_timings = timings[1:] or timings
+        report["inference_ms"] = {"first": timings[0], "median": float(np.median(steady_timings)),
+                                  "p95": float(np.percentile(steady_timings, 95)), "max": float(np.max(timings))}
     report["log"] = str(log_path)
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if args.report:

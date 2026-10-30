@@ -30,7 +30,7 @@ def test_launch_defers_tcp_validation_to_node(tmp_path, monkeypatch):
             "deploy_tcp_extrinsic")},
     })
     monkeypatch.setattr(module, "get_package_share_directory", lambda _: str(tmp_path))
-    monkeypatch.setattr(deployment, "load_profile", lambda _: {})
+    monkeypatch.setattr(deployment, "load_profile", lambda _: {"contract": {}})
     monkeypatch.setattr(deployment, "validate_checkpoint", lambda *_: None)
     monkeypatch.setattr(deployment, "validate_urdf", lambda *_: None)
     monkeypatch.setattr(DiffusionConfig, "from_file", lambda *_: None)
@@ -64,7 +64,7 @@ def test_launch_validates_tensorrt_package(tmp_path, monkeypatch):
     })
     checked = []  # 记录 validate_export 收到的模型包与精度。
     monkeypatch.setattr(module, "get_package_share_directory", lambda _: str(tmp_path))
-    monkeypatch.setattr(deployment, "load_profile", lambda _: {})
+    monkeypatch.setattr(deployment, "load_profile", lambda _: {"contract": {}})
     monkeypatch.setattr(deployment, "validate_checkpoint", lambda *_: pytest.fail("checkpoint not used"))
     monkeypatch.setattr(deployment, "validate_export", lambda root, _, precision: checked.append((root, precision)))
     monkeypatch.setattr(deployment, "validate_urdf", lambda *_: None)

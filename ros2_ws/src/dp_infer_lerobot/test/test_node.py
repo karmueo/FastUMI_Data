@@ -174,3 +174,37 @@ def test_tensorrt_backend_requires_export_dir(tmp_path):
             LerobotInferenceNode()
     finally:
         rclpy.shutdown()
+
+
+def test_episode_start_is_frozen_and_clock_reset(tmp_path):
+    """冻结在途起点，缺流保留起点，时钟回退丢弃旧结果并重新锁定。"""
+    args, tool = _files(tmp_path)
+    profile_path = Path(args[args.index("-p") + 3].split(":=", 1)[1])
+    profile = yaml.safe_load(profile_path.read_text())
+    profile["contract"] = deployment.EPISODE_CONTRACT
+    profile_path.write_text(yaml.safe_dump(profile))
+    rclpy.init(args=args)
+    instance = LerobotInferenceNode(engine=SimpleNamespace(description="fake"))
+    messages = []
+    instance.publisher = SimpleNamespace(publish=messages.append)
+    try:
+        now = instance.get_clock().now().nanoseconds
+        instance.future = Future()
+        _add_frame(instance, now - 10_000_000)
+        instance.tick()
+        observations, context = instance.pending
+        np.testing.assert_allclose(observations["observation.state"][0, :, :6], 0, atol=1e-6)
+        np.testing.assert_allclose(context.reference_pose, instance.buffer.start_pose)
+        original = context.reference_pose.copy()
+        assert not context.reference_pose.flags.writeable
+        instance.active_context = context
+        instance.last_clock_ns = now + 1_000_000_000
+        instance.tick()
+        assert instance.buffer.start_pose is None and instance.buffer.episode_id == 1
+        np.testing.assert_array_equal(context.reference_pose, original)
+        instance.future.set_result(_prediction(context))
+        instance.tick()
+        assert not messages
+    finally:
+        instance.destroy_node()
+        rclpy.shutdown()

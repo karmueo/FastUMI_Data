@@ -128,3 +128,27 @@ def test_torch_processors_formulas(tmp_path):
     actions = torch.zeros(1, 8, 10)
     restored = processors.postprocess(actions, reference)
     assert restored.shape == (1, 8, 7)
+
+
+def test_episode_start_processors_do_not_apply_pose_transform(tmp_path):
+    """新处理链仅做归一化与反归一化，且拒绝与旧契约混用。"""
+    pre, post = _stats()
+    for key in (f"{STATE_KEY}.min", f"{STATE_KEY}.max"):
+        pre[key] = pre[key][:7].copy()
+    for key in ("action.min", "action.max"):
+        post[key] = post[key][:7].copy()
+    pre_json, post_json = _write_checkpoint(tmp_path, pre, post)
+    del pre_json["steps"][3]
+    del post_json["steps"][1]
+    (tmp_path / "policy_preprocessor.json").write_text(json.dumps(pre_json))
+    (tmp_path / "policy_postprocessor.json").write_text(json.dumps(post_json))
+    with pytest.raises(ValueError, match="pipeline"):
+        read_processor_spec(tmp_path, pose_frame="current_tcp")
+    processors = TorchProcessors(tmp_path, "cpu", "episode_start_tcp")
+    state = torch.ones(1, 2, 7) * 0.2
+    batch, ref = processors.preprocess(torch.zeros(1, 2, 3, 224, 224), state)
+    denom = torch.from_numpy(pre[f"{STATE_KEY}.max"] - pre[f"{STATE_KEY}.min"])
+    denom[denom == 0] = 1e-8
+    torch.testing.assert_close(batch[STATE_KEY], 2 * (state - torch.from_numpy(pre[f"{STATE_KEY}.min"])) / denom - 1)
+    expected = (torch.from_numpy(post["action.max"]) + torch.from_numpy(post["action.min"])) / 2
+    torch.testing.assert_close(processors.postprocess(torch.zeros(1, 8, 7), ref), expected.expand(1, 8, 7))

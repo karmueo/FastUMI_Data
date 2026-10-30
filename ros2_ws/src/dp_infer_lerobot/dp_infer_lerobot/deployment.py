@@ -34,6 +34,8 @@ CONTRACT = {
     "image_size": 224,
     "image_preprocessing": "letterbox_inter_area_black_border",
 }
+EPISODE_CONTRACT = {**CONTRACT, "pose_frame": "episode_start_tcp", "gripper_mode": "binary",
+                    "model_state_dim": 7, "model_action_dim": 7}
 BASE_FILES = ("config.json", "model.safetensors", "policy_preprocessor.json",
               "policy_postprocessor.json")  # 另加两份处理器统计 safetensors。
 
@@ -64,7 +66,8 @@ def load_profile(path):
     if not path.is_file():
         raise ValueError(f"deployment_config must name an existing file: {path}")
     profile = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(profile, dict) or profile.get("version") != 1 or profile.get("contract") != CONTRACT:
+    if (not isinstance(profile, dict) or profile.get("version") != 1
+            or profile.get("contract") not in (CONTRACT, EPISODE_CONTRACT)):
         raise ValueError("Unsupported deployment contract")
     urdf = profile.get("urdf_sha256")
     if not isinstance(urdf, str) or len(urdf) != 64:
@@ -165,8 +168,18 @@ def load_tool_offset(profile, end_camera_path, deploy_tcp_path, max_axis_deg):
 def make_profile(checkpoint, dataset_meta, urdf, model_name):
     """由 checkpoint 与数据集元信息生成部署档字典，并核对 URDF 指纹。"""
     meta = json.loads(Path(dataset_meta).read_text(encoding="utf-8"))
-    contract = {key: meta.get(key) for key in CONTRACT}
-    if contract != CONTRACT:
+    config = json.loads((Path(checkpoint) / "config.json").read_text(encoding="utf-8"))
+    if config.get("use_relative_pose") is True:
+        expected = CONTRACT
+    elif config.get("use_relative_pose") is False:
+        expected = EPISODE_CONTRACT
+    else:
+        raise ValueError("Unsupported checkpoint pose configuration")
+    dataset_keys = (key for key in expected if key not in {"model_state_dim", "model_action_dim"})
+    contract = {key: meta.get(key) for key in dataset_keys}
+    if expected is EPISODE_CONTRACT:
+        contract.update(model_state_dim=7, model_action_dim=7)
+    if contract != expected:
         raise ValueError(f"Dataset contract differs from the supported one: {contract}")
     if sha256_file(urdf) != meta["urdf_sha256"]:
         raise ValueError("URDF does not match the dataset urdf_sha256")

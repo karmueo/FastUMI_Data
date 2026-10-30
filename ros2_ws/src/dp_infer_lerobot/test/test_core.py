@@ -74,3 +74,65 @@ def test_config_parses_contract_and_rejects_changes(tmp_path):
     path.write_text(json.dumps(dict(raw, crop_ratio=1.0)))
     with pytest.raises(ValueError, match="crop_ratio"):
         DiffusionConfig.from_file(path)
+
+
+def test_episode_start_coordinates_and_gripper():
+    """非平凡起点和工具偏移下，观测与动作按固定起点往返。"""
+    start = _pose([0.3, -0.2, 0.7], [0.4, -0.3, 0.2])
+    relative = _pose([-0.1, 0.4, 0.2], [0.1, -0.05, 0.08])
+    tool = _pose([0.1, 0.2, -0.1], [0.02, 0.03, 0.15])
+    image = np.zeros((3, 224, 224), dtype=np.float32)
+    history = [Observation(1, image, start, 0.7499), Observation(2, image, start @ relative, 0.75)]
+    state = core.build_observations(history, start, "episode_start_tcp")[STATE_KEY][0]
+    np.testing.assert_allclose(core.raw_to_pose(state[0]), np.eye(4), atol=1e-7)
+    np.testing.assert_allclose(core.raw_to_pose(state[1]), relative, atol=1e-7)
+    np.testing.assert_array_equal(state[:, 6], [0, 1])
+    actions = np.tile(np.r_[core.pose_to_raw(relative), 0.42], (8, 1))
+    sequence = core.decode_actions(actions, InferenceContext(start, 2, 0, 1, tool), "episode_start_tcp")
+    expected = start @ relative @ np.linalg.inv(tool)
+    np.testing.assert_allclose(sequence.positions, np.tile(expected[:3, 3], (8, 1)), atol=1e-12)
+    np.testing.assert_allclose(Rotation.from_quat(sequence.quaternions[0]).as_matrix(), expected[:3, :3])
+    np.testing.assert_allclose(sequence.gripper_openness, 0.42)
+    for invalid in (float("nan"), -0.01, 1.01):
+        with pytest.raises(ValueError, match="gripper"):
+            core.build_observations([history[0], Observation(2, image, start, invalid)], start, "episode_start_tcp")
+
+
+def test_episode_start_config_must_match_explicit_contract(tmp_path):
+    """7 维检查点必须由显式起点契约加载，不能由配置字段单独推断。"""
+    raw = dict(SUPPORTED, use_relative_pose=False, num_inference_steps=None)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw))
+    cfg = DiffusionConfig.from_file(path, pose_frame="episode_start_tcp")
+    assert cfg.model_state_dim == cfg.model_action_dim == 7
+    with pytest.raises(ValueError, match="use_relative_pose"):
+        DiffusionConfig.from_file(path)
+    raw["use_relative_pose"] = True
+    path.write_text(json.dumps(raw))
+    with pytest.raises(ValueError, match="use_relative_pose"):
+        DiffusionConfig.from_file(path, pose_frame="episode_start_tcp")
+
+
+def test_first_observation_padding_and_reset():
+    """首帧只补齐一次，后续真实历史、缺流恢复与重置使用各自起点。"""
+    from dp_infer.synchronizer import ObservationBuffer
+
+    buffer = ObservationBuffer(pad_first_observation=True)
+    image = np.zeros((3, 224, 224), np.float32)
+    start = _pose([0, 0, 0.4], [0.2, 0.1, 0.3])
+    buffer.add_image(100_000_000, image)
+    assert buffer.poll(100_000_000) is None
+    buffer.add_pose(100_000_000, start)
+    buffer.add_gripper(100_000_000, 0.75)
+    first = buffer.poll(100_000_000)
+    assert first[0] is first[1] and len(buffer.history) == 1
+    assert buffer.poll(100_000_000) is None
+    later = 133_333_333
+    buffer.add_image(later, image)
+    buffer.add_pose(later, start)
+    buffer.add_gripper(later, 0.5)
+    assert buffer.poll(later)[0] is first[0]
+    np.testing.assert_array_equal(buffer.start_pose, start)
+    buffer.reset()
+    assert buffer.start_pose is None and buffer.episode_id == 1
+    assert buffer.poll(later) is None

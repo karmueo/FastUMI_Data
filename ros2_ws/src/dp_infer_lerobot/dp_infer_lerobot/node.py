@@ -48,18 +48,23 @@ class LerobotInferenceNode(Node):
             "max_inference_hz": 10.0, "result_timeout_s": 0.5, "postprocessors": "",
             # 部署相机←Link7（T_cam_end.yaml）与部署相机←TCP（T_d_cam_tcp.yaml），均必填。
             "end_camera_extrinsic": "", "deploy_tcp_extrinsic": "",
-            "max_tcp_axis_deg": DEFAULT_MAX_TCP_AXIS_DEG,
+            "max_tcp_axis_deg": DEFAULT_MAX_TCP_AXIS_DEG, "gripper_threshold": 0.75,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
+        profile = deployment.load_profile(self.parameter("deployment_config"))
+        self.pose_frame = profile["contract"].get("pose_frame", "current_tcp")
+        self.gripper_threshold = self.parameter("gripper_threshold")
+        if not np.isfinite(self.gripper_threshold) or not 0 <= self.gripper_threshold <= 1:
+            raise ValueError("gripper_threshold must be finite and within [0,1]")
         self.buffer = ObservationBuffer(self.parameter("sync_slop_s"), self.parameter("input_timeout_s"),
-                                        self.parameter("history_tolerance_s"))
+                                        self.parameter("history_tolerance_s"),
+                                        pad_first_observation=self.pose_frame == "episode_start_tcp")
         rate, result_timeout = self.parameter("max_inference_hz"), self.parameter("result_timeout_s")
         if not all(np.isfinite(value) and value > 0 for value in (rate, result_timeout)):
             raise ValueError("Inference rate and result timeout must be positive and finite")
         self.period_s = 1 / rate  # 按单调时钟限制启动推理的最高频率。
         self.result_timeout_ns = round(result_timeout * 1e9)  # 相对采集时刻的最大结果年龄。
-        profile = deployment.load_profile(self.parameter("deployment_config"))
         urdf_value = self.parameter("urdf_path")
         if not urdf_value:
             raise ValueError("urdf_path must explicitly name the training URDF")
@@ -179,12 +184,14 @@ class LerobotInferenceNode(Node):
             self.future = None
         history = self.buffer.poll(now_ns)
         if history is not None:
-            reference = history[-1].pose.copy()
+            reference = (self.buffer.start_pose if self.pose_frame == "episode_start_tcp"
+                         else history[-1].pose).copy()
             reference.setflags(write=False)
             context = InferenceContext(reference, history[-1].stamp_ns, self.buffer.episode_id, 0,
                                        self.link7_from_tool)
             try:
-                self.pending = (core.build_observations(history), context)
+                self.pending = (core.build_observations(history, reference, self.pose_frame,
+                                                        self.gripper_threshold), context)
             except ValueError as error:
                 self.warn(f"Dropped observation window: {error}")
         if self.future is not None or self.pending is None or time.monotonic() - self.last_started_s < self.period_s:

@@ -91,7 +91,7 @@ class Observation:
 class InferenceContext:
     """一次推理固定的参考状态；传入后处理器，不随实时订阅更新。"""
 
-    reference_pose: np.ndarray  # 本次最新观测的 base→策略末端（Link7 或 TCP）变换。
+    reference_pose: np.ndarray  # 冻结的 base→参考帧：按模型契约为最新观测末端或回合起始 TCP。
     stamp_ns: int  # 本次最新图像采集时间。
     episode_id: int  # 重置时递增的 episode 标识。
     sequence_id: int  # 每次提交推理时递增的编号。
@@ -103,10 +103,10 @@ class InferenceContext:
 class ActionSequence:
     """完整目标序列，位置单位为米，四元数顺序为 xyzw，时间单位为秒。"""
 
-    positions: np.ndarray  # [16,3]，base_link 下的 Link7 目标位置。
-    quaternions: np.ndarray  # [16,4]，base_link 下的 Link7 目标旋转。
-    gripper_openness: np.ndarray  # [16]，归一化夹爪目标。
-    time_from_start: np.ndarray  # [16]，相对观测时间的预测偏移。
+    positions: np.ndarray  # [N,3]，base_link 下的 Link7 目标位置。
+    quaternions: np.ndarray  # [N,4]，base_link 下的 Link7 目标旋转。
+    gripper_openness: np.ndarray  # [N]，归一化夹爪目标。
+    time_from_start: np.ndarray  # [N]，相对观测时间的预测偏移。
 
 
 def build_observations(history, start_pose):

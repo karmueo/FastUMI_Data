@@ -64,3 +64,16 @@ def test_tool_offset_requires_files_and_matching_axes(tmp_path):
     flipped[:3, :3] = flipped[:3, :3] @ Rotation.from_rotvec([0, 0, np.pi]).as_matrix()
     with pytest.raises(ValueError, match="axis convention"):
         deployment.load_tool_offset({"umi_camera_from_tcp": flipped.tolist()}, str(end), str(tcp), 10.0)
+
+
+def test_episode_start_profile_binds_dimensions_and_gripper(tmp_path):
+    """新部署档明确绑定坐标、二值夹爪及两个 7 维布局，任一错配拒绝。"""
+    path = PROFILE.parent / "dp_pick_episode_start_tcp_deployment.yaml"
+    profile = deployment.load_profile(path)
+    assert profile["contract"] == deployment.EPISODE_CONTRACT
+    for key, value in (("model_state_dim", 10), ("model_action_dim", 10),
+                       ("gripper_mode", "continuous"), ("pose_frame", "current_tcp")):
+        changed = copy.deepcopy(profile)
+        changed["contract"][key] = value
+        with pytest.raises(ValueError, match="contract"):
+            deployment.load_profile(_write(tmp_path, changed))

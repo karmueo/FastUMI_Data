@@ -1,7 +1,7 @@
 # LeRobot TCP 扩散策略推理（dp_infer_lerobot）
 
 `dp_infer_lerobot` 部署 LeRobot fork（`/home/scl/work/lerobot`，提交 `6168a52` 增加 SE(3) 相对位姿）
-训练的 UMI TCP 扩散策略，当前绑定 `dp_umi_v4` 的 `checkpoints/012000/pretrained_model`。
+训练的 UMI TCP 扩散策略，支持旧的 `dp_umi_v4/012000` 和固定回合起点的 `dp_pick_episode_start_tcp/019466`。
 推理网络、归一化和相对位姿处理从 fork 摘录到包内，
 运行时不依赖 LeRobot 训练框架。除默认的 PyTorch 后端外，也可加载 `lerobot-export` 导出的
 TensorRT 模型包（编码器 + 单步 U-Net engine，见第 3.1 节）。
@@ -10,7 +10,9 @@ ROS 层沿用本分支 `dp_infer`：订阅 USB 相机、RM75 七轴关节和归�
 在单工作线程推理，发布 `/fastumi/policy/action_sequence`（`PolicyActionSequence`，`base_link → Link7`）。
 节点只发布推荐序列和 `reset_episode` 服务，**不向机械臂或夹爪发送命令**。同一命名空间只启动一个推理后端。
 
-## 1. 模型契约
+以下原有章节及性能数字针对 `dp_umi_v4/012000`；新模型的独立配置与验证见末尾章节。
+
+## 1. 模型契约（dp_umi_v4）
 
 | 项 | 约定 |
 | --- | --- |
@@ -230,3 +232,63 @@ TensorRT 后端改为 `--backend tensorrt_fp16 --export-dir "$DP_EXPORT"`（不�
 开环误差在留出示教数据上计算，不代表闭环抓取成功率；回放使用固定关节，只验证链路与时效。
 实机部署前仍需现场核对图像/关节/夹爪时效、TCP 外参和输出位姿，并在人工监督下验收。
 样本、报告和日志保存在被 Git 忽略的 `dataset/validation/dp_lerobot_v4/`。
+
+
+## 6. 固定回合起点模型 dp_pick_episode_start_tcp/019466
+
+`config/dp_pick_episode_start_tcp_deployment.yaml` 绑定 019466 检查点、训练 URDF 和示教 TCP 标定，
+并明确记录 `pose_frame: episode_start_tcp`、7 维状态与动作以及 `gripper_mode: binary`。
+模型处理链只执行归一化和反归一化；不能仅凭 `use_relative_pose: false` 判定坐标系。输入图像仍为
+RGB letterbox 224×224，网络内部评估时中心裁剪到 212×212，不应再预裁剪。
+
+启动或重置后，第一个有效同步帧锁定 `T_base_start`，不足两帧时仅首次把该帧补齐为两帧；之后使用
+真实 30 Hz 历史。缺流恢复不会更改起点，ROS 时钟回退或重置会清除起点并丢弃旧回合推理结果。
+每帧输入是 `inverse(T_base_start) @ T_base_TCP`，以米、轴角弧度和夹爪构成 7 维向量。在线夹爪
+值先检查有限且在 `[0,1]`，然后按 `gripper_threshold`（默认 0.75，含等号）二值化；这只是在线
+近似，不能复现训练数据离线事件检测。输出夹爪保持连续值并截断至 `[0,1]`。每个动作独立按
+`T_base_start @ T_start_target @ inverse(T_Link7_TCP)` 还原，发布 8 点，时间为 `k/30`，
+最后一点是 `7/30` 秒。沿用 `T_cam_end.yaml`、`T_d_cam_tcp.yaml` 的标定及轴向校验。
+
+新模型默认 PyTorch、DDPM 100 步；可通过启动参数选择 `DDIM` / `16` 和 `tensorrt_fp32` 或
+`tensorrt_fp16`。TensorRT 模型包仍须通过文件摘要、验证报告、GPU 和 TensorRT 版本检查。下面从仓库
+根目录执行，并根据实际安装路径设置变量；只发布建议，不驱动硬件：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ros2_ws/install/setup.bash
+DP_CHECKPOINT=/path/to/019466/pretrained_model
+DP_EXPORT=/path/to/export/019466
+ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
+  checkpoint:="$DP_CHECKPOINT" \
+  deployment_config:="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_pick_episode_start_tcp_deployment.yaml" \
+  config_file:="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_pick_episode_start_tcp.yaml" \
+  urdf_path:="$PWD/assets/rm_75.urdf" \
+  end_camera_extrinsic:="$PWD/config/calibration/T_cam_end.yaml" \
+  deploy_tcp_extrinsic:="$PWD/config/calibration/T_d_cam_tcp.yaml"
+```
+
+选择 TensorRT 时传入 `backend:=tensorrt_fp16 export_dir:="$DP_EXPORT"`；选择 DDIM 时另传
+`noise_scheduler:=DDIM num_inference_steps:=16`。推理超时仍为参数文件中的 0.5 秒；应结合消息年龄
+和时间偏移判断动作是否仍在未来，不能仅以收到消息判定适合在线使用。
+
+本机对照使用真实留出集 271–301，随机种子 42，从其中 271、274、277、280、283、286、289、292
+各取 4 个窗口，固定相同初始噪声和每次 DDPM 随机种子。DDPM 100、DDIM 16 的 PyTorch 与原版
+LeRobot 的归一化状态、模型动作和动作输出均逐元素一致（容差 `atol=1e-5, rtol=1e-4`）。
+两种 TensorRT 精度和两种调度器均达到最大位置 1 mm、旋转 0.5°、夹爪 0.01 的门槛；四组中
+最大分别为 0.457 mm、0.035°、0.00121。DDPM、DDIM 原版平均位置开环误差分别为 9.73、9.40 mm，
+保持当前位姿基线为 14.25 mm。上述数字仅适用于本次样本与设备，不能替代在线验证。
+完整样本、索引、报告及回放日志位于 `dataset/validation/dp_pick_episode_start_tcp/`，不纳入提交。
+
+同一机器上的 8 秒 ROS 回放结果如下。首条消息耗时从启动回放计起，包含节点启动与模型加载；
+推理时间为已发布结果的稳定中位数，消息年龄从图像时间戳算至接收；未来动作数是接收时刻之后的点数。
+所有组合的消息结构和 reset 检查通过，重置后旧消息数为 0。回放时关节固定，仅验证流程与时效，
+非硬件闭环验证。
+
+| 调度器 / 后端 | 首条消息 s | 稳定推理 ms | 年龄中位 / 最大 ms | 未来动作中位 / 最少 | 时效判断 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| DDPM 100 / PyTorch | 7.06 | 359.3 | 387.1 / 425.9 | 0 / 0 | 不适合在线 |
+| DDPM 100 / TensorRT FP32 | 8.06 | 359.5 | 383.4 / 398.0 | 0 / 0 | 不适合在线 |
+| DDPM 100 / TensorRT FP16 | 7.57 | 99.1 | 115.8 / 182.4 | 4 / 2 | 本次回放有未来动作 |
+| DDIM 16 / PyTorch | 6.57 | 70.1 | 85.8 / 106.1 | 5 / 4 | 本次回放有未来动作 |
+| DDIM 16 / TensorRT FP32 | 7.59 | 68.9 | 84.2 / 107.6 | 5 / 4 | 本次回放有未来动作 |
+| DDIM 16 / TensorRT FP16 | 7.56 | 20.2 | 43.4 / 61.5 | 6 / 6 | 本次回放有未来动作 |

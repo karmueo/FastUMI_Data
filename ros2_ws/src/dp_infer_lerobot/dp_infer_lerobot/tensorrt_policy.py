@@ -5,16 +5,17 @@
 参数与 :class:`network.DiffusionModel` 完全相同，因此可沿用部署的 DDIM 少步设置。
 ``TensorRTSession`` 摘自 LeRobot fork ``lerobot/export/backends.py``（Apache-2.0）。
 
-张量约定（batch=1，均为 CUDA FP32，timestep 为 int64）：
+旧契约张量约定（batch=1，均为 CUDA FP32，timestep 为 int64）：
 - 编码器：``observation.state [1,2,10]``、``observation.images [1,2,1,3,224,224]`` → ``global_cond [1,148]``。
 - 去噪器：``sample [1,16,10]``、``timestep [1]``、``global_cond [1,148]`` → ``prediction [1,16,10]``。
+新契约状态和动作为 7 维，条件为 142 维。
 """
 
 from pathlib import Path
 
 import torch
 
-from .config import IMAGE_KEY, MODEL_DIM, STATE_KEY
+from .config import IMAGE_KEY, STATE_KEY
 from .network import OBS_IMAGES, _make_noise_scheduler
 
 TENSORRT_VERSION_PREFIX = "10.13.3."  # 导出端使用的 TensorRT 10.13.3 弱类型 API，不兼容 TRT 11。
@@ -22,16 +23,16 @@ TENSORRT_VERSION_PREFIX = "10.13.3."  # 导出端使用的 TensorRT 10.13.3 弱�
 
 def expected_stages(cfg):
     """按已校验配置返回两个网络阶段的命名输入及输出 ``{name: (shape, dtype)}``。"""
-    cond_dim = int(cfg.n_obs_steps * (MODEL_DIM + 2 * cfg.spatial_softmax_num_keypoints))
+    cond_dim = int(cfg.n_obs_steps * (cfg.model_state_dim + 2 * cfg.spatial_softmax_num_keypoints))
     images = [1, cfg.n_obs_steps, len(cfg.image_features), *cfg.image_features[IMAGE_KEY].shape]
     return {
-        "encoder": ({STATE_KEY: ([1, cfg.n_obs_steps, MODEL_DIM], "torch.float32"),
+        "encoder": ({STATE_KEY: ([1, cfg.n_obs_steps, cfg.model_state_dim], "torch.float32"),
                      OBS_IMAGES: (images, "torch.float32")},
                     ("global_cond", [1, cond_dim], "torch.float32")),
-        "denoiser": ({"sample": ([1, cfg.horizon, MODEL_DIM], "torch.float32"),
+        "denoiser": ({"sample": ([1, cfg.horizon, cfg.model_action_dim], "torch.float32"),
                       "timestep": ([1], "torch.int64"),
                       "global_cond": ([1, cond_dim], "torch.float32")},
-                     ("prediction", [1, cfg.horizon, MODEL_DIM], "torch.float32")),
+                     ("prediction", [1, cfg.horizon, cfg.model_action_dim], "torch.float32")),
     }
 
 
@@ -153,11 +154,11 @@ class TensorRTPolicy:
 
     @torch.inference_mode()
     def predict_action_chunk(self, batch, noise=None):
-        """输入归一化观测，返回归一化模型布局动作块 ``(1, 8, 10)``。
+        """输入归一化观测，返回归一化模型布局动作块 ``(1, 8, D)``，D 为 10 或 7。
 
         Args:
-            batch: ``observation.images.front`` 为 (1, 2, 3, 224, 224)，``observation.state`` 为 (1, 2, 10)。
-            noise: 可选初始噪声 (1, 16, 10)；为空时从全局 CUDA RNG 采样，与 PyTorch 路径一致。
+            batch: ``observation.images.front`` 为 (1, 2, 3, 224, 224)，``observation.state`` 为 (1, 2, D)。
+            noise: 可选初始噪声 (1, 16, D)；为空时从全局 CUDA RNG 采样，与 PyTorch 路径一致。
         """
         cfg = self.config
         cond = self.session.run("encoder", {
@@ -165,7 +166,7 @@ class TensorRTPolicy:
             OBS_IMAGES: torch.stack([batch[key] for key in cfg.image_features], dim=-4),
         })
         sample = noise if noise is not None else torch.randn(
-            (1, cfg.horizon, MODEL_DIM), dtype=torch.float32, device=self.device)
+            (1, cfg.horizon, cfg.model_action_dim), dtype=torch.float32, device=self.device)
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         for timestep in self.noise_scheduler.timesteps:
             prediction = self.session.run("denoiser", {
