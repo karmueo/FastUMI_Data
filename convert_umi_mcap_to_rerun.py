@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""把 FastUMI 手持采集的 MCAP 录制逐条导出为 Rerun ``.rrd``，用于查看相机、Tracker 与夹爪。
+"""把 FastUMI MCAP 或 LeRobot v3 数据逐条导出为 Rerun ``.rrd``，用于查看相机、Tracker 与夹爪。
 
-输入是含 ``session.yaml`` 的记录目录（例如 ``2026-10-14_16-28-50_0``），或包含多条记录的
+LeRobot 输入是含 meta/info.json 的数据集或其上层目录；每个 episode 输出一个 RRD，
+仅支持 FastUMI xyz_rotvec_gripper 契约，无需 ROS，详见 docs/Rerun采集数据可视化.md。
+
+MCAP 输入是含 ``session.yaml`` 的记录目录（例如 ``2026-10-14_16-28-50_0``），或包含多条记录的
 任意上层目录（递归查找，跳过 ``_analysis``、``.staging``、``.trash``）。话题按记录自身
 ``session.yaml`` 的 ``topic_map`` 读取，图像模式按 bag 中的消息类型判定。
 
@@ -483,12 +486,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--input", required=True, type=Path,
-                        help="含 session.yaml 的记录目录，或包含多条记录的上层目录（递归查找）")
+                        help="MCAP 记录、FastUMI LeRobot 数据集或其上层目录（递归查找）")
     parser.add_argument("--output", required=True, type=Path,
                         help=".rrd 输出根目录（多条记录时保留输入下的子目录结构）")
+    parser.add_argument("--input-format", choices=("auto", "mcap", "lerobot"), default="auto",
+                        help="输入格式；auto 自动识别，混合输入需显式指定")
+    parser.add_argument("--episodes", nargs="+", type=int,
+                        help="仅导出指定 LeRobot episode 编号，例如 --episodes 0 2 5")
     args = parser.parse_args(argv)
+    if args.episodes is not None and any(index < 0 for index in args.episodes):
+        parser.error("--episodes 编号必须非负")
     source = args.input.expanduser().resolve()
     output = args.output.expanduser().resolve()
+    # 在加载 ROS 之前分派格式，使 LeRobot 转换可在纯离线环境运行。
+    from lerobot_to_rerun import discover_datasets, run as run_lerobot
+
+    try:
+        datasets = discover_datasets(source, output) if args.input_format != "mcap" else []
+        records = discover_records(source, skip=[output]) if args.input_format == "auto" else []
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return EXIT_ERROR
+    if args.input_format == "auto" and datasets and records:
+        print("输入同时包含 MCAP 与 LeRobot，请指定 --input-format", file=sys.stderr)
+        return EXIT_ERROR
+    if args.input_format == "lerobot" or datasets:
+        if not datasets:
+            print(f"{source} 下没有找到 LeRobot 数据集", file=sys.stderr)
+            return EXIT_ERROR
+        return run_lerobot(source, output, datasets, args.episodes)
+    if args.episodes is not None:
+        print("--episodes 仅适用于 LeRobot 输入", file=sys.stderr)
+        return EXIT_ERROR
     try:
         rt = load_runtime()
     except DependencyError as error:

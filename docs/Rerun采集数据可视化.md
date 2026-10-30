@@ -111,3 +111,50 @@ rerun --web-viewer --port auto ros2_ws/dataset/rerun/umi_jingbao_binary/2026-10-
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest ros2_ws/src/fastumi_data/test/test_convert_umi_mcap_to_rerun.py -q
 ```
+
+## FastUMI LeRobot v3 数据
+
+同一入口也支持本仓库导出的 LeRobot v3 数据。该分支直接读取 Parquet 和 MP4，不需要 ROS、消息工作空间或完整 LeRobot 训练环境。它要求 `meta/fastumi.json` 声明 `xyz_rotvec_gripper`：位置为米、旋转向量为弧度、夹爪为 `[0, 1]`；不支持把其他机器人的关节向量当作 TCP 位姿。
+
+### 准备离线环境
+
+如果已有上面的 Rerun 环境，只需重新安装更新后的依赖清单。单独用于 LeRobot 时可创建不继承系统包的环境：
+
+```bash
+uv venv --python /usr/bin/python3 ros2_ws/.venv-rerun
+uv pip install --python ros2_ws/.venv-rerun/bin/python -r requirements-rerun.txt
+```
+
+### 转换与查看
+
+先从 `pick`、`place` 各转换第 0 个 episode：
+
+```bash
+ros2_ws/.venv-rerun/bin/python convert_umi_mcap_to_rerun.py \
+  --input dataset/pick_place/lerobot \
+  --input-format lerobot \
+  --output dataset/pick_place/rerun \
+  --episodes 0
+
+ros2_ws/.venv-rerun/bin/rerun dataset/pick_place/rerun/pick/episode_000000.rrd
+```
+
+- `--input-format auto` 为默认值；同时发现 MCAP 和 LeRobot 时要求显式指定格式。
+- `--input` 可指定单份数据集（如 `lerobot/pick`），也可指定其上层目录。
+- `--episodes 0 2 5` 按数据集分别筛选编号；省略则导出所有 episode。指定不存在的编号会报告失败。MCAP 模式不接受此参数。
+- 单份数据集输出 `episode_000000.rrd`；上层目录输入保留 `pick/`、`place/` 等相对目录。
+- 已有文件拒绝覆盖，单条失败继续其他 episode；失败时删除临时文件。退出码 `0` 表示全部成功，`1` 表示数据集或 episode 转换失败，`2` 表示参数、发现输入或依赖错误。
+
+默认布局显示相机、TCP 轨迹和坐标轴、state/action 夹爪曲线，以及七维曲线标签页。state 为蓝色，action 为橙色；完全相同的轨迹可能重合。元数据面板标注任务、episode、坐标系和单位。`x/y/z` 单位为米，`rx/ry/rz` 是弧度旋转向量分量，不能解释为欧拉角。
+
+时间轴 `episode_time` 使用数据中的秒级 `timestamp`，`frame_index` 使用 episode 内帧号。视频按 episode 的分片位置、起始偏移和 PTS 对齐，不跨 episode 取帧，不额外插值、补帧或施加外参。丢帧、非法位姿或长度不一致会使该 episode 失败。视频解码后以 JPEG（质量 90）嵌入 RRD，查看时无需原始 MP4。
+
+位姿保留 `pose_frame` 声明的参考系；例如 `episode_start_tcp` 表示数据导出时使用的起始 TCP 参考系，切分片段不会再次归零，也不假定其 Z 轴是重力方向。数据中 state 和 action 都是同一时刻示教位姿时，显示重合是正常的，不表示未来动作预测。
+
+离线回归测试：
+
+```bash
+uv pip install --python ros2_ws/.venv-rerun/bin/python pytest
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  ros2_ws/.venv-rerun/bin/python -m pytest tests/test_lerobot_to_rerun.py -q
+```

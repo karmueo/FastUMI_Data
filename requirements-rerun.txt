@@ -1,7 +1,11 @@
-# MCAP -> Rerun 可视化导出（convert_umi_mcap_to_rerun.py）专用依赖。
+# MCAP / FastUMI LeRobot v3 -> Rerun 可视化导出（convert_umi_mcap_to_rerun.py）专用依赖。
 # 安装到 ros2_ws/.venv-rerun（--system-site-packages，复用 ROS Jazzy）；
 # Rerun 需要 NumPy 2，系统 python3-opencv 按 NumPy 1 编译，因此单独安装 OpenCV。
 rerun-sdk==0.38.1
 numpy>=2,<3
 opencv-python-headless>=4.10,<5
 pyyaml>=6
+
+# LeRobot Parquet 索引及按 PTS 解码视频；无需完整 LeRobot 训练依赖。
+pyarrow>=18
+av>=14
