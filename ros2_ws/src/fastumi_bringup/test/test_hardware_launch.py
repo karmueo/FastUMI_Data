@@ -224,6 +224,7 @@ def test_home_success_and_shutdown():
 def test_maintenance_skips_homing(monkeypatch):
     mod = module()
     monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: package)
+    monkeypatch.setattr(mod, '_rm_driver', lambda _context: 'rm_driver')
     actions = mod._launch_hardware(context(mod, start_wrist_camera='false', start_gripper='false',
                                           move_to_initial_pose='false'))
     assert actions[0] == 'rm_driver'
@@ -234,6 +235,7 @@ def test_maintenance_skips_homing(monkeypatch):
 def test_arm_control_service_can_be_disabled(monkeypatch):
     mod = module()
     monkeypatch.setattr(mod, '_include', lambda package, launch, arguments=None: package)
+    monkeypatch.setattr(mod, '_rm_driver', lambda _context: 'rm_driver')
     actions = mod._launch_hardware(context(mod, start_wrist_camera='false', start_gripper='false',
                                           move_to_initial_pose='false',
                                           start_arm_control='false'))
@@ -382,3 +384,41 @@ def test_wrist_alignment_does_not_enable_fixed_camera_overlay(monkeypatch, tmp_p
     }[mode]
     fixed_nodes = [node for node in nodes if node['namespace'] == 'fixed_camera']
     assert [node['executable'] for node in fixed_nodes] == ['usb_camera_node']
+
+
+def _driver_parameters(monkeypatch, tmp_path, **changes):
+    mod = module()
+    monkeypatch.setattr(mod, 'get_package_share_directory', lambda _package: str(tmp_path))
+    return tmp_path, mod._rm_driver_parameters(context(mod, **changes))
+
+
+def test_rm_driver_defaults_to_low_follow_config(monkeypatch, tmp_path):
+    """默认低跟随只加载驱动配置文件，保持 trajectory_mode=0。"""
+    share, parameters = _driver_parameters(monkeypatch, tmp_path)
+    assert parameters == [str(share / 'config/rm_75_config.yaml')]
+
+
+@pytest.mark.parametrize('changes, mode, radio', [
+    ({}, 2, 200),
+    ({'arm_trajectory_mode': '1'}, 1, 50),
+    ({'arm_trajectory_mode': '2', 'arm_radio': '1000'}, 2, 1000),
+    ({'arm_trajectory_mode': '1', 'arm_radio': '0'}, 1, 0),
+])
+def test_rm_driver_high_follow_overrides_smoothing(monkeypatch, tmp_path, changes, mode, radio):
+    """高跟随在配置文件之后覆盖 trajectory_mode 与 radio，radio 留空按模式取默认值。"""
+    share, parameters = _driver_parameters(
+        monkeypatch, tmp_path, arm_follow_mode='high', **changes)
+    assert parameters == [str(share / 'config/rm_75_config.yaml'),
+                          {'trajectory_mode': mode, 'radio': radio}]
+
+
+@pytest.mark.parametrize('changes, message', [
+    ({'arm_follow_mode': 'medium'}, 'arm_follow_mode'),
+    ({'arm_follow_mode': 'high', 'arm_trajectory_mode': '0'}, 'arm_trajectory_mode'),
+    ({'arm_follow_mode': 'high', 'arm_trajectory_mode': '1', 'arm_radio': '101'}, '0～100'),
+    ({'arm_follow_mode': 'high', 'arm_radio': '1001'}, '0～1000'),
+    ({'arm_follow_mode': 'high', 'arm_radio': '-1'}, 'arm_radio'),
+])
+def test_rm_driver_rejects_invalid_follow_settings(monkeypatch, tmp_path, changes, message):
+    with pytest.raises(ValueError, match=message):
+        _driver_parameters(monkeypatch, tmp_path, **changes)

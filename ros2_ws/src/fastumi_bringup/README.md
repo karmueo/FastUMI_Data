@@ -349,8 +349,22 @@ ros2 launch fastumi_usb_camera receive.launch.py \
 | `shutdown_save_timeout` | 120 秒 | Ctrl+C 等待保存的上限 |
 | `record_policy_topics` | true | 同时录制 dp_infer 的 `/fastumi/policy/action_sequence`、`/fastumi/policy/gripper_close_allowed` 与 `/fastumi/policy/gripper_state`；无推理时为空话题，离线转换忽略 |
 | `wrist_alignment_overlay` / `wrist_alignment_alpha` | false / 0.5 | 末端相机安装对齐：叠加 UMI 夹爪 mask，发布 `/wrist_camera/image_alignment/compressed`，见 fastumi_usb_camera README |
+| `arm_follow_mode` | low | RM75 CANFD 跟随模式：`low` 保持驱动配置的 `trajectory_mode=0`；`high` 覆盖下面两项 |
+| `arm_trajectory_mode` | 2 | 仅 `high` 生效：`1` 曲线拟合、`2` 滤波（不允许 0 完全透传） |
+| `arm_radio` | 空（1→50，2→200） | 仅 `high` 生效：曲线拟合平滑系数 0～100，或滤波参数 0～1000；越大越平滑、滞后越大 |
+
+跟随模式在 rm_driver 启动时生效，切换须重启本 launch。`fastumi_rm75` Placo 控制器默认
+`follow_mode=auto`，启动时读取 `/rm_driver` 的 `trajectory_mode` 自动发出对应的 `follow`
+标志（0 低跟随，1/2 高跟随），因此应先启动本 launch，再启动推理 launch。高跟随示例：
+
+```bash
+ros2 launch fastumi_bringup hardware.launch.py ... arm_follow_mode:=high arm_trajectory_mode:=2 arm_radio:=200
+```
+
+高跟随建议同时在推理 launch 里设 `lookahead_s:=0`；`arm_radio` 默认值只是整定起点，先 dry-run
+再在人工监督下逐步调整。
 
 维护时可关闭对应 `start_*` 开关，或用 `move_to_initial_pose:=false` 跳过启动回位。
-机械臂独立入口为 `ros2 launch rm_driver rm_75_driver.launch.py`；相机与夹爪独立入口见
+机械臂独立入口为 `ros2 launch rm_driver rm_75_driver.launch.py`（仅低跟随配置）；相机与夹爪独立入口见
 [相机说明](../fastumi_usb_camera/README.md)和[夹爪说明](../unitree_gripper/README.md)。
 录制器单独启动与远端接入见[录制服务说明](../fastumi_recorder/README.md)。

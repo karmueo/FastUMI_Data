@@ -102,6 +102,42 @@ def _fixed_camera(context, publish_reliability):
     })
 
 
+# RM75 CANFD 高跟随平滑：trajectory_mode → (radio 上限, 默认 radio)。1 为曲线拟合（平滑系数 0～100），
+# 2 为滤波（滤波参数 0～1000），数值越大越平滑、滞后越大；默认值取中低档，作为现场整定起点。
+FOLLOW_TRAJECTORY_MODES = {1: (100, 50), 2: (1000, 200)}
+
+
+def _rm_driver_parameters(context):
+    """返回 rm_driver 参数列表；高跟随时在驱动配置之后追加 trajectory_mode 与 radio 覆盖。
+
+    rm_driver 只在启动时读取这两个参数，并对 /rm_driver/movej_canfd_cmd 统一使用；
+    逐条消息的 follow 由 fastumi_rm75 控制器按 trajectory_mode 自动选择（0 低跟随，1/2 高跟随）。
+    """
+    follow = LaunchConfiguration('arm_follow_mode').perform(context).strip().lower()
+    if follow not in ('low', 'high'):
+        raise ValueError('arm_follow_mode 只能是 low 或 high')
+    config = Path(get_package_share_directory('rm_driver')) / 'config/rm_75_config.yaml'
+    # 低跟随保持驱动配置文件的 trajectory_mode=0，与原 rm_75_driver.launch.py 完全一致。
+    if follow == 'low':
+        return [str(config)]
+    mode = LaunchConfiguration('arm_trajectory_mode').perform(context).strip()
+    if mode not in ('1', '2'):
+        raise ValueError('arm_follow_mode=high 时 arm_trajectory_mode 只能是 1（曲线拟合）或 2（滤波）')
+    limit, default_radio = FOLLOW_TRAJECTORY_MODES[int(mode)]
+    radio = LaunchConfiguration('arm_radio').perform(context).strip() or str(default_radio)
+    if not radio.isdecimal() or int(radio) > limit:
+        raise ValueError(f'arm_trajectory_mode={mode} 时 arm_radio 必须是 0～{limit} 的整数')
+    get_logger('fastumi_bringup').info(f'RM75 高跟随：trajectory_mode={mode}, radio={radio}')
+    # 未指定节点名的字典参数作用于 /**，排在配置文件之后以覆盖其中的值。
+    return [str(config), {'trajectory_mode': int(mode), 'radio': int(radio)}]
+
+
+def _rm_driver(context):
+    """创建 rm_driver 节点；不指定 name，避免把同进程的 udp_publish_node 一并改名。"""
+    return Node(package='rm_driver', executable='rm_driver',
+                parameters=_rm_driver_parameters(context), output='screen')
+
+
 # dp_infer 推理时的模型预测、视觉闭合许可与训练刻度夹爪反馈；普通采集无发布者，只留下空话题。
 POLICY_RECORD_TOPICS = ','.join((
     '/fastumi/policy/action_sequence:fastumi_interfaces/msg/PolicyActionSequence',
@@ -193,7 +229,7 @@ def _launch_hardware(context):
             extra_topics=POLICY_RECORD_TOPICS if _enabled(context, 'record_policy_topics') else '')
         recorder = _include('fastumi_recorder', 'recorder.launch.py', recorder_arguments)
     if _enabled(context, 'start_arm'):
-        actions.append(_include('rm_driver', 'rm_75_driver.launch.py'))
+        actions.append(_rm_driver(context))
         if _enabled(context, 'start_arm_control'):
             actions.append(Node(package='fastumi_bringup', executable='arm_control_service',
                                 output='screen'))
@@ -231,6 +267,8 @@ def generate_launch_description():
         camera_record_depth='30',
         shutdown_save_timeout='120.0', record_policy_topics='true',
         wrist_alignment_overlay='false', wrist_alignment_alpha='0.5',
+        # low 保持原低跟随；high 时 arm_radio 留空按 trajectory_mode 取默认值（1→50，2→200）。
+        arm_follow_mode='low', arm_trajectory_mode='2', arm_radio='',
     )
     return LaunchDescription([
         *[DeclareLaunchArgument(key, default_value=value) for key, value in defaults.items()],

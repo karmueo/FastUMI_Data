@@ -15,6 +15,8 @@ from fastumi_interfaces.msg import PolicyActionSequence
 from fastumi_interfaces.srv import ResetPolicyController
 import numpy as np
 import placo
+from rcl_interfaces.msg import ParameterType
+from rcl_interfaces.srv import GetParameters
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
@@ -38,6 +40,8 @@ from fastumi_rm75.placo_control import (
     gripper_trajectory_anchor,
     ordered_joint_positions,
     pose_matrix,
+    resolve_control_rate,
+    resolve_follow_mode,
     sample_trajectory,
     sequence_is_new,
     trajectory_exhausted,
@@ -48,6 +52,33 @@ from fastumi_rm75.placo_control import (
 )
 
 
+# 查询 rm_driver 参数的等待上限（s）；驱动已运行时服务立即可用，只有缺驱动时才会等满。
+DRIVER_QUERY_TIMEOUT_S = 3.0
+
+
+def _query_driver_trajectory_mode(driver_node: str, timeout_s: float) -> int | None:
+    """读取 rm_driver 启动时加载的 trajectory_mode；驱动不在线或参数不可读时返回 None。
+
+    使用临时节点同步调用参数服务，避免在控制节点开始 spin 前触发其定时器和订阅回调。
+    """
+    probe = rclpy.create_node("rm75_placo_follow_probe")
+    try:
+        client = probe.create_client(GetParameters, f"{driver_node.rstrip('/')}/get_parameters")
+        if not client.wait_for_service(timeout_sec=timeout_s):
+            return None
+        future = client.call_async(GetParameters.Request(names=["trajectory_mode"]))
+        rclpy.spin_until_future_complete(probe, future, timeout_sec=timeout_s)
+        response = future.result() if future.done() else None
+        if response is None or len(response.values) != 1:
+            return None
+        value = response.values[0]
+        if value.type != ParameterType.PARAMETER_INTEGER:
+            return None
+        return int(value.integer_value)
+    finally:
+        probe.destroy_node()
+
+
 def _reset_grasp(node) -> None:
     """停止、回位或新 episode 时清空闭合锁定；未启用锁定时无操作。"""
     latch = getattr(node, "_grasp_latch", None)
@@ -56,7 +87,7 @@ def _reset_grasp(node) -> None:
 
 
 class Rm75PlacoController(Node):
-    """以 50 Hz 连续求解最新策略目标并发布低跟随关节命令。"""
+    """以 50 Hz 连续求解最新策略目标并发布低/高跟随关节命令。"""
 
     def __init__(self) -> None:
         super().__init__("rm75_placo_controller")
@@ -123,6 +154,9 @@ class Rm75PlacoController(Node):
         self.declare_parameter("start_service", "/fastumi/rm75/placo/start_task")
         self.declare_parameter("return_service", "/fastumi/rm75/placo/return_to_start")
         self.declare_parameter("task_control_enabled", False)
+        # CANFD 跟随模式：auto 跟随 fastumi_bringup 给 rm_driver 设置的 trajectory_mode。
+        self.declare_parameter("follow_mode", "auto")
+        self.declare_parameter("driver_node", "/rm_driver")
 
         self._dry_run = bool(self.get_parameter("dry_run").value)
         self._task_control_enabled = bool(self.get_parameter("task_control_enabled").value)
@@ -247,6 +281,24 @@ class Rm75PlacoController(Node):
         if not urdf_path.is_file():
             raise FileNotFoundError(f"RM75 URDF does not exist: {urdf_path}")
         self._joint_lower, self._joint_upper, velocities = urdf_limits(urdf_path)
+
+        # 基本参数校验后解析跟随模式，必须在创建 IK 求解器和定时器之前确定频率。
+        follow_mode = str(self.get_parameter("follow_mode").value).strip().lower()
+        driver_trajectory_mode = None
+        if follow_mode == "auto":
+            driver_trajectory_mode = _query_driver_trajectory_mode(
+                str(self.get_parameter("driver_node").value), DRIVER_QUERY_TIMEOUT_S)
+            if driver_trajectory_mode is None:
+                self.get_logger().warning(
+                    "rm_driver trajectory_mode unavailable; follow_mode=auto falls back to low follow")
+        self._follow = resolve_follow_mode(follow_mode, driver_trajectory_mode)
+        requested_rate_hz = rate_hz
+        rate_hz = resolve_control_rate(rate_hz, self._follow)
+        if rate_hz != requested_rate_hz:
+            self.get_logger().warning(
+                f"High follow requires CANFD period <=10 ms; "
+                f"control rate raised from {requested_rate_hz:g} to {rate_hz:g} Hz")
+        self._last_joint_publish_at = None
 
         self._robot = placo.RobotWrapper(
             str(urdf_path), placo.Flags.ignore_collisions
@@ -378,10 +430,16 @@ class Rm75PlacoController(Node):
         self._home_settled_since = None
         self._valid_feedback = False
         self._valid_feedback_at = float("-inf")
+        if self._follow and lookahead_s > 0.0:
+            # 前瞻用于补偿低跟随的滞后；高跟随几乎无滞后，前瞻会让换序列处的台阶更大。
+            self.get_logger().warning(
+                f"high follow with lookahead_s={lookahead_s:g}; consider lookahead_s:=0")
         self.get_logger().warning(
             "RM75 Placo controller ready: "
             f"dry_run={self._dry_run}, rate={rate_hz:g} Hz, "
             f"velocity_scale={velocity_scale:g}, lookahead_s={lookahead_s:g}, "
+            f"follow={'high' if self._follow else 'low'} (follow_mode={follow_mode}, "
+            f"driver trajectory_mode={driver_trajectory_mode}), "
             f"require_start_state={self._require_start_state}, "
             f"start_from_current_pose={self._start_from_current}"
         )
@@ -791,8 +849,20 @@ class Rm75PlacoController(Node):
         if self._dry_run:
             return
         joint_command = Jointpos()
-        fill_joint_command(joint_command, positions)
+        fill_joint_command(joint_command, positions, getattr(self, "_follow", False))
         self._joint_publisher.publish(joint_command)
+        # 单调时钟测量本进程实际发布间隔；不把 ROS 时间跳变误判为发送卡顿。
+        # 15 ms 是明显超期的诊断阈值，并非放宽厂家要求的 10 ms 周期。
+        published_at = time.monotonic()
+        previous = getattr(self, "_last_joint_publish_at", None)
+        self._last_joint_publish_at = published_at
+        if getattr(self, "_follow", False) and previous is not None:
+            interval_ms = (published_at - previous) * 1000.0
+            if interval_ms > 15.0:
+                self.get_logger().warning(
+                    f"High-follow CANFD publish gap {interval_ms:.1f} ms "
+                    "(required <=10 ms); check controller CPU load and scheduling",
+                    throttle_duration_sec=2.0)
         self._gripper_publisher.publish(Float32(data=float(gripper)))
 
     def _stop_control(self, reason: str) -> None:
@@ -800,6 +870,7 @@ class Rm75PlacoController(Node):
             return
         self._trajectory = None
         self._command_positions = None
+        self._last_joint_publish_at = None
         self._last_gripper = None
         self._last_policy_gripper = None
         if not self._dry_run:

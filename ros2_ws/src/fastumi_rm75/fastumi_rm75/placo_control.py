@@ -256,13 +256,47 @@ def sample_trajectory(
     return position, quaternion, float(gripper)
 
 
-def fill_joint_command(message, positions: np.ndarray) -> None:
-    """将七轴弧度目标写入 RealMan 低跟随 CANFD 消息。"""
+FOLLOW_MODES = ("auto", "low", "high")
+
+
+def resolve_control_rate(configured_hz: float, follow: bool) -> float:
+    """解析控制频率（Hz）；高跟随要求 CANFD 透传周期不超过 10 ms。
+
+    返回值同时用于定时器和 IK 积分步长，避免提高发布频率后放大关节速度。
+    低跟随保留配置频率；本函数不保证操作系统实际调度周期。
+    """
+    if not np.isfinite(configured_hz) or configured_hz <= 0.0:
+        raise ValueError("control_rate_hz must be positive and finite")
+    return max(float(configured_hz), 100.0) if follow else float(configured_hz)
+
+
+def resolve_follow_mode(configured: str, driver_trajectory_mode: int | None) -> bool:
+    """解析 CANFD 跟随模式，返回 True 表示高跟随。
+
+    auto 以 rm_driver 的 trajectory_mode 为准：fastumi_bringup 低跟随时保持 0，高跟随时
+    只允许 1（曲线拟合）或 2（滤波），因此 0 对应低跟随、1/2 对应高跟随。驱动参数不可读
+    （None）时回退低跟随：低跟随忽略 trajectory_mode，不会在驱动完全透传时产生剧烈抖动。
+    """
+    mode = configured.strip().lower()
+    if mode not in FOLLOW_MODES:
+        raise ValueError("follow_mode must be auto, low or high")
+    if mode != "auto":
+        return mode == "high"
+    if driver_trajectory_mode is None:
+        return False
+    if driver_trajectory_mode not in (0, 1, 2):
+        raise ValueError(
+            f"unsupported rm_driver trajectory_mode: {driver_trajectory_mode}")
+    return driver_trajectory_mode != 0
+
+
+def fill_joint_command(message, positions: np.ndarray, follow: bool = False) -> None:
+    """将七轴弧度目标写入 RealMan CANFD 消息；follow=True 为高跟随，默认低跟随。"""
     positions = np.asarray(positions, dtype=np.float64).reshape(-1)
     if positions.shape != (7,) or not np.isfinite(positions).all():
         raise ValueError("RM75 command must contain seven finite joint positions")
     message.joint = positions.astype(np.float32).tolist()
-    message.follow = False
+    message.follow = bool(follow)
     message.expand = 0.0
     message.dof = 7
 

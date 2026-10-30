@@ -66,6 +66,31 @@ def policy_message(openness):
     return message
 
 
+@pytest.mark.parametrize("follow,interval,warning", [
+    (True, 0.01, False), (True, 0.025, True), (False, 0.025, False),
+])
+def test_publish_gap_diagnostic(controller, monkeypatch, follow, interval, warning):
+    """只诊断高跟随连续发布中的明显超期，首条指令不误报。"""
+    node = controller
+    node._follow = follow
+    times = iter([10.0, 10.0 + interval])
+    monkeypatch.setattr(
+        "fastumi_rm75.rm75_placo_controller.time.monotonic", lambda: next(times))
+    node._publish(np.zeros(7), 1.0)
+    node.get_logger().warning.assert_not_called()
+    node._publish(np.zeros(7), 1.0)
+    assert node.get_logger().warning.called is warning
+    assert node._joint_publisher.publish.call_count == 2
+
+
+def test_stop_clears_publish_gap_clock(controller):
+    """停止后的空闲时间不计入下一次任务的发送间隔。"""
+    controller._trajectory = object()
+    controller._last_joint_publish_at = 10.0
+    controller._stop_control("test stop")
+    assert controller._last_joint_publish_at is None
+
+
 @pytest.mark.parametrize("robot_ref,openness,accepted", [
     (0.42, 0.3, False),  # 策略 0.3 合法，执行命令约 0.033 低于 0.2。
     (0.42, 0.58, True),

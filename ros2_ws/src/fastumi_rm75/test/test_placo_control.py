@@ -12,6 +12,8 @@ from fastumi_rm75.placo_control import (
     TargetTrajectory,
     decode_trajectory,
     fill_joint_command,
+    resolve_follow_mode,
+    resolve_control_rate,
     gate_gripper_target,
     ordered_joint_positions,
     sample_trajectory,
@@ -160,6 +162,42 @@ def test_joint_command_uses_radians_and_low_follow_fields():
     assert message.follow is False
     assert message.expand == 0.0
     assert message.dof == 7
+    fill_joint_command(message, positions, follow=True)
+    assert message.follow is True
+
+
+@pytest.mark.parametrize("configured, driver_mode, expected", [
+    ("auto", 0, False), ("auto", 1, True), ("auto", 2, True), ("auto", None, False),
+    ("low", 2, False), ("HIGH", None, True),
+])
+def test_follow_mode_tracks_driver_trajectory_mode(configured, driver_mode, expected):
+    """auto 按驱动 trajectory_mode 选择跟随，驱动不可读时回退低跟随。"""
+    assert resolve_follow_mode(configured, driver_mode) is expected
+
+
+@pytest.mark.parametrize("configured, driver_mode", [("fast", 0), ("auto", 3)])
+def test_follow_mode_rejects_unknown_values(configured, driver_mode):
+    with pytest.raises(ValueError):
+        resolve_follow_mode(configured, driver_mode)
+
+
+@pytest.mark.parametrize("configured,follow,expected", [
+    (50.0, False, 50.0), (50.0, True, 100.0),
+    (100.0, True, 100.0), (200.0, True, 200.0),
+])
+def test_high_follow_rate_meets_canfd_period(configured, follow, expected):
+    """高跟随满足 10 ms 名义周期，低跟随保留原频率且不降低更高配置。"""
+    rate = resolve_control_rate(configured, follow)
+    assert rate == expected
+    if follow:
+        assert 1.0 / rate <= 0.01
+
+
+@pytest.mark.parametrize("configured", [0.0, -1.0, float("nan"), float("inf")])
+def test_control_rate_rejects_invalid_values(configured):
+    """非法频率不得被高跟随的最低频率覆盖而掩盖。"""
+    with pytest.raises(ValueError, match="control_rate_hz"):
+        resolve_control_rate(configured, True)
 
 
 def test_workspace_rejects_outside_link7_target():

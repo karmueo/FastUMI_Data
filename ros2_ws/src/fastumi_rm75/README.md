@@ -2,8 +2,8 @@
 
 # fastumi_rm75
 
-`rm75_placo_controller` 订阅推理端发布的绝对 Link7 目标序列，以 50 Hz 使用
-Placo 求解七轴关节，并通过睿尔曼低跟随 CANFD 接口控制 RM75。它同时把序列中的
+`rm75_placo_controller` 订阅推理端发布的绝对 Link7 目标序列，低跟随默认以 50 Hz、高跟随至少以 100 Hz 使用
+Placo 求解七轴关节，并通过睿尔曼 CANFD 关节透传接口（默认低跟随，可切高跟随）控制 RM75。它同时把序列中的
 归一化开度发布给 Unitree 夹爪。
 
 ## 接口
@@ -11,7 +11,7 @@ Placo 求解七轴关节，并通过睿尔曼低跟随 CANFD 接口控制 RM75�
 - `/joint_states`：RM75 七轴反馈，`sensor_msgs/JointState`，单位弧度。
 - `/motion_control/gripper_state`：归一化夹爪实测开度，实机起始状态门控使用。
 - `/fastumi/policy/action_sequence`：`base_link -> Link7` 绝对目标、执行时间和夹爪开度。
-- `/rm_driver/movej_canfd_cmd`：`rm_ros_interfaces/Jointpos` 七轴低跟随命令。
+- `/rm_driver/movej_canfd_cmd`：`rm_ros_interfaces/Jointpos` 七轴透传命令，`follow` 字段见下文跟随模式。
 - `/motion_control/gripper_command`：`std_msgs/Float32`，`0` 全闭、`1` 全开。
 - `/fastumi/rm75/placo/joint_command`：每次成功 IK 的调试关节目标，dry-run 时也发布。
 - `/rm_driver/move_stop_cmd`：轨迹结束、反馈超时或 IK 故障时发布一次停止命令。
@@ -160,6 +160,23 @@ URDF 速度比例、反馈超时及全部话题均可在 `config/rm75_placo_cont
 `lookahead_s`（默认 0，范围 0～0.5 s）让位姿按“当前时间 + lookahead_s”采样，用于抵消睿尔曼
 低跟随约 80 ms 延迟 + 0.4 s 一阶滤波的滞后；夹爪仍按当前时间采样。前瞻超出末点时保持末点，
 须配合推理端发布更长序列（`published_action_steps`）才有效。限速、关节限位与包络检查不变。
+
+跟随模式由 `follow_mode`（默认 `auto`）决定：`auto` 在启动时读取 `driver_node`（默认
+`/rm_driver`）的 `trajectory_mode` 参数，0 发低跟随（`follow=False`），1/2 发高跟随
+（`follow=True`）；驱动 3 s 内不可读时回退低跟随。驱动侧的 `trajectory_mode`/`radio` 由
+`fastumi_bringup` 的 `arm_follow_mode`/`arm_trajectory_mode`/`arm_radio` 设置，所以各推理 launch
+无需额外参数；也可用 `-p follow_mode:=low|high` 显式指定。
+高跟随要求透传周期不超过 10 ms，控制器将 `control_rate_hz` 自动提升至至少 100 Hz，
+同时同步 IK 步长，保持原有关节速度上限。启动日志的 `rate` 是实际采用的名义频率。
+高跟随也会受到驱动平滑参数的滞后影响，必须配合曲线拟合或滤波；建议 `lookahead_s:=0`。
+
+若高跟随持续细碎抖动，先检查启动日志是否为 `follow=high`、`rate=100 Hz`（或更高），
+再在实际执行期间用 `ros2 topic hz /rm_driver/movej_canfd_cmd` 检查频率和最大间隔。
+平均频率达标不代表每个周期达标；本进程发布间隔超过 15 ms 会输出节流的
+`High-follow CANFD publish gap` 告警，15 ms 仅是明显超期的诊断阈值。
+该诊断不包含 DDS、驱动和网络延迟，Python 定时器也不提供硬实时保证。
+若仍存在明显超期，应先检查 CPU 负载和调度，不能只增大 `arm_radio` 掩盖发送间断。
+厂家要求见[角度透传说明](https://develop.realman-robotics.com/robot/apipython/classes/movePlan/)。
 反馈丢失或序列耗尽后，必须收到新鲜反馈和一条新的预测才会恢复；
 IK 或工作区故障还须重置 episode。
 

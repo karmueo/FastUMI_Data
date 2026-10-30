@@ -3,6 +3,8 @@ rm75_placo_controller:
   ros__parameters:
     dry_run: false
     urdf_path: ""
+    # 低跟随按此频率执行；高跟随自动提升至至少 100 Hz（厂家要求周期 ≤10 ms）。
+    # IK 步长同步调整，不改变速度上限；实际调度明显超期时输出 CANFD publish gap 告警。
     control_rate_hz: 50.0
     velocity_scale: 0.25
     joint_state_timeout_s: 0.25
@@ -67,6 +69,10 @@ rm75_placo_controller:
     return_service: /fastumi/rm75/placo/return_to_start
     policy_topic: /fastumi/policy/action_sequence
     joint_command_topic: /rm_driver/movej_canfd_cmd
+    # CANFD 跟随模式：auto 读取 driver_node 的 trajectory_mode（fastumi_bringup arm_follow_mode 设置），
+    # 0 为低跟随，1/2 为高跟随；驱动不可读时回退低跟随。也可显式写 low / high。
+    follow_mode: auto
+    driver_node: /rm_driver
     gripper_command_topic: /motion_control/gripper_command
     debug_joint_topic: /fastumi/rm75/placo/joint_command
     stop_topic: /rm_driver/move_stop_cmd
