@@ -49,18 +49,27 @@ sha256sum "$TRT_TRAINING_URDF"
 
 ### 3. 准备反馈并启动推理
 
+先确认模型来源，选择对应的启动入口：
+
+| 模型来源 | 启动入口 |
+| --- | --- |
+| `model/dp` 导出的 TensorRT bundle，例如步骤 2 的 1021 模型 | 使用本节的 `dp_infer_tensorrt` 命令。 |
+| LeRobot 导出的模型，例如 `dp_umi_pick_baseline_v1/last/trt_orin_package` | 使用下方的 `dp_infer_lerobot` 命令；其 manifest 和引擎格式与本包不兼容。 |
+
 先按 [硬件启动步骤](../dp_infer/README.md#启动) 准备相机、七轴关节和夹爪反馈。**硬件入口会让机械臂回位、夹爪张开，启动前检查运动区域和急停。**
 
-H.264 必须先解码为 `Image`，以下示例订阅 `/wrist_camera/image_decoded`；`image_type:=compressed` 仅支持 JPEG/PNG。
+以下示例默认订阅 `/wrist_camera/image_raw/compressed`，`image_type:=compressed` 支持 JPEG/PNG。H.264 必须先解码为 `Image`，并将参数改为 `image_type:=raw image_topic:=/wrist_camera/image_decoded`。
 
-**组合 launch 默认 `start_controller:=true`、`dry_run:=false`，会连接实机控制。首次联调使用 `dry_run:=true`；实机流程见 [dp_infer 文档](../dp_infer/README.md#启动)。** 在步骤 2 的终端二选一：
+#### `model/dp` 模型：使用本包
+
+**组合 launch 默认 `start_controller:=true`、`dry_run:=false`，会连接实机控制。首次联调使用 `dry_run:=true`；实机流程见 [dp_infer 文档](../dp_infer/README.md#启动)。** 在步骤 2 的终端按需选择以下一种启动方式：
 
 仅启动推理：
 
 ```bash
 ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
   engine_dir:="$TRT_ENGINE_DIR" urdf_path:="$TRT_TRAINING_URDF" \
-  start_controller:=false image_type:=raw image_topic:=/wrist_camera/image_decoded
+  start_controller:=false image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed
 ```
 
 连接 Placo 控制器做 dry-run：
@@ -68,7 +77,7 @@ ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
 ```bash
 ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
   engine_dir:="$TRT_ENGINE_DIR" urdf_path:="$TRT_TRAINING_URDF" \
-  dry_run:=true image_type:=raw image_topic:=/wrist_camera/image_decoded
+  dry_run:=true image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed
 ```
 
 实机运行：
@@ -76,10 +85,35 @@ ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
 ```bash
 ros2 launch dp_infer_tensorrt dp_infer_tensorrt.launch.py \
   engine_dir:="$TRT_ENGINE_DIR" urdf_path:="$TRT_TRAINING_URDF" \
-  image_type:=raw image_topic:=/wrist_camera/image_decoded
+  image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed
 ```
 
 控制器默认使用工作区 `.venv-numpy2`，可用 `controller_python` 覆盖。任一进程退出都会结束组合启动。
+
+#### LeRobot 模型：使用 `dp_infer_lerobot`
+
+以 `dp_umi_pick_baseline_v1` 为例，在仓库根目录依次加载 ROS、工作区和模型环境。模型环境最后激活，`which ros2` 应指向 `ros2_ws/.venv-dp-lerobot/bin/ros2`。模型包与部署档必须配套：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+source ros2_ws/.venv-dp-lerobot/bin/activate
+export DP_EXPORT="$PWD/dataset/lerobot/jingbao_models/lerobot_onnx/dp_umi_pick_baseline_v1/last/trt_orin_package"
+export DP_PROFILE="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_umi_pick_baseline_v1_deployment.yaml"
+
+ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
+  backend:=tensorrt_fp16 export_dir:="$DP_EXPORT" deployment_config:="$DP_PROFILE" \
+  urdf_path:="$PWD/assets/rm_75.urdf" \
+  end_camera_extrinsic:="$PWD/config/calibration/T_cam_end.yaml" \
+  deploy_tcp_extrinsic:="$PWD/config/calibration/T_d_cam_tcp.yaml" \
+  image_type:=compressed image_topic:=/wrist_camera/image_raw/compressed \
+  noise_scheduler:=DDIM num_inference_steps:=16 \
+  dry_run:=true
+```
+
+确认推理和反馈正常后，实机运行将 `dry_run:=true` 改为 `dry_run:=false`。环境安装、模型构建、开始与停止任务，以及动作前瞻配置均见 [LeRobot 推理文档](../dp_infer_lerobot/README.md#4-启动与操作)；本页后续参数表和任务操作适用于 `dp_infer_tensorrt`。
+
+若使用本包启动 LeRobot 模型时出现 `Cannot open JSON: .../onnx/trt_orin_package/manifest.json`，这是本包按 `engine_dir` 自动推导模型 manifest 路径的结果。应切换到上述 LeRobot 入口，不能通过复制 JSON 或仅指定 `model_manifest` 解决模型格式不兼容。随后控制器出现的 `KeyboardInterrupt` 可能只是推理节点退出后，组合 launch 发送 `SIGINT` 导致的连带退出。
 
 #### launch 参数
 
