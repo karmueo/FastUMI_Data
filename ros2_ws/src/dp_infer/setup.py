@@ -24,6 +24,14 @@ setup(
     name=PACKAGE_NAME,
     version="0.1.0",
     packages=find_packages(exclude=("test",)),
+    # 共享标准库模块：独立训练从 model/dp 导入，ROS launch 从安装环境导入。
+    py_modules=["fastumi_urdf_binding"],
+    package_dir={
+        "": "../../../model/dp",
+        "dp_infer": "dp_infer",
+        "diffusion_policy": "diffusion_policy",
+        "umi": "umi",
+    },
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE_NAME}"]),
         (f"share/{PACKAGE_NAME}", ["package.xml", "README.md"]),

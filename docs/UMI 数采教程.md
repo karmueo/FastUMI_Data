@@ -698,7 +698,7 @@ export TRAIN_URDF="$DEPLOY_DIR/rm_75.urdf"
 cd "$FASTUMI_ROOT"
 ```
 
-`dp_infer` launch 自行选择模型和 Placo 的解释器。URDF 摘要必须匹配新 checkpoint；控制 URDF 还须与训练 URDF 运动学等价。
+`dp_infer` launch 自行选择模型和 Placo 的解释器。URDF 摘要须匹配 checkpoint，或属于[已登记的固定夹爪迁移](../ros2_ws/src/dp_infer/README.md#固定夹爪-urdf-迁移)；历史训练摘要保留原值。控制 URDF 还须与训练 URDF 运动学等价。
 
 ### 9.3 启动硬件与检查反馈
 

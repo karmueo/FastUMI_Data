@@ -447,4 +447,74 @@
       effort="10"
       velocity="3.92" />
   </joint>
+  <!--
+    夹爪源模型：夹爪.stp；保留夹爪、底板和相机，移除手持握柄。
+    STL 保留 STEP 的毫米单位和装配坐标，使用 scale 转为 URDF 的米。
+    两指所在平面为 XZ，法向 +Y 与 Link7 的 +Y 同向；夹指沿 +Z 伸出。
+    底板与握柄的原接合面位于 STEP Z=-6 mm，故安装偏移为 +6 mm。
+    此处按接合面居中装配；未定义额外转接件或标定后的 TCP。
+    左右夹指使用独立网格，默认固定在 CAD 姿态以保留七轴求解器兼容性。
+    datatool/view_rm75.launch.py 在内存中将夹指关节改为对称移动关节。
+    没有实测质量和惯量，暂不定义动力学参数。
+    网格路径相对于本 URDF；RViz 使用前需将其解析为 file:// 绝对路径，
+    或随 ROS 描述包安装并改为对应的 package:// 资源路径。
+  -->
+  <link name="gripper_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/rm75_gripper_base.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="gripper_gray">
+        <color rgba="0.55 0.55 0.58 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="meshes/rm75_gripper_base.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="gripper_mount_joint" type="fixed">
+    <origin xyz="0 0 0.006" rpy="0 0 0" />
+    <parent link="Link7" />
+    <child link="gripper_link" />
+  </joint>
+  <link name="gripper_left_finger_link">
+    <visual>
+      <geometry>
+        <mesh filename="meshes/rm75_gripper_left.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="gripper_gray" />
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="meshes/rm75_gripper_left.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="gripper_left_finger_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="gripper_link" />
+    <child link="gripper_left_finger_link" />
+  </joint>
+  <link name="gripper_right_finger_link">
+    <visual>
+      <geometry>
+        <mesh filename="meshes/rm75_gripper_right.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="gripper_gray" />
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="meshes/rm75_gripper_right.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="gripper_right_finger_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="gripper_link" />
+    <child link="gripper_right_finger_link" />
+  </joint>
 </robot>

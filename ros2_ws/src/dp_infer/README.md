@@ -58,11 +58,35 @@ ros2 run dp_infer dp_infer_node --ros-args \
 传入 `device:=cpu`；CUDA 默认是 `cuda:0`。ROS 节点进程使用安装入口绑定的
 `.venv-dp` 解释器，无需额外启动脚本。
 
-默认的 `expected_urdf_sha256` 适用于仓库参考 checkpoint 的训练 URDF。新
-checkpoint 如已内嵌摘要，则以内嵌值为准；使用其他旧 checkpoint 时，必须在
-配置或 launch 中填入对应的训练 URDF 摘要。摘要不一致、文件缺失、设备不可用、
+默认的 `expected_urdf_sha256` 绑定仓库正式夹爪 URDF。新 checkpoint 如已内嵌
+训练摘要，则以内嵌值为准；其他未内嵌摘要的 checkpoint 须显式提供原训练摘要。
+除下述已登记迁移外，摘要不一致、文件缺失、设备不可用、
 模型契约不匹配时节点会拒绝启动。只加载可信 checkpoint，因为 PyTorch/dill
 反序列化会执行其中的 Python 对象。
+
+### 固定夹爪 URDF 迁移
+
+仓库 `assets/rm_75.urdf` 现为带固定夹爪的正式模型：
+
+| 用途 | SHA-256 |
+| --- | --- |
+| 历史训练模型 | `c37545834f0d6a4719548e51337a258be0c3b95bb6b79467d835875a205bb056` |
+| 正式夹爪模型 | `2724631527c06ac53efc8dd247671995e32b40f07818ba49a6f2c0408be63607` |
+
+已核对原有全部 link/joint 定义不变，100 组确定性采样的 `base_link → Link7` 正运动学结果相同。
+夹爪通过固定关节增加，不改变七轴角度、关节限位或 Link7 契约；无需为这次固定网格增加重新训练。
+`fastumi_urdf_binding` 仅登记上述历史摘要到正式摘要的单向迁移，仍校验完整文件字节；其他修改
+（包括格式变化）不会自动放行。DP checkpoint、历史数据与导出产物中的训练摘要保持原值。
+这项迁移适用于本仓库 Python DP、独立 `vr_umi_ros` 及 LeRobot 部署；其他后端须单独核对支持情况。
+
+更新后重新构建 `dp_infer`、`dp_infer_lerobot`、`fastumi_data` 并重新加载工作区，使共享验证模块、
+参数和 `assets/meshes/` 安装生效。部署机器同步新 URDF 和该网格目录，启动时 `urdf_path` 指向新文件。
+新转换任务使用该文件记录新摘要；迁移已有 checkpoint 时使用登记的原训练摘要，无需改写 checkpoint。
+LeRobot 部署档保留 `urdf_sha256` 为训练摘要，并以 `deployment_urdf_sha256` 明确绑定新文件；
+重新运行 `make-profile` 时也会验证该迁移并分别写入两个字段，不改写数据集元信息。
+
+本次 URDF 添加仅说明几何装配。若实际更换夹爪、相机或安装位置，须核对并按需重新标定
+`T_cam_end.yaml` 与 `T_d_cam_tcp.yaml`，URDF 安装偏移不会自动更新部署 TCP 外参。
 
 ## 话题与时间语义
 

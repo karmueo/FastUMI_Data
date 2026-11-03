@@ -25,7 +25,9 @@ checkpoint_files:
   policy_postprocessor.json: 697e6bf50a3f99b0677a9e797babb5ce2e0d17acf8fcd15596ba3ac0bc7a5a72
   policy_preprocessor_step_3_normalizer_processor.safetensors: 992e8b07cbfbcf88f121f594a96abcdcab291b7c6b45821aa275b3fc2494336f
   policy_postprocessor_step_0_unnormalizer_processor.safetensors: 23971770c6beb6ad00f6fc85ca0ff3f343d39502103156106fbf714dc02f226c
+# 保留原始训练摘要；部署使用已登记且 Link7 运动学等价的固定夹爪模型。
 urdf_sha256: c37545834f0d6a4719548e51337a258be0c3b95bb6b79467d835875a205bb056
+deployment_urdf_sha256: 2724631527c06ac53efc8dd247671995e32b40f07818ba49a6f2c0408be63607
 umi_camera_from_tcp:
 - - 0.9997670430417793
   - -0.002663922532012177

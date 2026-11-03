@@ -25,11 +25,10 @@ bash model/dp/run_vr_umi_ros2.sh --ros-args \
 
 `checkpoint` 必须显式提供；示例模型为现有训练产物，其他符合相同契约的 checkpoint
 可以替换。节点复用评估入口的 EMA/model 权重加载逻辑，不下载预训练视觉权重。
-`urdf_path` 默认指向仓库内 `dataset/vr_target_umi/rm_75.urdf`，可以通过 `-p urdf_path:=...`
-覆盖。URDF 必须与转换训练数据时使用的版本一致，末端固定为 `Link7`、工具偏移为零。
-示例旧 checkpoint 未内嵌训练 URDF 摘要，因此 YAML 的 `expected_urdf_sha256` 显式绑定
-当前训练 URDF；新 checkpoint 若已内嵌摘要，则以内嵌值为准。替换 URDF 或 checkpoint 时
-应同步核对该参数，摘要不一致会阻止节点启动。
+`urdf_path` 默认指向仓库内 `assets/rm_75.urdf`，可以通过 `-p urdf_path:=...`
+覆盖。末端固定为 `Link7`、工具偏移为零。默认 `expected_urdf_sha256` 绑定正式夹爪模型；
+checkpoint 内嵌的原训练摘要优先。旧模型仅允许[已登记的固定夹爪迁移](../../../ros2_ws/src/dp_infer/README.md#固定夹爪-urdf-迁移)，
+其他摘要不一致会阻止节点启动；未内嵌摘要的其他 checkpoint 须显式配置原训练摘要。
 
 输入消息使用 sensor-data QoS（best-effort、volatile），兼容常见的可靠或 best-effort
 传感器发布端；输出使用 reliable、volatile，队列深度 10。首轮自动以第一个有效同步

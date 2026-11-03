@@ -16,6 +16,7 @@ from std_srvs.srv import Trigger
 from fastumi_interfaces.msg import PolicyActionSequence
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
+from fastumi_urdf_binding import RM75_URDF_SHA256
 from vr_umi_ros.core import (InferenceContext, JOINT_NAMES, PolicyEngine, build_observations,
                              image_to_rgb, letterbox_rgb, load_processors, ordered_joints,
                              validate_urdf)
@@ -53,10 +54,10 @@ class VrUmiInferenceNode(Node):
     def __init__(self, engine=None):
         """声明参数、加载模型并注册订阅；engine 参数供确定性 ROS 测试注入。"""
         super().__init__("vr_umi_inference")
-        default_urdf = Path(__file__).resolve().parents[3] / "dataset/vr_target_umi/rm_75.urdf"
+        default_urdf = Path(__file__).resolve().parents[3] / "assets/rm_75.urdf"
         defaults = {
             "checkpoint": "", "device": "cuda:0", "urdf_path": str(default_urdf),
-            "expected_urdf_sha256": "",
+            "expected_urdf_sha256": RM75_URDF_SHA256,
             "image_topic": "/camera/image_raw", "joint_topic": "/joint_states",
             "gripper_topic": "/fastumi/gripper/state", "output_topic": "/fastumi/policy/action_sequence",
             "reset_service": "/fastumi/policy/reset_episode", "sync_slop_s": 0.05,

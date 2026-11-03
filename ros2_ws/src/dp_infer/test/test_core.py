@@ -1,6 +1,7 @@
 """验证独立 DP 核心的输入契约、同步、动作解码和 URDF 检查。"""
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -210,3 +211,15 @@ def test_load_deploy_tcp_and_axis_check(tmp_path):
     tcp.write_text(yaml.safe_dump({"T_u_cam_tcp": camera_from_tcp.tolist()}))
     with pytest.raises(ValueError, match="T_d_cam_tcp"):
         load_deploy_tcp(end, tcp)
+
+
+def test_embedded_training_digest_accepts_registered_gripper():
+    """checkpoint 内嵌旧摘要时仍可部署正式夹爪；未知内嵌摘要不被默认值覆盖。"""
+    from fastumi_urdf_binding import RM75_URDF_MIGRATIONS, RM75_URDF_SHA256
+
+    urdf = Path(__file__).resolve().parents[4] / "assets/rm_75.urdf"
+    config = _contract_config(next(iter(RM75_URDF_MIGRATIONS)))
+    validate_urdf(urdf, config, RM75_URDF_SHA256)
+    config.task.contract.urdf_sha256 = "a" * 64
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate_urdf(urdf, config, RM75_URDF_SHA256)

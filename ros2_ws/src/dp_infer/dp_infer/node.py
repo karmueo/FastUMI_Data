@@ -16,6 +16,7 @@ from std_srvs.srv import Trigger
 from fastumi_interfaces.msg import PolicyActionSequence
 
 from diffusion_policy.common.urdf_kinematics import UrdfKinematics
+from fastumi_urdf_binding import RM75_URDF_SHA256
 from dp_infer.core import (DEFAULT_MAX_TCP_AXIS_DEG, InferenceContext, JOINT_NAMES, PolicyEngine,
                              build_observations, compare_tcp_frames, contract_end_frame,
                              image_to_rgb, letterbox_rgb, load_deploy_tcp, load_processors,
@@ -56,7 +57,7 @@ class DpInferenceNode(Node):
         super().__init__("dp_infer")
         defaults = {
             "checkpoint": "", "device": "cuda:0", "urdf_path": "",
-            "expected_urdf_sha256": "c37545834f0d6a4719548e51337a258be0c3b95bb6b79467d835875a205bb056",
+            "expected_urdf_sha256": RM75_URDF_SHA256,
             "image_topic": "/usb_camera/image_raw", "joint_topic": "/joint_states",
             "gripper_topic": "/gripper/openness", "output_topic": "/fastumi/policy/action_sequence",
             "reset_service": "/fastumi/policy/reset_episode", "sync_slop_s": 0.05,

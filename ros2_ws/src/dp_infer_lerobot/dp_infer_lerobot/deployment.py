@@ -17,6 +17,8 @@ import json
 import numpy as np
 import yaml
 
+from fastumi_urdf_binding import validate_urdf_binding
+
 from .processors import read_processor_spec
 
 # 部署端必须与训练数据一致的契约字段（取自 meta/fastumi.json）。
@@ -69,9 +71,13 @@ def load_profile(path):
     if (not isinstance(profile, dict) or profile.get("version") != 1
             or profile.get("contract") not in (CONTRACT, EPISODE_CONTRACT)):
         raise ValueError("Unsupported deployment contract")
-    urdf = profile.get("urdf_sha256")
-    if not isinstance(urdf, str) or len(urdf) != 64:
-        raise ValueError("Deployment profile must bind urdf_sha256")
+    for key in ("urdf_sha256", "deployment_urdf_sha256"):
+        if key == "deployment_urdf_sha256" and key not in profile:
+            continue
+        digest = profile.get(key)
+        if (not isinstance(digest, str) or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest.lower())):
+            raise ValueError(f"Deployment profile must bind a valid {key}")
     matrix = np.asarray(profile.get("umi_camera_from_tcp"), dtype=np.float64)
     if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
         raise ValueError("Deployment profile must embed a 4x4 umi_camera_from_tcp")
@@ -144,10 +150,8 @@ def validate_export(export_dir, profile, precision):
 
 
 def validate_urdf(path, profile):
-    """部署 FK 必须使用训练数据记录的同一 URDF。"""
-    path = Path(path)
-    if not path.is_file() or sha256_file(path) != profile["urdf_sha256"]:
-        raise ValueError("URDF fingerprint does not match the training data")
+    """核对训练摘要和部署版本；固定夹爪迁移必须在共享登记表中。"""
+    validate_urdf_binding(path, profile["urdf_sha256"], profile.get("deployment_urdf_sha256"))
 
 
 def load_tool_offset(profile, end_camera_path, deploy_tcp_path, max_axis_deg):
@@ -181,8 +185,7 @@ def make_profile(checkpoint, dataset_meta, urdf, model_name):
         contract.update(model_state_dim=7, model_action_dim=7)
     if contract != expected:
         raise ValueError(f"Dataset contract differs from the supported one: {contract}")
-    if sha256_file(urdf) != meta["urdf_sha256"]:
-        raise ValueError("URDF does not match the dataset urdf_sha256")
+    deployment_digest = validate_urdf_binding(urdf, meta["urdf_sha256"])
     root = Path(checkpoint)
     return {
         "version": 1,
@@ -190,6 +193,8 @@ def make_profile(checkpoint, dataset_meta, urdf, model_name):
         "contract": contract,
         "checkpoint_files": {name: sha256_file(root / name) for name in required_files(root)},
         "urdf_sha256": meta["urdf_sha256"],
+        # 分别绑定训练记录与实际部署文件，避免迁移时改写历史数据来源。
+        "deployment_urdf_sha256": deployment_digest,
         "umi_camera_from_tcp": meta["umi_camera_from_tcp"],
         "sources": {
             "dataset_repo_id": meta.get("repo_id"),

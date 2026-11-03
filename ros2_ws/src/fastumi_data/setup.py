@@ -20,6 +20,8 @@ DEFAULT_CALIBRATION_FILES = [
 ]
 # 转换缺省 --urdf 时使用的部署 URDF，摘要须与 dp_infer 的 expected_urdf_sha256 一致。
 DEFAULT_URDF_FILES = [f"{REPOSITORY_ROOT}/assets/rm_75.urdf"]
+# 保持 URDF 相对网格路径 assets/meshes/，供安装后的模型读取器解析。
+DEFAULT_MESH_FILES = sorted(glob(f"{REPOSITORY_ROOT}/assets/meshes/rm75_gripper_*.stl"))
 
 
 setup(
@@ -39,6 +41,7 @@ setup(
         (f"share/{PACKAGE_NAME}/launch", glob("launch/*.launch.py")),
         (f"share/{PACKAGE_NAME}/config/calibration", DEFAULT_CALIBRATION_FILES),
         (f"share/{PACKAGE_NAME}/assets", DEFAULT_URDF_FILES),
+        (f"share/{PACKAGE_NAME}/assets/meshes", DEFAULT_MESH_FILES),
         (
             f"share/{PACKAGE_NAME}/codecs",
             [f"{REPOSITORY_ROOT}/imagecodecs_numcodecs.py"],

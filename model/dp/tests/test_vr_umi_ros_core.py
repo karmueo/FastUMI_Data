@@ -258,3 +258,16 @@ def test_history_rejects_large_gaps_and_chooses_nearest():
     buffer.add_pose(stamp + 120_000_000, pose)
     window = buffer.poll(stamp + 133_333_333)
     assert window[-1].pose[0, 3] != 999
+
+
+def test_embedded_training_digest_accepts_registered_gripper():
+    """独立推理也支持确定版本迁移，且保留 checkpoint 内嵌摘要优先级。"""
+    from fastumi_urdf_binding import RM75_URDF_MIGRATIONS, RM75_URDF_SHA256
+
+    urdf = Path(__file__).resolve().parents[3] / "assets/rm_75.urdf"
+    cfg = config()
+    cfg.task.contract.urdf_sha256 = next(iter(RM75_URDF_MIGRATIONS))
+    validate_urdf(urdf, cfg, RM75_URDF_SHA256)
+    cfg.task.contract.urdf_sha256 = "a" * 64
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate_urdf(urdf, cfg, RM75_URDF_SHA256)

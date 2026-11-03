@@ -29,11 +29,13 @@ TCP 为夹爪抓取中心，坐标轴沿用 `config/calibration/T_d_cam_tcp.yaml
 两端相机←TCP 相差约 9.0 mm / 2.79°。
 
 `config/dp_umi_v4_deployment.yaml` 绑定 checkpoint 六个文件的 SHA-256、数据契约（来自数据集
-`meta/fastumi.json`）、训练 URDF（`assets/rm_75.urdf`）和 `umi_camera_from_tcp`；任一不一致拒绝启动。
-更换模型或数据后重新生成并审核：
+`meta/fastumi.json`）、原始训练 URDF 摘要和 `umi_camera_from_tcp`。两个随包部署档已通过
+`deployment_urdf_sha256` 绑定正式夹爪 URDF（`assets/rm_75.urdf`），并保留原训练摘要。
+仅允许[已登记的固定夹爪迁移](../dp_infer/README.md#固定夹爪-urdf-迁移)，其他不一致拒绝启动。
+更换模型或数据后重新生成并审核；以下命令同时支持原文件与已登记迁移：
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
+PYTHONPATH=model/dp:ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
 ros2_ws/.venv-dp-lerobot/bin/python -m dp_infer_lerobot.deployment make-profile \
   --checkpoint "$DP_CHECKPOINT" \
   --dataset-meta dataset/processed/lerobot_jingbao_all/lerobot/meta/fastumi.json \
@@ -148,7 +150,7 @@ episode 已重置则丢弃。
 ```bash
 source /opt/ros/jazzy/setup.bash && source ros2_ws/install/setup.bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 ROS_DOMAIN_ID=181 \
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
+PYTHONPATH=model/dp:ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
 ros2_ws/.venv-dp-lerobot/bin/python -m pytest -q --import-mode=importlib ros2_ws/src/dp_infer_lerobot/test
 ```
 
@@ -162,7 +164,7 @@ OUT=dataset/validation/dp_lerobot_v4
   --checkpoint "$DP_CHECKPOINT" --repo-id scl/jingbao_all \
   --dataset-root dataset/processed/lerobot_jingbao_all/lerobot \
   --scheduler DDIM --steps 16 --output $OUT/reference_ddim16.npz
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
+PYTHONPATH=model/dp:ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
 ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py export-candidate \
   --checkpoint "$DP_CHECKPOINT" \
   --deployment-config ros2_ws/src/dp_infer_lerobot/config/dp_umi_v4_deployment.yaml \
@@ -176,7 +178,7 @@ TensorRT 对照复用同一参考样本，`compare --physical` 按最终绝对�
 夹爪 ≤ 0.01，与 LeRobot 导出验证门槛一致；TRT 与 PyTorch 内核不同，不使用逐元素容差）：
 
 ```bash
-PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
+PYTHONPATH=model/dp:ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot:$PYTHONPATH \
 ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/compare_policy.py export-candidate \
   --backend tensorrt_fp16 --export-dir "$DP_EXPORT" \
   --deployment-config ros2_ws/src/dp_infer_lerobot/config/dp_umi_v4_deployment.yaml \

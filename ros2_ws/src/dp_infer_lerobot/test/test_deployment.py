@@ -1,6 +1,7 @@
 """验证部署档契约、checkpoint 指纹、URDF 与 TCP 外参检查。"""
 
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -9,8 +10,10 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from dp_infer_lerobot import deployment
+from fastumi_urdf_binding import RM75_URDF_MIGRATIONS, RM75_URDF_SHA256
 
 PROFILE = Path(__file__).resolve().parents[1] / "config/dp_umi_v4_deployment.yaml"  # 随包部署档。
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def _write(tmp_path, profile):
@@ -39,8 +42,42 @@ def test_checkpoint_and_urdf_fingerprints(tmp_path):
     urdf.write_text("<robot/>")
     with pytest.raises(ValueError, match="URDF"):
         deployment.validate_urdf(urdf, profile)
-    profile = dict(profile, urdf_sha256=deployment.sha256_file(urdf))
+    profile = dict(profile, urdf_sha256=deployment.sha256_file(urdf),
+                   deployment_urdf_sha256=deployment.sha256_file(urdf))
     deployment.validate_urdf(urdf, profile)
+
+
+@pytest.mark.parametrize("name", ["dp_umi_v4_deployment.yaml", "dp_pick_episode_start_tcp_deployment.yaml"])
+def test_packaged_profiles_migrate_to_official_gripper(name):
+    """旧训练来源保留原值，两个部署档均明确绑定正式夹爪文件。"""
+    profile = deployment.load_profile(PROFILE.parent / name)
+    assert RM75_URDF_MIGRATIONS[profile["urdf_sha256"]] == RM75_URDF_SHA256
+    assert profile["deployment_urdf_sha256"] == RM75_URDF_SHA256
+    deployment.validate_urdf(ROOT / "assets/rm_75.urdf", profile)
+    with pytest.raises(ValueError, match="migration"):
+        deployment.validate_urdf(ROOT / "assets/rm_75.urdf", dict(profile, urdf_sha256="a" * 64))
+
+
+def test_make_profile_preserves_training_digest_during_migration(tmp_path, monkeypatch):
+    """生成部署档时保留数据集来源并单独绑定新文件，不改写训练元信息。"""
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(json.dumps({"use_relative_pose": True}))
+    meta = dict(deployment.CONTRACT, urdf_sha256=next(iter(RM75_URDF_MIGRATIONS)),
+                umi_camera_from_tcp=np.eye(4).tolist())
+    dataset_meta = tmp_path / "fastumi.json"
+    dataset_meta.write_text(json.dumps(meta))
+    original_bytes = dataset_meta.read_bytes()
+    monkeypatch.setattr(deployment, "required_files", lambda _: ["config.json"])
+    profile = deployment.make_profile(checkpoint, dataset_meta, ROOT / "assets/rm_75.urdf", "test")
+    assert profile["urdf_sha256"] == meta["urdf_sha256"]
+    assert profile["deployment_urdf_sha256"] == RM75_URDF_SHA256
+    assert dataset_meta.read_bytes() == original_bytes
+    deployment.validate_urdf(ROOT / "assets/rm_75.urdf", profile)
+    meta["urdf_sha256"] = "a" * 64
+    dataset_meta.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="URDF"):
+        deployment.make_profile(checkpoint, dataset_meta, ROOT / "assets/rm_75.urdf", "test")
 
 
 def test_tool_offset_requires_files_and_matching_axes(tmp_path):

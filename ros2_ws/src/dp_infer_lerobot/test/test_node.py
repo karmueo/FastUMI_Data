@@ -45,7 +45,8 @@ def _files(tmp_path, umi_rotation=(0.0, 0.0, 0.0)):
     umi = camera_from_tcp.copy()
     umi[:3, :3] = umi[:3, :3] @ Rotation.from_rotvec(umi_rotation).as_matrix()
     profile = copy.deepcopy(deployment.load_profile(PROFILE))
-    profile.update(urdf_sha256=deployment.sha256_file(urdf), umi_camera_from_tcp=umi.tolist())
+    profile.update(urdf_sha256=deployment.sha256_file(urdf),
+                   deployment_urdf_sha256=deployment.sha256_file(urdf), umi_camera_from_tcp=umi.tolist())
     profile_path = tmp_path / "profile.yaml"
     profile_path.write_text(yaml.safe_dump(profile))
     args = ["--ros-args", "-p", f"urdf_path:={urdf}", "-p", f"deployment_config:={profile_path}",

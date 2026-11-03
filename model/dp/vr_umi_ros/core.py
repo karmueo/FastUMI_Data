@@ -1,15 +1,14 @@
 """构造训练一致的 UMI 观测，执行推理并将相对动作还原为绝对目标序列。"""
 
 from dataclasses import dataclass
-import hashlib
 import importlib
-from pathlib import Path
 
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 from diffusion_policy.common.pose_repr_util import convert_pose_mat_rep
+from fastumi_urdf_binding import validate_urdf_binding
 from umi.common.pose_util import mat_to_pose10d, pose10d_to_mat
 
 # 模型训练使用的七轴顺序，ROS 消息可采用任意排列。
@@ -189,20 +188,9 @@ def validate_contract(cfg, expected_urdf_sha256=None):
 
 
 def validate_urdf(urdf_path, cfg, expected_urdf_sha256=None):
-    """校验部署 URDF 与 checkpoint 内嵌或显式训练摘要完全一致。"""
-    path = Path(urdf_path)
-    if not path.is_file():
-        raise ValueError(f"URDF must name an existing file: {path}")
-    configured = getattr(cfg.task.contract, "urdf_sha256", None)  # 新 checkpoint 内嵌的训练摘要。
-    expected = (configured or expected_urdf_sha256 or "").lower()
-    if (len(expected) != 64
-            or any(character not in "0123456789abcdef" for character in expected)):
-        raise ValueError("A valid training URDF SHA-256 is required")
-    actual = hashlib.sha256(path.read_bytes()).hexdigest()
-    if actual != expected:
-        raise ValueError(
-            f"Deployment URDF SHA-256 does not match checkpoint: expected {expected}, got {actual}"
-        )
+    """校验训练摘要，允许已登记的固定夹爪模型迁移。"""
+    configured = getattr(cfg.task.contract, "urdf_sha256", None)  # checkpoint 内嵌的原始训练摘要优先。
+    validate_urdf_binding(urdf_path, configured or expected_urdf_sha256 or "")
 
 
 class PolicyEngine:

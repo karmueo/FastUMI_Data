@@ -426,9 +426,11 @@ python -m fastumi_data.mcap_converter dataset/<任务目录或记录目录> \
 
 - **URDF**：转换不解析 URDF，只计算其 SHA-256、复制到 `snapshots/urdf/` 并写入 `manifest.json`、HDF5
   元数据与 Zarr 根属性 `urdf_sha256`，供校验器、训练 checkpoint 和 `dp_infer` 部署时核对。缺省 `--urdf`
-  时使用包内 `assets/rm_75.urdf`（源文件在仓库根 `assets/rm_75.urdf`，SHA-256 `c3754583…b056`，与
+  时使用包内 `assets/rm_75.urdf`（源文件在仓库根 `assets/rm_75.urdf`，SHA-256 `27246315…3607`，与
   `dp_infer` 默认 `expected_urdf_sha256` 一致）。部署换用其他 URDF 文件时须显式传入同一文件；仅格式不同
-  （换行、缩进、注释）的等价 URDF 摘要也不同，会被部署端拒绝。
+  （换行、缩进、注释）的等价 URDF 摘要也不同，会被部署端拒绝。历史数据保留旧摘要；
+  仅部署端允许[已登记的固定夹爪迁移](../dp_infer/README.md#固定夹爪-urdf-迁移)。
+  安装包同时包含相邻 `assets/meshes/` 夹爪网格，转换快照仍仅用于记录与追溯。
 
 - **夹爪数据来源**：`--gripper-source` 默认 `auto`。记录目录含 `binarization.yaml`（由仓库根目录
   `binarize_gripper.py` 生成的二值化副本）时用二值结果，否则用采集时的 `filtered_openness`。可手动指定：
