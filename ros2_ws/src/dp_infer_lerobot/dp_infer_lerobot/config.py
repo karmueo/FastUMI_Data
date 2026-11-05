@@ -1,4 +1,4 @@
-"""不依赖训练框架的严格配置解析，只接受已验证的 dp_umi_v4 / dp_umi_v5 网络契约。
+"""不依赖训练框架的严格配置解析，支持已验证网络变体的当前 TCP 相对与固定回合起点契约。
 
 LeRobot fork 的 ``DiffusionConfig`` 在加载时会派生 ``crop_shape``（``resize_shape × crop_ratio``）
 以及相对位姿下的模型维度。本模块逐项核对 ``config.json``，复现这些派生量，
@@ -73,10 +73,11 @@ class DiffusionConfig(SimpleNamespace):
     """为移植网络提供与上游一致的只读约定属性。"""
 
     @classmethod
-    def from_file(cls, path, noise_scheduler_type=None, num_inference_steps=None):
+    def from_file(cls, path, noise_scheduler_type=None, num_inference_steps=None, pose_frame="current_tcp"):
         """读取并校验 ``config.json``，返回可直接构建网络的配置。
 
         Args:
+            pose_frame: 当前 TCP 相对或固定回合起点坐标契约。
             path: checkpoint 目录下的 ``config.json``。
             noise_scheduler_type: ``None`` 沿用训练的 DDPM；``"DDIM"`` 用同一噪声表做确定性少步去噪。
             num_inference_steps: ``None`` 时使用 checkpoint 值，未设置则等于训练步数 100。
@@ -85,7 +86,11 @@ class DiffusionConfig(SimpleNamespace):
             ValueError: 架构、步数或调度器不受支持。
         """
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        for key, expected in COMMON.items():
+        if pose_frame not in ("current_tcp", "episode_start_tcp"):
+            raise ValueError("Unsupported pose frame")
+        # 部署契约明确决定内部位姿维度，不能仅按输入原始维度推断。
+        supported = dict(COMMON, use_relative_pose=pose_frame == "current_tcp")
+        for key, expected in supported.items():
             if raw.get(key) != expected:
                 raise ValueError(f"Unsupported model configuration: {key}")
         variant = next((name for name, fields in VARIANTS.items()
@@ -113,8 +118,9 @@ class DiffusionConfig(SimpleNamespace):
         result.gradient_checkpointing = False
         result.image_features = {IMAGE_KEY: SimpleNamespace(shape=(3, 224, 224))}
         result.env_state_feature = None
-        result.model_state_dim = MODEL_DIM
-        result.model_action_dim = MODEL_DIM
+        result.model_state_dim = MODEL_DIM if pose_frame == "current_tcp" else RAW_DIM
+        result.model_action_dim = result.model_state_dim
+        result.pose_frame = pose_frame
         return result
 
 

@@ -2,6 +2,7 @@
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +21,7 @@ def test_launch_replaces_backend_preserves_interfaces_and_defaults_to_dry_run(tm
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
     (tmp_path / 'assets').mkdir()
-    (tmp_path / 'assets/rm_75_kinematic.urdf').write_text('<robot/>')
+    (tmp_path / 'assets/rm_75_kinematic.urdf').write_text('{}')
     (tmp_path / 'config').mkdir()
     (tmp_path / 'config/rm75_placo_controller.yaml').write_text('{}')
     monkeypatch.setattr(module, 'get_package_share_directory', lambda _: str(tmp_path))
@@ -28,8 +29,8 @@ def test_launch_replaces_backend_preserves_interfaces_and_defaults_to_dry_run(tm
     monkeypatch.setattr(module, '_python_argument', lambda *_: '/usr/bin/python3')
     monkeypatch.setattr(module, 'validate_kinematic_equivalence', lambda *_: None)
     for name in ('load_profile', 'validate_checkpoint', 'validate_urdf'):
-        monkeypatch.setattr(deployment, name, lambda *_: {})
-    monkeypatch.setattr(DiffusionConfig, 'from_file', lambda *_: None)
+        monkeypatch.setattr(deployment, name, lambda *_: {'contract': {}})
+    monkeypatch.setattr(DiffusionConfig, 'from_file', lambda *args: SimpleNamespace(noise_scheduler_type=args[1] or 'DDPM', num_inference_steps=args[2] or 100))
     context = LaunchContext()
     for action in module.generate_launch_description().entities:
         if isinstance(action, DeclareLaunchArgument):
@@ -50,6 +51,26 @@ def test_launch_replaces_backend_preserves_interfaces_and_defaults_to_dry_run(tm
     assert 'start_from_current_pose:=true' in commands[1]
     assert 'sequential_execution:=false' in commands[0]
     assert 'published_action_steps:=8' in commands[0] and 'lookahead_s:=0.0' in commands[1]
+    # 专用模型文件优先于旧默认，显式启动参数再覆盖文件。
+    config_path = path.parents[1] / 'config/dp_pick_episode_start_tcp.yaml'
+    original_path = module._path_argument
+    monkeypatch.setattr(module, '_path_argument', lambda ctx, name: config_path if name == 'config_file'
+                        else original_path(ctx, name))
+    context.launch_configurations['backend'] = 'pytorch'
+    fixed = [[perform_substitutions(context, value) for value in action.cmd]
+             for action in module._start(context) if isinstance(action, ExecuteProcess)]
+    assert 'noise_scheduler:=DDPM' in fixed[0] and 'num_inference_steps:=100' in fixed[0]
+    assert 'sequential_execution:=true' in fixed[0]
+    context.launch_configurations['sequential_execution'] = 'false'
+    context.launch_configurations['noise_scheduler'] = 'DDIM'
+    context.launch_configurations['num_inference_steps'] = '4'
+    overridden = [[perform_substitutions(context, value) for value in action.cmd]
+                  for action in module._start(context) if isinstance(action, ExecuteProcess)]
+    assert 'noise_scheduler:=DDIM' in overridden[0] and 'num_inference_steps:=4' in overridden[0]
+    assert 'sequential_execution:=false' in overridden[0]
+    context.launch_configurations['noise_scheduler'] = '__config__'
+    context.launch_configurations['num_inference_steps'] = ''
+    monkeypatch.setattr(module, '_path_argument', original_path)
     context.launch_configurations['published_action_steps'] = '15'
     context.launch_configurations['lookahead_s'] = '0.3'
     commands = [[perform_substitutions(context, value) for value in action.cmd]
@@ -103,11 +124,11 @@ def test_launch_validates_tensorrt_package_and_passes_only_export_dir(tmp_path, 
     monkeypatch.setattr(module, '_path_argument', lambda _, name: params if name == 'config_file' else params)
     monkeypatch.setattr(module, '_python_argument', lambda *_: '/usr/bin/python3')
     checked = []  # validate_export 收到的模型包与精度。
-    monkeypatch.setattr(deployment, 'load_profile', lambda _: {})
+    monkeypatch.setattr(deployment, 'load_profile', lambda _: {'contract': {}})
     monkeypatch.setattr(deployment, 'validate_checkpoint', lambda *_: pytest.fail('checkpoint not used'))
-    monkeypatch.setattr(deployment, 'validate_export', lambda root, _, precision: checked.append((root, precision)))
+    monkeypatch.setattr(deployment, 'validate_export', lambda root, _, *sampling: checked.append((root, *sampling)))
     monkeypatch.setattr(deployment, 'validate_urdf', lambda *_: None)
-    monkeypatch.setattr(DiffusionConfig, 'from_file', lambda *_: None)
+    monkeypatch.setattr(DiffusionConfig, 'from_file', lambda *args: SimpleNamespace(noise_scheduler_type=args[1] or 'DDPM', num_inference_steps=args[2] or 100))
     context = LaunchContext()
     for action in module.generate_launch_description().entities:
         if isinstance(action, DeclareLaunchArgument):
@@ -115,7 +136,7 @@ def test_launch_validates_tensorrt_package_and_passes_only_export_dir(tmp_path, 
     context.launch_configurations.update({'export_dir': str(export), 'start_controller': 'false'})
     commands = [[perform_substitutions(context, value) for value in action.cmd]
                 for action in module._start(context) if isinstance(action, ExecuteProcess)]
-    assert checked == [(export.resolve(), 'fp16')]
+    assert checked == [(export.resolve(), 'fp16', 'DDIM', 16)]
     assert f'export_dir:={export.resolve()}' in commands[0] and 'backend:=tensorrt_fp16' in commands[0]
     assert not any(item.startswith('checkpoint:=') for item in commands[0])
     # 命令行 backend 覆盖参数文件：pytorch 需要 checkpoint。
@@ -149,7 +170,7 @@ def test_launch_passes_resolved_scheduler(tmp_path, monkeypatch, backend, varian
     monkeypatch.setattr(module, '_path_argument', lambda *_: params)
     monkeypatch.setattr(module, '_python_argument', lambda *_: '/usr/bin/python3')
     for name in ('load_profile', 'validate_checkpoint', 'validate_export', 'validate_urdf'):
-        monkeypatch.setattr(deployment, name, lambda *_: {})
+        monkeypatch.setattr(deployment, name, lambda *_: {'contract': {}})
     context = LaunchContext()
     for action in module.generate_launch_description().entities:
         if isinstance(action, DeclareLaunchArgument):

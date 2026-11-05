@@ -89,6 +89,22 @@ def test_short_horizon_expires_before_generic_timeout(runtime):
     assert bool(published) == (kind == 'legacy')
 
 
+def test_sampling_service_keeps_last_accepted_steps(runtime):
+    """模型拒绝步数时服务返回失败，参数和下次推理仍用最近通过验收的值。"""
+    node, _, _ = runtime
+
+    def validate(steps):
+        """模拟只有 100 步通过精度验收的后端。"""
+        if steps != 100:
+            raise ValueError("No matching validation report")
+
+    node.engine.validate_inference_steps = validate
+    for steps, accepted in ((100, True), (2, False)):
+        response = node.on_set_inference_steps(SimpleNamespace(num_inference_steps=steps), SimpleNamespace())
+        assert response.success == accepted
+        assert node.parameter("num_inference_steps") == node._requested_steps == 100
+
+
 def test_lerobot_observes_tcp_and_publishes_link7():
     """观测位姿为 FK @ T_Link7_TCP；TCP 目标发布前换算回 Link7。"""
     from dp_infer_lerobot import deployment
@@ -194,3 +210,39 @@ def test_lerobot_backend_requires_model_directory_before_loading(backend, values
     parameters = {'backend': backend, 'checkpoint': '', 'export_dir': '', **values}
     with pytest.raises(ValueError, match=message):
         LerobotBackend().create_engine(parameters.__getitem__)
+
+
+def test_episode_backend_freezes_reference_and_discards_reset_result():
+    """固定起点模型保留起点参考，且重置不会发布上一回合的在途动作。"""
+    from dp_infer.common import Observation
+    urdf = REPO / 'assets/rm_75.urdf'
+    rclpy.init(args=['--ros-args', '-p', f'urdf_path:={urdf}', '-p', 'require_controller_reset:=false',
+                     '-p', f'deployment_config:={SRC / "dp_infer_lerobot/config/dp_pick_episode_start_tcp_deployment.yaml"}',
+                     '-p', f'end_camera_extrinsic:={REPO / "config/calibration/T_cam_end.yaml"}',
+                     '-p', f'deploy_tcp_extrinsic:={REPO / "config/calibration/T_d_cam_tcp.yaml"}'])
+    node = LerobotInferenceNode(engine=SimpleNamespace())
+    try:
+        assert node.buffer.pad_first_observation
+        start = np.eye(4)
+        start[:3, 3] = [0.1, -0.2, 0.3]
+        current = np.eye(4)
+        current[:3, 3] = [0.2, -0.1, 0.4]
+        image = np.zeros((3, 224, 224), dtype=np.float32)
+        history = [Observation(1, image, start, 0.7), Observation(2, image, current, 0.8)]
+        np.testing.assert_allclose(node.backend.reference_pose(history, start), start)
+        state = node.backend.build_observations(history, start)['observation.state'][0]
+        np.testing.assert_allclose(state[:, 6], [0, 1])
+        published = []
+        node.publisher = SimpleNamespace(publish=published.append)
+        node.task_state = 'running'
+        stamp = node.get_clock().now().nanoseconds
+        ctx = InferenceContext(start.copy(), stamp, node.buffer.episode_id, 1)
+        sequence = decode_actions(np.zeros((8, 7)), ctx, 'episode_start_tcp')
+        node.future, node.active_context = Future(), ctx
+        node.reset_episode()
+        node.future.set_result(sequence)
+        node.tick()
+        assert not published and node.buffer.start_pose is None
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

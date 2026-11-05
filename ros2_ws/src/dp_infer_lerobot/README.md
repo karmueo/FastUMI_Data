@@ -239,10 +239,10 @@ launch 和节点都会校验模型包，任一不符即拒绝启动：
 
 - manifest 列出的文件（含 engine）SHA-256 一致；
 - assets 与部署档指纹一致；
-- 验证报告属于当前 manifest，且所选精度已通过；
+- 验证报告属于当前 manifest 和权重，且所选精度、调度器、步数组合已通过；
 - engine 记录的 GPU 和 TensorRT 版本与本机一致。
 
-前后处理、相对位姿与 DDPM/DDIM 调度器仍由本包实现，因此 `noise_scheduler`、`num_inference_steps` 和运行时调步服务同样生效。
+前后处理、相对位姿与 DDPM/DDIM 调度器仍由本包实现，因此 `noise_scheduler`、`num_inference_steps` 和运行时调步服务同样生效；TensorRT 切换步数前须为目标组合生成通过的报告。
 
 必须用模型环境解释器运行 `ros2`：系统 `ros2` 的 shebang 固定为 `/usr/bin/python3`，会加载 NumPy 2，
 导致 SciPy 报 `numpy.dtype size changed`；第 2 节的 `ros2` 包装脚本保证激活 venv 后使用正确解释器。默认使用 JPEG `/wrist_camera/image_raw/compressed`，
@@ -407,3 +407,106 @@ TensorRT 与 PyTorch 内核不同，不使用逐元素容差。
 
 报告与日志保存在被 Git 忽略的 `dataset/validation/dp_lerobot_v4/`。回放使用固定关节与合成图像，只验证链路与时效，
 不代表策略质量；实机部署前仍需现场核对图像/关节/夹爪时效、TCP 外参和输出位姿，并在人工监督下验收。
+
+## 固定回合起点模型 019466
+
+`dp_pick_episode_start_tcp/019466` 使用 `episode_start_tcp` 契约：首个有效同步 TCP 位姿作为整回合参考，首帧重复补齐两帧历史；重置后重新捕获起点。状态和动作内部均为 7 维 `[xyz, rotvec, gripper]`，位置单位米、旋转单位弧度。观测夹爪按 `gripper_threshold=0.75` 二值化。动作先恢复到 base→TCP，再由共享运行层转换一次到 base→Link7。旧模型仍使用原有 10 维相对位姿处理。
+
+专用参数文件 `config/dp_pick_episode_start_tcp.yaml` 默认使用 TensorRT FP32、DDPM100 和串行执行，每段 8 个动作点。launch 中显式调度器与步数覆盖参数文件；未指定时采用参数文件。DDIM 是独立加速配置，不能视为与 DDPM100 行为等价。
+
+在仓库根目录配置路径并构建本机模型包：
+
+```bash
+DP_SOURCE=dataset/lerobot/jingbao_models/dp_pick_episode_start_tcp/019466
+DP_EXPORT="$DP_SOURCE/lerobot_trt_orin"
+DP_PROFILE=ros2_ws/src/dp_infer_lerobot/config/dp_pick_episode_start_tcp_deployment.yaml
+DP_VIDEO=dataset/lerobot/jingbao/videos/observation.images.cam0/chunk-000/file-000.mp4
+DP_REPORT=dataset/validation/dp_pick_episode_start_tcp_019466
+PYTHONPATH=ros2_ws/src/dp_infer:ros2_ws/src/dp_infer_lerobot \
+ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/build_tensorrt_engines.py \
+  --source "$DP_SOURCE" --output "$DP_EXPORT" --deployment-config "$DP_PROFILE" \
+  --reference onnx --precisions fp16 fp32 --noise-scheduler DDPM --steps 100 \
+  --video "$DP_VIDEO" --samples 8 --seeds 0 1 2
+```
+
+输出目录必须不存在或为空；源模型包不修改。FP32 关闭 TF32，FP16 保持输入输出接口类型。源 ONNX 验证报告必须与源 manifest、权重摘要匹配且已通过。默认 `validation_report.json` 验证 DDPM100；其他步数用独立报告。验证工具同时在包根目录写入 `validation_<小写调度器><步数>.json`，包含各精度的验收结果。已有独立报告可直接复制到包根目录并保留该文件名。
+
+```bash
+for DP_STEPS in 2 4 8 16; do
+  ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/build_tensorrt_engines.py \
+    --validate-only --output "$DP_EXPORT" --deployment-config "$DP_PROFILE" \
+    --reference onnx --noise-scheduler DDIM --steps "$DP_STEPS" \
+    --video "$DP_VIDEO" --samples 8 --seeds 0 1 2 \
+    --report "$DP_REPORT/validation_ddim${DP_STEPS}.json"
+done
+ros2_ws/.venv-dp-lerobot/bin/python ros2_ws/src/dp_infer_lerobot/tools/benchmark_policy.py \
+  --export-dir "$DP_EXPORT" --deployment-config "$DP_PROFILE" --reference onnx \
+  --backends tensorrt_fp32 tensorrt_fp16 --noise-scheduler DDIM --steps 4 8 16 \
+  --video "$DP_VIDEO" --samples 8 --warmup 10 --iterations 100 \
+  --output "$DP_REPORT/benchmark_ddim.json"
+```
+
+DDPM 性能测试使用同一命令，将调度器和步数改为 `--noise-scheduler DDPM --steps 100`，输出改为 `benchmark_ddpm100.json`。精度以同调度器、同步数的 ONNX 为基准，最大误差门槛为位置 1 mm、旋转 0.5°、夹爪 0.01。视频配合合成回合状态仅验证转换一致性，不代表真实 pick 数据集精度或抓取成功率。
+
+### 实机运行（FP32 + DDIM8）
+
+先按[硬件启动步骤](../dp_infer/README.md#启动)启动 RM75、Unitree 和腕部相机，确认图像、`/joint_states` 和 `/motion_control/gripper_state` 持续更新。工作区需已按前文构建，本机模型包需已生成；日常运行无需重新转换 engine。
+
+**1. 在仓库根目录打开终端，加载环境并启动实机控制。** 终端与硬件使用相同的 `ROS_DOMAIN_ID`。每次新开终端都执行下面的路径设置，不依赖构建模型时留下的变量：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+source ros2_ws/.venv-dp-lerobot/bin/activate
+export DP_PROFILE="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_pick_episode_start_tcp_deployment.yaml"
+export DP_EXPORT="$PWD/dataset/lerobot/jingbao_models/dp_pick_episode_start_tcp/019466/lerobot_trt_orin"
+
+ros2 launch dp_infer_lerobot dp_infer_lerobot.launch.py \
+  config_file:="$PWD/ros2_ws/src/dp_infer_lerobot/config/dp_pick_episode_start_tcp.yaml" \
+  deployment_config:="$DP_PROFILE" export_dir:="$DP_EXPORT" \
+  urdf_path:="$PWD/assets/rm_75.urdf" \
+  end_camera_extrinsic:="$PWD/config/calibration/T_cam_end.yaml" \
+  deploy_tcp_extrinsic:="$PWD/config/calibration/T_d_cam_tcp.yaml" \
+  backend:=tensorrt_fp32 \
+  noise_scheduler:=DDIM num_inference_steps:=8 sequential_execution:=false \
+  start_controller:=true dry_run:=false
+```
+
+该命令显式覆盖 YAML 中的 FP32/DDPM100，使用 **FP32 + DDIM8**，保留默认 8 个动作点和 `lookahead_s=0.0`。本机实测推理中位延迟约 110.67 ms，P95 为 111.12 ms。`dry_run:=false` 开启实机控制；省略它会默认进入 dry-run，机械臂不会执行轨迹。启动节点后仍处于待命状态，需要下一步开始任务。
+
+**2. 开始任务。** 保持机械臂七轴静止至少 0.5 秒（偏离不超过 2°）、夹爪张开（反馈 ≥ 0.95），并确认反馈新鲜。在另一个终端进入仓库根目录，加载相同环境并保持相同 `ROS_DOMAIN_ID`，在人工监督下执行：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
+source ros2_ws/.venv-dp-lerobot/bin/activate
+ros2 service call /fastumi/policy/start_task std_srvs/srv/Trigger '{}'
+```
+
+默认 `start_from_current_pose:=true`，从当前关节位置起步；任务首个有效同步 TCP 位姿成为本回合的固定参考。检查服务返回是否成功；若机械臂未动，查看启动终端中输入同步、起步条件或轨迹过期的日志。
+
+**3. 停止任务。** 在第二个终端执行：
+
+```bash
+ros2 service call /fastumi/policy/stop_task std_srvs/srv/Trigger '{}'
+```
+
+也可在第二个终端运行 `ros2 run dp_infer keyboard_control`，用回车开始、Backspace 停止。任务停止后可用 `Ctrl+C` 退出启动进程。仅检查推理时，将启动参数改为 `start_controller:=false dry_run:=true`；连接控制器但不执行实机轨迹时，使用 `start_controller:=true dry_run:=true`。
+
+### Orin 本机实测（2026-10-30）
+
+TensorRT 10.3、PyTorch 2.8；每配置预热 10 次、测量 100 次，原有功耗设置保持不变。下表为端到端中位 / P95 延迟（ms）；精度通过表示上述 8 个视频窗口与合成状态、3 个随机种子的转换一致性通过。
+
+| 配置 | FP32 延迟 | FP16 延迟 | 精度验收 |
+| --- | --- | --- | --- |
+| DDPM100 | 1334.49 / 1335.12 | 431.34 / 431.77 | 两者通过 |
+| DDIM2 | 30.78 / 31.08 | 11.15 / 11.64 | FP32 通过；FP16 失败 |
+| DDIM4 | 57.51 / 57.85 | 19.73 / 19.90 | 两者通过 |
+| DDIM8 | 110.67 / 111.12 | 37.04 / 37.39 | 两者通过 |
+| DDIM16 | 216.87 / 217.25 | 71.53 / 71.88 | 两者通过 |
+
+FP16/DDIM2 最大位置误差 1.10415 mm，超过 1 mm 门槛，启动及在线切换到该组合均会被拒绝。加载器优先检查组合报告，缺少时仅接受调度器和步数均匹配的默认报告。DDPM100 两种精度均超过约 233 ms 的并行执行动作窗口。FP32/DDIM16 留给同步与发布的余量很小；FP16/DDIM4 是本次测试中通过转换精度门槛的最快配置，但实际抓取效果需另行验证。专用配置仍按计划保留 FP32/DDPM100 默认值。
+
+本次完整结果位于 `dataset/validation/dp_pick_episode_start_tcp_019466/benchmark_ddpm.json`、`benchmark_ddim.json`、`validation_ddim*.json`；默认 DDPM100 精度报告位于本机模型包的 `validation_report.json`。engine、日志和报告均为本地生成数据，不提交 Git。
+
+真实 TensorRT engine 的隔离 ROS 冒烟测试采用 DDIM4，并通过 `--config-file ros2_ws/src/dp_infer_lerobot/config/dp_pick_episode_start_tcp.yaml` 加载新模型契约。FP32、FP16 均在 8 秒内发布 75 条序列（9.375 Hz）；消息年龄中位分别约 130.4 / 96.94 ms，最大约 163.9 / 97.74 ms。两者停止期间均无发布，重启后各发布 28 条，未出现跨回合旧消息。报告为同一验证目录中的 `smoke_ddim4_fp32.json`、`smoke_ddim4_fp16.json`；测试未连接真实机械臂。

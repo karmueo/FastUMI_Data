@@ -33,6 +33,7 @@ from pathlib import Path
 import platform
 import shutil
 import sys
+from tempfile import NamedTemporaryFile
 import time
 
 import numpy as np
@@ -98,7 +99,8 @@ def load_source(source, profile):
         if not path.resolve().is_relative_to(root) or not path.is_file() or sha256_file(path) != digest:
             raise ValueError(f"Export artifact checksum mismatch: {name}")
     bind_assets(manifest, root / "assets", profile)
-    cfg = DiffusionConfig.from_file(root / "assets/config.json")
+    cfg = DiffusionConfig.from_file(
+        root / "assets/config.json", pose_frame=profile["contract"].get("pose_frame", "current_tcp"))
     check_manifest(manifest, cfg)
     return manifest, cfg
 
@@ -234,8 +236,11 @@ def build_package(args, profile):
     return result
 
 
-def synthetic_states(rng, count):
-    """生成 ``(count, 2, 7)`` 合理 TCP 状态：base 坐标系下米/旋转向量弧度，两帧间小位移，夹爪 [0,1]。"""
+def synthetic_states(rng, count, pose_frame="current_tcp"):
+    """生成 ``(count, 2, 7)`` TCP 状态，位置米、轴角弧度，两帧间小位移。
+
+    current_tcp 输入为 base 坐标系；episode_start_tcp 输入为固定回合起点坐标系，夹爪为二值。
+    """
     from scipy.spatial.transform import Rotation
 
     states = np.zeros((count, 2, 7), dtype=np.float32)
@@ -246,12 +251,23 @@ def synthetic_states(rng, count):
         gripper = rng.uniform(0.2, 1.0)
         states[index, 0] = np.r_[position, rotation.as_rotvec(), gripper]
         states[index, 1] = np.r_[position + rng.normal(0, 0.002, 3), (step * rotation).as_rotvec(), gripper]
+    if pose_frame == "episode_start_tcp":
+        # 固定起点坐标系的位置单位米、轴角弧度；首个窗口模拟回合首帧补齐。
+        states[..., :3] -= np.array([0.40, 0.0, 0.30])
+        for index in range(count):
+            rotation = Rotation.from_rotvec(rng.normal(0, 0.2, 3))
+            step = Rotation.from_rotvec(rng.normal(0, 0.01, 3))
+            states[index, 0, 3:6] = rotation.as_rotvec()
+            states[index, 1, 3:6] = (step * rotation).as_rotvec()
+        states[..., 6] = (states[..., 6] >= 0.75).astype(np.float32)
+        states[0, :, :6] = 0
     return states
 
 
 def video_images(path, count):
     """从腕部相机视频均匀抽取 ``count`` 对相邻帧，返回 ``(count, 2, 3, 224, 224)`` [0,1] RGB。"""
     import cv2
+    from dp_infer.core import letterbox_rgb
 
     capture = cv2.VideoCapture(str(path))
     total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -265,15 +281,15 @@ def video_images(path, count):
             ok, frame = capture.read()
             if not ok:
                 raise ValueError(f"Cannot decode frame {start} of {path}")
-            if frame.shape[:2] != (224, 224):
-                frame = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_AREA)
-            pair.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).transpose(2, 0, 1))
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # 与在线图像契约一致：等比缩放和黑边，不拉伸宽高比。
+            pair.append(letterbox_rgb(rgb))
         images.append(pair)
     capture.release()
-    return np.asarray(images, dtype=np.float32) / 255
+    return np.asarray(images, dtype=np.float32)
 
 
-def make_inputs(sample="", video="", count=8, seed=0):
+def make_inputs(sample="", video="", count=8, seed=0, pose_frame="current_tcp"):
     """返回 ``(images (N,2,3,224,224), states (N,2,7), 来源描述)``。
 
     优先使用 ``compare_policy export-reference`` 导出的真实样本 NPZ；其次用腕部相机视频帧配合合成
@@ -285,23 +301,24 @@ def make_inputs(sample="", video="", count=8, seed=0):
         return (data["image"][:count].astype(np.float32), data["state"][:count].astype(np.float32),
                 f"npz:{sample}")
     if video:
-        return video_images(video, count), synthetic_states(rng, count), f"video:{video}+synthetic_state"
+        return video_images(video, count), synthetic_states(rng, count, pose_frame), f"video:{video}+synthetic_state"
     images = rng.uniform(0, 1, (count, 2, 3, 224, 224)).astype(np.float32)
-    return images, synthetic_states(rng, count), "synthetic"
+    return images, synthetic_states(rng, count, pose_frame), "synthetic"
 
 
 def run_policy(engine, images, states, seeds):
-    """对每个样本 × 种子用相同初始噪声推理，返回 ``(actions (M,8,7), model_actions (M,8,10), 延迟 ms)``。"""
+    """对每个样本 × 种子用相同初始噪声推理，返回 ``(actions (M,8,7), model_actions (M,8,D)，D 为契约的 7 或 10, 延迟 ms)``。"""
     import torch
 
-    from dp_infer_lerobot.config import IMAGE_KEY, MODEL_DIM, STATE_KEY
+    from dp_infer_lerobot.config import IMAGE_KEY, STATE_KEY
 
     actions, model_actions, latency = [], [], []
     for number in range(len(images)):
+        print(f"[run] sample {number + 1}/{len(images)}", flush=True)
         observations = {IMAGE_KEY: images[number][None], STATE_KEY: states[number][None]}
         for seed in seeds:
             noise = np.random.default_rng(seed).standard_normal(
-                (1, engine.cfg.horizon, MODEL_DIM)).astype(np.float32)
+                (1, engine.cfg.horizon, engine.cfg.model_action_dim)).astype(np.float32)
             torch.manual_seed(seed)  # DDPM 每步方差噪声来自全局 RNG；DDIM 确定性。
             if engine.device.type == "cuda":
                 torch.cuda.synchronize(engine.device)
@@ -434,14 +451,26 @@ def reference_engine(args, profile, manifest):
     # 绕过 PolicyEngine.__init__：此时包尚无验证报告，且没有 PyTorch 权重。
     engine = PolicyEngine.__new__(PolicyEngine)
     engine.backend, engine.device, engine.postprocessors = "onnx_cpu", torch.device(args.device), ()
-    engine.cfg = DiffusionConfig.from_file(assets / "config.json", args.noise_scheduler or None, args.steps)
+    engine.cfg = DiffusionConfig.from_file(assets / "config.json", args.noise_scheduler or None, args.steps,
+                                             profile["contract"].get("pose_frame", "current_tcp"))
     # 参考误差按训练执行窗口评估；绕过构造函数时也须初始化 predict_raw 使用的动作数。
     engine.action_steps = engine.cfg.n_action_steps
-    engine.processors = TorchProcessors(assets, engine.device)
+    engine.processors = TorchProcessors(assets, engine.device, engine.cfg.pose_frame)
     engine.policy = TensorRTPolicy(engine.cfg, manifest, OnnxSession(source, manifest, engine.device),
                                    engine.device)
     return engine, {"backend": "onnx_cpu（onnxruntime FP32 执行源包 ONNX，调度器与前后处理同本包）",
                     "source_onnx_vs_pytorch": onnx_actions}
+
+
+def write_validation_report(output, report_path, report):
+    """原子发布组合验收记录及报告副本，失败结果同样覆盖该组合的旧记录。"""
+    specific = output / f"validation_{report['scheduler'].lower()}{report['num_inference_steps']}.json"
+    content = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    for path in dict.fromkeys((specific.resolve(), report_path.resolve())):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            stream.write(content)
+        Path(stream.name).replace(path)
 
 
 def validate_package(args, profile, manifest):
@@ -459,7 +488,7 @@ def validate_package(args, profile, manifest):
     output = Path(args.output).resolve()
     engine, reference_note = reference_engine(args, profile, manifest)
     torch_policy = engine.policy
-    images, states, source = make_inputs(args.sample, args.video, args.samples)
+    images, states, source = make_inputs(args.sample, args.video, args.samples, pose_frame=engine.cfg.pose_frame)
     print(f"[validate] reference {args.reference} on {len(images)} samples x {len(args.seeds)} seeds ({source})",
           flush=True)
     reference, reference_model, reference_latency = run_policy(engine, images, states, args.seeds)
@@ -486,14 +515,14 @@ def validate_package(args, profile, manifest):
         "software": {"tensorrt": trt.__version__, "torch": torch.__version__},
         "thresholds": PHYSICAL_LIMITS,
         "reference": reference_note,
-        "inputs": {"source": source, "samples": int(len(images)), "seeds": list(args.seeds)},
+        "inputs": {"source": source, "samples": int(len(images)), "seeds": list(args.seeds), "pose_frame": engine.cfg.pose_frame},
         "scheduler": engine.cfg.noise_scheduler_type, "num_inference_steps": engine.cfg.num_inference_steps,
         "backends": {args.reference: {"passed": True, "latency": latency_summary(reference_latency)}, **backends},
         "source_validation": source_reference(manifest["source_package"]["path"]),
     }
-    (output / "validation_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n",
-                                                   encoding="utf-8")
-    print(f"[validate] {report['status']}: {output / 'validation_report.json'}", flush=True)
+    report_path = Path(args.report) if args.report else output / "validation_report.json"
+    write_validation_report(output, report_path, report)
+    print(f"[validate] {report['status']}: {report_path}", flush=True)
     return report["status"] == "passed"
 
 
@@ -518,6 +547,7 @@ def main(argv=None):
     parser.add_argument("--video", default="", help="腕部相机视频，取帧作为验证图像")
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument("--report", default="", help="独立验证报告路径；默认写模型包 validation_report.json")
     parser.add_argument("--validate-only", action="store_true", help="只重新验证已有输出包")
     args = parser.parse_args(argv)
     if args.reference == "pytorch" and not args.checkpoint:

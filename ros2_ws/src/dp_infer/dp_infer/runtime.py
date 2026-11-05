@@ -112,8 +112,11 @@ class PolicyRuntimeNode(Node):
         defaults.update(backend.parameter_defaults)
         for name, value in defaults.items():
             self.declare_parameter(name, value)
+        if hasattr(backend, "configure_observations"):
+            backend.configure_observations(self.parameter)
         self.buffer = ObservationBuffer(self.parameter("sync_slop_s"), self.parameter("input_timeout_s"),
-                                        self.parameter("history_tolerance_s"))
+                                        self.parameter("history_tolerance_s"),
+                                        pad_first_observation=getattr(backend, "pad_first_observation", False))
         rate, result_timeout = self.parameter("max_inference_hz"), self.parameter("result_timeout_s")
         if not all(np.isfinite(value) and value > 0 for value in (rate, result_timeout)):
             raise ValueError("Inference rate and result timeout must be positive and finite")
@@ -240,7 +243,13 @@ class PolicyRuntimeNode(Node):
             if parameter.name != "num_inference_steps":
                 continue
             value = parameter.value
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 50:
+            validate = getattr(self.engine, "validate_inference_steps", None)
+            if validate is not None:
+                try:
+                    validate(value)
+                except (ValueError, OSError) as error:
+                    return SetParametersResult(successful=False, reason=str(error))
+            elif isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 50:
                 return SetParametersResult(
                     successful=False, reason="num_inference_steps must be an integer in [1, 50]")
             self._requested_steps = value
@@ -695,7 +704,10 @@ class PolicyRuntimeNode(Node):
             history = None  # 两帧都必须在机械臂执行完并稳定后采集。
         if history is not None:
             self.execution_end_ns = None
-            reference = history[-1].pose.copy()
+            # 后端可选择固定回合参考；复制后只读，避免重置或新观测影响在途推理。
+            select_reference = getattr(self.backend, "reference_pose", None)
+            reference = (select_reference(history, self.buffer.start_pose)
+                         if select_reference else history[-1].pose).copy()
             reference.setflags(write=False)
             context = InferenceContext(reference, history[-1].stamp_ns, self.buffer.episode_id, 0)
             self.pending = (self.backend.build_observations(history, self.buffer.start_pose), context)

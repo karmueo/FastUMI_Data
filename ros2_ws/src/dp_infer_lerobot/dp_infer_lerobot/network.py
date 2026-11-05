@@ -37,7 +37,7 @@ from torch.utils.checkpoint import checkpoint
 
 from .config import DiffusionConfig
 
-OBS_STATE = "observation.state"  # 模型布局的状态历史键，形状 (B, n_obs_steps, 10)。
+OBS_STATE = "observation.state"  # 模型布局的状态历史键，形状 (B, n_obs_steps, D)，D 按坐标契约为 7 或 10。
 OBS_IMAGES = "observation.images"  # 堆叠后的相机历史键，形状 (B, n_obs_steps, 相机数, 3, H, W)。
 OBS_ENV_STATE = "observation.environment_state"  # 本模型未使用，保留上游分支。
 
@@ -664,12 +664,12 @@ class InferencePolicy(nn.Module):
 
         Args:
             batch: ``observation.images.front`` 为 (B, 2, 3, 224, 224)，
-                ``observation.state`` 为 (B, 2, 10)。
-            noise: 可选初始噪声 (B, horizon, 10)，用于离线数值对照。
+                ``observation.state`` 为 (B, 2, D)，D 按坐标契约为 7 或 10。
+            noise: 可选初始噪声 (B, horizon, D)，用于离线数值对照。
             action_steps: 截取的动作数；None 为训练的 n_action_steps。
 
         Returns:
-            (B, action_steps, 10)，从当前观测帧开始的动作。
+            (B, action_steps, D)，从当前观测帧开始的动作。
         """
         inputs = dict(batch)
         inputs[OBS_IMAGES] = torch.stack([inputs[key] for key in self.config.image_features], dim=-4)

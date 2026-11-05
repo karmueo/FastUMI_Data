@@ -24,6 +24,7 @@ import time
 
 import numpy as np
 import rclpy
+import yaml
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -156,13 +157,14 @@ def main():
     parser.add_argument("--backend", default="", help="pytorch / tensorrt_fp32 / tensorrt_fp16，空则沿用参数文件")
     parser.add_argument("--export-dir", default="", help="TensorRT 后端的本机模型包（build_tensorrt_engines.py 生成）")
     parser.add_argument("--deployment-config", default="", help="部署档，空则用随包 dp_umi_v4；v5 用 dp_umi_v5_deployment.yaml")
+    parser.add_argument("--config-file", default="", help="ROS 参数文件；固定起点模型使用专用配置")
     parser.add_argument("--sample", default="", help="export-reference 导出的 NPZ；空则使用合成图像")
     parser.add_argument("--urdf", default="assets/rm_75.urdf")
     parser.add_argument("--end-camera", default="config/calibration/T_cam_end.yaml")
     parser.add_argument("--deploy-tcp", default="config/calibration/T_d_cam_tcp.yaml")
     parser.add_argument("--noise-scheduler", default="")
     parser.add_argument("--num-inference-steps", default="")
-    parser.add_argument("--sequential-execution", choices=("true", "false"), default="false")
+    parser.add_argument("--sequential-execution", choices=("true", "false"), help="覆盖参数文件中的执行模式")
     parser.add_argument("--gripper", type=float, default=0.8)
     parser.add_argument("--duration", type=float, default=8.0)
     parser.add_argument("--startup-timeout", type=float, default=90.0)
@@ -180,11 +182,16 @@ def main():
                f"urdf_path:={Path(args.urdf).resolve()}",
                f"end_camera_extrinsic:={Path(args.end_camera).resolve()}",
                f"deploy_tcp_extrinsic:={Path(args.deploy_tcp).resolve()}",
-               "start_controller:=false", "image_type:=raw", f"image_topic:={TOPICS['image_topic']}",
-               f"sequential_execution:={args.sequential_execution}"]
-    sequential = args.sequential_execution == "true"
+               "start_controller:=false", "image_type:=raw", f"image_topic:={TOPICS['image_topic']}"]
+    if args.sequential_execution is not None:
+        command.append(f"sequential_execution:={args.sequential_execution}")
+        sequential = args.sequential_execution == "true"
+    else:
+        # launch 自行解析参数文件；接收端以同一模式检查时间戳和 8 个动作点。
+        params = yaml.safe_load(Path(args.config_file).read_text()) if args.config_file else {}
+        sequential = params.get("dp_infer_lerobot", {}).get("ros__parameters", {}).get("sequential_execution", False)
     for name, value in (("checkpoint", args.checkpoint), ("export_dir", args.export_dir),
-                        ("deployment_config", args.deployment_config)):
+                        ("deployment_config", args.deployment_config), ("config_file", args.config_file)):
         if value:
             command.append(f"{name}:={Path(value).resolve()}")
     if args.backend:

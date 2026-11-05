@@ -75,3 +75,16 @@ def test_repository_urdf_and_calibration_match_profile():
         profile, REPO / "config/calibration/T_cam_end.yaml", REPO / "config/calibration/T_d_cam_tcp.yaml")
     assert 0.22 < np.linalg.norm(link7_from_tcp[:3, 3]) < 0.23
     assert offset_mm < 20 and angle < deployment.DEFAULT_MAX_TCP_AXIS_DEG
+
+
+def test_episode_start_profile_binds_dimensions_and_gripper(tmp_path):
+    """新部署档明确绑定坐标、二值夹爪及两个 7 维布局，任一错配拒绝。"""
+    path = PROFILE.parent / "dp_pick_episode_start_tcp_deployment.yaml"
+    profile = deployment.load_profile(path)
+    assert profile["contract"] == deployment.EPISODE_CONTRACT
+    for key, value in (("model_state_dim", 10), ("model_action_dim", 10),
+                       ("gripper_mode", "continuous"), ("pose_frame", "current_tcp")):
+        changed = copy.deepcopy(profile)
+        changed["contract"][key] = value
+        with pytest.raises(ValueError, match="contract"):
+            deployment.load_profile(_write(tmp_path, changed))

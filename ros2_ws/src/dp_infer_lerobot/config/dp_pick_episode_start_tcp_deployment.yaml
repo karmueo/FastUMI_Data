@@ -1,0 +1,49 @@
+# 模型、训练数据契约与示教 TCP 外参的冻结部署档；更换模型或数据后重新生成并审核。
+version: 1
+model_name: dp_pick_episode_start_tcp_019466
+contract:
+  position_unit: m
+  rotation_unit: rad
+  action_source: demonstration_trajectory
+  image_preprocessing: letterbox_inter_area_black_border
+  state_layout: xyz_rotvec_gripper
+  deployment_tool_offset: deployment_calibration
+  tcp_definition: gripper_grasp_center
+  image_size: 224
+  pose_frame: episode_start_tcp
+  fps: 30
+  end_frame: tcp
+  gripper_mode: binary
+  action_layout: xyz_rotvec_gripper
+  gripper_representation: normalized_0_1
+  model_state_dim: 7
+  model_action_dim: 7
+checkpoint_files:
+  config.json: 62fe644f06114dd89044cb8d9a3a6ee86aa2e201fa5e26ed7d97aa9b7127879d
+  model.safetensors: 4532176e4d70ce2a3e9dd97ec96ec1273db147e6dda8b8c22ca2ed439bdaa0b4
+  policy_preprocessor.json: ce4f76e71f8ab03c2475841fb8b3afaccdd34fae8aa59dbd6e76d0de0601cb6a
+  policy_postprocessor.json: 697e6bf50a3f99b0677a9e797babb5ce2e0d17acf8fcd15596ba3ac0bc7a5a72
+  policy_preprocessor_step_3_normalizer_processor.safetensors: 992e8b07cbfbcf88f121f594a96abcdcab291b7c6b45821aa275b3fc2494336f
+  policy_postprocessor_step_0_unnormalizer_processor.safetensors: 23971770c6beb6ad00f6fc85ca0ff3f343d39502103156106fbf714dc02f226c
+urdf_sha256: c37545834f0d6a4719548e51337a258be0c3b95bb6b79467d835875a205bb056
+umi_camera_from_tcp:
+- - 0.9997670430417793
+  - -0.002663922532012177
+  - -0.02141875729914766
+  - 0.00046229215568154236
+- - -0.021578395598934475
+  - -0.10119407285839027
+  - -0.9946326620726399
+  - 0.06564346959496552
+- - 0.00048217307290440654
+  - 0.9948631378913754
+  - -0.10122798216922756
+  - 0.20737177055247244
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+sources:
+  dataset_repo_id: fastumi/pick
+  dataset_meta_sha256: b7339b1d3bc1bd8a612d0012e98bc885a34dfe883fd51706b488ef1dfe205cdd
+  umi_tcp_extrinsic_sha256: 51f7d3373a63fb6321fdf85bd5b8ff01eca8da14ca7a18f8cc1ce55deb77f718

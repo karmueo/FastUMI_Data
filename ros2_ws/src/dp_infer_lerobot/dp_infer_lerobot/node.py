@@ -1,9 +1,10 @@
-"""LeRobot TCP 相对位姿后端；复用 ``dp_infer`` 共享运行层的 ROS 生命周期与操作协议。
+"""LeRobot 当前 TCP 相对或固定回合起点后端；复用 ``dp_infer`` 共享运行层的 ROS 生命周期与操作协议。
 
 共享运行层的观测位姿为 ``FK(q) @ inv(C)``，发布前对序列右乘 ``C``。本后端令
 ``C = inverse(T_Link7_TCP)``：观测即 ``base_link → TCP``（模型契约），发布即 ``base_link → Link7``
 （RM75 控制器契约）。``T_Link7_TCP`` 由部署外参 ``T_cam_end.yaml`` 与 ``T_d_cam_tcp.yaml`` 计算，
-并与部署档中的示教 ``umi_camera_from_tcp`` 比较轴向。
+并与部署档中的示教 ``umi_camera_from_tcp`` 比较轴向。新模型以首个有效同步 TCP 为固定起点，
+模型前后在该起点与 base_link 坐标之间转换；回合重置后重新捕获起点。
 """
 
 from pathlib import Path
@@ -30,7 +31,7 @@ class LerobotBackend:
         "noise_scheduler": "DDIM",
         # 部署相机←Link7（T_cam_end.yaml）与部署相机←TCP（T_d_cam_tcp.yaml），均必填。
         "end_camera_extrinsic": "", "deploy_tcp_extrinsic": "",
-        "max_tcp_axis_deg": deployment.DEFAULT_MAX_TCP_AXIS_DEG,
+        "max_tcp_axis_deg": deployment.DEFAULT_MAX_TCP_AXIS_DEG, "gripper_threshold": 0.75,
         "record_dir_name": "dp_infer_lerobot", "task_control_enabled": True,
         # 每次发布的动作点数：8 为训练执行数；最多 15（horizon 后续预测），配合控制器 lookahead_s。
         "published_action_steps": core.ACTION_STEPS,
@@ -42,7 +43,6 @@ class LerobotBackend:
     # 与训练数据转换一致：cv2 INTER_AREA 等比缩放 + 黑边 letterbox 到 224。
     preprocess_image = staticmethod(letterbox_rgb)
     decode_compressed = staticmethod(compressed_image_to_rgb)
-    build_observations = staticmethod(core.build_observations)
     correct_sequence = staticmethod(core.correct_sequence)
     result_is_usable = staticmethod(core.result_is_usable)
 
@@ -55,6 +55,22 @@ class LerobotBackend:
         if self.profile is None:
             self.profile = deployment.load_profile(parameter("deployment_config"))
         return self.profile
+
+    def configure_observations(self, parameter):
+        """在缓存创建前冻结模型坐标契约，避免运行中改变回合参考语义。"""
+        self.pose_frame = self._load_profile(parameter)["contract"].get("pose_frame", "current_tcp")
+        self.pad_first_observation = self.pose_frame == "episode_start_tcp"
+        self.gripper_threshold = parameter("gripper_threshold")
+        if not np.isfinite(self.gripper_threshold) or not 0 <= self.gripper_threshold <= 1:
+            raise ValueError("Invalid gripper_threshold")
+
+    def reference_pose(self, history, start_pose):
+        """选择 base→参考帧；固定起点在整个回合中保持不变。"""
+        return start_pose if self.pose_frame == "episode_start_tcp" else history[-1].pose
+
+    def build_observations(self, history, start_pose):
+        """按模型契约构造两帧米制 TCP 状态及图像。"""
+        return core.build_observations(history, start_pose, self.pose_frame, self.gripper_threshold)
 
     def create_engine(self, parameter):
         """校验部署档与模型指纹后才创建真实模型；按 ``backend`` 要求 checkpoint 或 export_dir。"""

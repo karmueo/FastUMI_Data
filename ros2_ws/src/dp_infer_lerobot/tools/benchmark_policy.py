@@ -27,13 +27,15 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))  # 复用同目录构建脚本的输入构造与误差统计。
 
-from build_tensorrt_engines import DEFAULT_PROFILE, error_summary, make_inputs, read_json, tegra_release  # noqa: E402
+from build_tensorrt_engines import (DEFAULT_PROFILE, error_summary, make_inputs, read_json,  # noqa: E402
+                                    tegra_release, reference_engine)
 
 BACKENDS = ("pytorch", "tensorrt_fp32", "tensorrt_fp16")  # 默认测量顺序；PyTorch 须在前作为误差基准。
 
@@ -120,6 +122,7 @@ def measure(engine, images, states, noises, steps, iterations, warmup):
     latency = np.asarray(latency)
     result = {"median_ms": float(np.median(latency)), "p95_ms": float(np.percentile(latency, 95)),
               "max_ms": float(latency.max()), "mean_ms": float(latency.mean()), "iterations": iterations,
+              "throughput_hz": float(1000 / latency.mean()),
               "stages": stage_summary(timer, steps, stage_iterations)}
     return result, np.asarray(actions)
 
@@ -148,9 +151,9 @@ def environment():
     return info
 
 
-def markdown(results, steps_list):
+def markdown(results, steps_list, scheduler="DDIM"):
     """生成延迟与加速比 Markdown 表（相对 PyTorch 同步数的中位延迟）。"""
-    lines = ["| 后端 | " + " | ".join(f"DDIM{steps} 中位 / P95 (ms)" for steps in steps_list) + " |",
+    lines = ["| 后端 | " + " | ".join(f"{scheduler}{steps} 中位 / P95 (ms)" for steps in steps_list) + " |",
              "| --- |" + " --- |" * len(steps_list)]
     base = results.get("pytorch", {}).get("steps", {})
     for backend, result in results.items():
@@ -169,6 +172,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--export-dir", default="")
+    parser.add_argument("--reference", choices=("onnx", "pytorch"), default="pytorch",
+                        help="动作精度基准；onnx 使用已验证的源 ONNX，无需训练权重")
     parser.add_argument("--deployment-config", default=str(DEFAULT_PROFILE))
     parser.add_argument("--backends", nargs="+", choices=BACKENDS, default=list(BACKENDS))
     parser.add_argument("--steps", type=int, nargs="+", default=[2, 4, 8, 16])
@@ -183,13 +188,16 @@ def main(argv=None):
     args = parser.parse_args(argv)
     import torch
 
-    from dp_infer_lerobot.config import MODEL_DIM
+    from dp_infer_lerobot.config import DiffusionConfig
     from dp_infer_lerobot.deployment import load_profile
     from dp_infer_lerobot.engine import PolicyEngine
 
     profile = load_profile(args.deployment_config)
-    images, states, source = make_inputs(args.sample, args.video, args.samples)
-    noises = [np.random.default_rng(index).standard_normal((1, 16, MODEL_DIM)).astype(np.float32)
+    pose_frame = profile["contract"].get("pose_frame", "current_tcp")
+    assets = Path(args.export_dir) / "assets" if args.export_dir else Path(args.checkpoint)
+    cfg = DiffusionConfig.from_file(assets / "config.json", args.noise_scheduler, args.steps[0], pose_frame)
+    images, states, source = make_inputs(args.sample, args.video, args.samples, pose_frame=pose_frame)
+    noises = [np.random.default_rng(index).standard_normal((1, cfg.horizon, cfg.model_action_dim)).astype(np.float32)
               for index in range(len(images))]
     report = {"environment": environment(), "inputs": source, "scheduler": args.noise_scheduler,
               "warmup": args.warmup, "backends": {}}
@@ -198,7 +206,28 @@ def main(argv=None):
         report["engines"] = {stage: {precision: {key: record.get(key) for key in ("build_seconds", "size_bytes")}
                                      for precision, record in spec["engines"].items()}
                              for stage, spec in manifest["stages"].items()}
-    reference = {}  # PyTorch 各步数的动作，作为误差基准。
+    reference = {}  # 同步数、同初始噪声的参考动作，不把 ONNX CPU 时间当作 GPU 性能。
+    if args.reference == "onnx":
+        if not args.export_dir:
+            parser.error("--reference onnx requires --export-dir")
+        from dp_infer_lerobot.config import IMAGE_KEY, STATE_KEY
+        ref_args = SimpleNamespace(reference="onnx", output=args.export_dir, device=args.device,
+                                   noise_scheduler=args.noise_scheduler, steps=args.steps[0],
+                                   allow_unverified_onnx=False)
+        baseline, note = reference_engine(ref_args, profile, manifest)
+        report["reference"] = note
+        for steps in args.steps:
+            baseline.set_inference_steps(steps)
+            values = []
+            for image, state, noise in zip(images, states, noises):
+                torch.manual_seed(0)
+                values.append(baseline.predict_raw({IMAGE_KEY: image[None], STATE_KEY: state[None]},
+                                                   noise=noise)[0])
+            reference[steps] = np.asarray(values)
+        del baseline
+        gc.collect()
+    elif "pytorch" in args.backends and args.backends[0] != "pytorch":
+        parser.error("pytorch must precede TensorRT backends when used as reference")
     for backend in args.backends:
         print(f"[benchmark] loading {backend}", flush=True)
         torch.cuda.empty_cache()
@@ -216,19 +245,19 @@ def main(argv=None):
         result = {"load_s": load_s, "first_call_ms": first_ms, "steps": {}}
         for steps in args.steps:
             measured, actions = measure(engine, images, states, noises, steps, args.iterations, args.warmup)
-            if backend == "pytorch":
+            if backend == "pytorch" and args.reference == "pytorch":
                 reference[steps] = actions
             elif steps in reference:
-                measured["actions_vs_pytorch"] = error_summary(actions, reference[steps])
+                measured[f"actions_vs_{args.reference}"] = error_summary(actions, reference[steps])
             result["steps"][str(steps)] = measured
-            print(f"[benchmark] {backend} DDIM{steps}: {measured['median_ms']:.1f} ms "
+            print(f"[benchmark] {backend} {args.noise_scheduler}{steps}: {measured['median_ms']:.1f} ms "
                   f"(p95 {measured['p95_ms']:.1f})", flush=True)
         result["memory"] = {"device_used_delta_mib": memory_used_mib(torch, args.device) - before,
                             "torch_max_allocated_mib": torch.cuda.max_memory_allocated(args.device) / 2**20}
         report["backends"][backend] = result
         del engine
         gc.collect()  # 释放上一后端的权重 / engine，避免叠加到下一后端的内存统计。
-    report["markdown"] = markdown(report["backends"], args.steps)
+    report["markdown"] = markdown(report["backends"], args.steps, args.noise_scheduler)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(report["markdown"])

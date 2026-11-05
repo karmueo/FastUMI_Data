@@ -102,7 +102,8 @@ def _start(context):
     image_type = LaunchConfiguration("image_type").perform(context)
     if image_type not in ("compressed", "raw"):
         raise ValueError("image_type must be compressed or raw")
-    sequential = LaunchConfiguration("sequential_execution").perform(context).lower()
+    sequential = (LaunchConfiguration("sequential_execution").perform(context).strip()
+                  or _file_parameter(config_file, "sequential_execution", "false")).lower()
     if sequential not in ("true", "false"):
         raise ValueError("sequential_execution must be true or false")
     settle = float(LaunchConfiguration("execution_settle_s").perform(context))
@@ -120,8 +121,12 @@ def _start(context):
     # 串行运行层会按 execution_action_steps 截断序列，无法保留流水线前瞻所需的后续点。
     if sequential == "true" and lookahead > 0:
         raise ValueError("lookahead_s must be 0 when sequential_execution is true")
-    steps = int(LaunchConfiguration("num_inference_steps").perform(context))
+    # 未显式覆盖时读取参数文件，保留旧配置 DDIM16，同时允许新模型默认 DDPM100。
+    steps = int(LaunchConfiguration("num_inference_steps").perform(context).strip()
+                or _file_parameter(config_file, "num_inference_steps", "16"))
     scheduler = LaunchConfiguration("noise_scheduler").perform(context).strip()
+    if scheduler == "__config__":
+        scheduler = _file_parameter(config_file, "noise_scheduler", "DDIM").strip()
 
     parameter_names = (
         "device", "image_topic", "image_type", "joint_topic", "gripper_topic",
@@ -161,19 +166,24 @@ def _start(context):
     ]
     from dp_infer_lerobot.config import DiffusionConfig, validate_steps
     from dp_infer_lerobot.deployment import load_profile, validate_checkpoint, validate_export, validate_urdf
-    validate_steps(steps)
+    if steps:
+        validate_steps(steps)
     profile = load_profile(deployment_config)
     if precision is None:
         validate_checkpoint(model_dir, profile)
         assets = model_dir
     else:
-        validate_export(model_dir, profile, precision)
         assets = model_dir / "assets"
     validate_urdf(deployment_urdf, profile)
     # 外参轴向校验由节点执行，使用参数文件中实际生效的 max_tcp_axis_deg。
-    model_config = DiffusionConfig.from_file(assets / "config.json", scheduler or None, steps)
+    model_config = DiffusionConfig.from_file(assets / "config.json", scheduler or None, steps or None,
+                                             profile["contract"].get("pose_frame", "current_tcp"))
+    if precision is not None:
+        validate_export(model_dir, profile, precision, model_config.noise_scheduler_type,
+                        model_config.num_inference_steps)
     # 空值表示训练调度器，须传递解析后的名称，避免节点回退到参数文件中的 DDIM。
     overrides["noise_scheduler"] = scheduler or model_config.noise_scheduler_type
+    overrides["num_inference_steps"] = str(model_config.num_inference_steps)
     for name, value in overrides.items():
         if value:
             infer_cmd.extend(("-p", f"{name}:={value}"))
@@ -252,7 +262,7 @@ def generate_launch_description():
         "start_from_current_pose": "true",
         "grasp_latch": "false", "policy_gripper_topic": "/fastumi/policy/gripper_state",
         "record": "false", "record_dir_name": "dp_infer_lerobot", "record_name": "rollout",
-        "device": "cuda:0", "num_inference_steps": "16", "noise_scheduler": "DDIM",
+        "device": "cuda:0", "num_inference_steps": "", "noise_scheduler": "__config__",
         "image_topic": "/wrist_camera/image_raw/compressed",
         "image_type": "compressed", "joint_topic": "/joint_states",
         "gripper_topic": "/motion_control/gripper_state",
@@ -265,7 +275,7 @@ def generate_launch_description():
         # 默认流水线：持续推理并只执行未过期的结果。TensorRT FP16 DDIM16 约 80 ms，在 8 个动作覆盖的
         # 233 ms 内；PyTorch 16 步约 650 ms 会全部过期，需改用 sequential_execution:=true 或 2～4 步。
         # true 为串行：整段动作执行完并稳定 execution_settle_s 秒后才进行下一次观测+推理。
-        "sequential_execution": "false", "execution_settle_s": "0.3",
+        "sequential_execution": "", "execution_settle_s": "0.3",
         # 串行模式每段执行的动作数，最多 8。
         "execution_action_steps": "8",
         # 低跟随提速：推理多发布 horizon 后续预测点（8～15），控制器按 lookahead_s 前瞻采样位姿。

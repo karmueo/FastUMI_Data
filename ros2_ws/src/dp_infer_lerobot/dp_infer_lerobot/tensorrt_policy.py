@@ -9,16 +9,17 @@ engine 与构建 GPU 及 TensorRT 版本绑定：工作站（RTX 5090 / TRT 10.1
 Orin（JetPack 6.2.1 / TRT 10.3）上使用，须用 ``tools/build_tensorrt_engines.py`` 从模型包内的
 ONNX 在本机重新构建并验证。
 
-张量约定（batch=1，均为 CUDA FP32，timestep 为 int64）：
+旧模型张量约定（batch=1，均为 CUDA FP32，timestep 为 int64）：
 - 编码器：``observation.state [1,2,10]``、``observation.images [1,2,1,3,224,224]`` → ``global_cond [1,148]``。
 - 去噪器：``sample [1,16,10]``、``timestep [1]``、``global_cond [1,148]`` → ``prediction [1,16,10]``。
+新模型状态和动作为 7 维，条件为 142 维。
 """
 
 from pathlib import Path
 
 import torch
 
-from .config import IMAGE_KEY, MODEL_DIM, STATE_KEY
+from .config import IMAGE_KEY, STATE_KEY
 from .network import OBS_IMAGES, _make_noise_scheduler
 
 TENSORRT_MAJOR = "10."  # 使用 TensorRT 10 的 tensor 名称 API（set_tensor_address / execute_async_v3）。
@@ -26,16 +27,16 @@ TENSORRT_MAJOR = "10."  # 使用 TensorRT 10 的 tensor 名称 API（set_tensor_
 
 def expected_stages(cfg):
     """按已校验配置返回两个网络阶段的命名输入及输出 ``{name: (shape, dtype)}``。"""
-    cond_dim = int(cfg.n_obs_steps * (MODEL_DIM + 2 * cfg.spatial_softmax_num_keypoints))
+    cond_dim = int(cfg.n_obs_steps * (cfg.model_state_dim + 2 * cfg.spatial_softmax_num_keypoints))
     images = [1, cfg.n_obs_steps, len(cfg.image_features), *cfg.image_features[IMAGE_KEY].shape]
     return {
-        "encoder": ({STATE_KEY: ([1, cfg.n_obs_steps, MODEL_DIM], "torch.float32"),
+        "encoder": ({STATE_KEY: ([1, cfg.n_obs_steps, cfg.model_state_dim], "torch.float32"),
                      OBS_IMAGES: (images, "torch.float32")},
                     ("global_cond", [1, cond_dim], "torch.float32")),
-        "denoiser": ({"sample": ([1, cfg.horizon, MODEL_DIM], "torch.float32"),
+        "denoiser": ({"sample": ([1, cfg.horizon, cfg.model_action_dim], "torch.float32"),
                       "timestep": ([1], "torch.int64"),
                       "global_cond": ([1, cond_dim], "torch.float32")},
-                     ("prediction", [1, cfg.horizon, MODEL_DIM], "torch.float32")),
+                     ("prediction", [1, cfg.horizon, cfg.model_action_dim], "torch.float32")),
     }
 
 
@@ -172,7 +173,7 @@ class TensorRTPolicy:
             OBS_IMAGES: torch.stack([batch[key] for key in cfg.image_features], dim=-4),
         })
         sample = noise if noise is not None else torch.randn(
-            (1, cfg.horizon, MODEL_DIM), dtype=torch.float32, device=self.device)
+            (1, cfg.horizon, cfg.model_action_dim), dtype=torch.float32, device=self.device)
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
         for timestep in self.noise_scheduler.timesteps:
             prediction = self.session.run("denoiser", {

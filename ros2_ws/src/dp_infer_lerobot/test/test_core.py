@@ -121,3 +121,66 @@ def test_config_accepts_v5_variant_and_rejects_mixed_fields(tmp_path):
     path.write_text(json.dumps(dict(raw, down_dims=VARIANTS["dp_umi_v4"]["down_dims"])))
     with pytest.raises(ValueError, match="down_dims"):
         DiffusionConfig.from_file(path)
+
+
+def test_episode_start_observation_and_action_roundtrip():
+    """非单位起点下输入与动作互逆，TCP 偏移仅在发布前应用一次。"""
+    start = _pose([0.2, -0.3, 0.8], [0.4, -0.1, 0.3])
+    relative = _pose([0.1, 0.2, -0.1], [0.02, 0.03, -0.01])
+    image = np.zeros(core.IMAGE_SHAPE, dtype=np.float32)
+    history = [Observation(1, image, start, 0.749), Observation(2, image, start @ relative, 0.75)]
+    state = core.build_observations(history, start, 'episode_start_tcp')[STATE_KEY][0]
+    np.testing.assert_allclose(state[0], np.zeros(7), atol=1e-7)
+    np.testing.assert_allclose(core.raw_to_pose(state[1]), relative, atol=1e-7)
+    assert state[1, 6] == 1
+    values = np.tile(state[1], (8, 1))
+    context = InferenceContext(start, 2, 0, 1)
+    sequence = core.decode_actions(values, context, 'episode_start_tcp')
+    offset = _pose([0, 0, 0.2], [0, 0, 0.195])
+    result = core.correct_sequence(sequence, np.linalg.inv(offset))
+    expected = start @ relative @ np.linalg.inv(offset)
+    np.testing.assert_allclose(result.positions[0], expected[:3, 3], atol=1e-7)
+    np.testing.assert_allclose(Rotation.from_quat(result.quaternions[0]).as_matrix(), expected[:3, :3], atol=1e-7)
+
+
+def test_episode_first_frame_padding_and_reset():
+    """首帧仅提供一次，回合内起点不随窗口变化，重置后重新捕获。"""
+    from dp_infer.synchronizer import ObservationBuffer
+    buffer = ObservationBuffer(pad_first_observation=True)
+    image = np.zeros(core.IMAGE_SHAPE, dtype=np.float32)
+    start = _pose([0, 0, 0.2], [0.1, 0.2, 0.3])
+    for stamp, pose in [(1_000_000_000, start), (1_033_333_333, np.eye(4))]:
+        buffer.add_image(stamp, image)
+        buffer.add_pose(stamp, pose)
+        buffer.add_gripper(stamp, 1.0)
+        window = buffer.poll(stamp)
+        assert window is not None
+        np.testing.assert_allclose(buffer.start_pose, start)
+        assert buffer.poll(stamp) is None
+    buffer.reset()
+    assert buffer.start_pose is None
+    stamp = 2_000_000_000
+    buffer.add_image(stamp, image)
+    buffer.add_pose(stamp, np.eye(4))
+    buffer.add_gripper(stamp, 0.0)
+    first, second = buffer.poll(stamp)
+    assert first is second
+    np.testing.assert_allclose(buffer.start_pose, np.eye(4))
+
+
+def test_episode_first_poll_with_backlog():
+    """首次轮询积压两个同步时刻时先补回合首帧，再提供真实历史窗口。"""
+    from dp_infer.synchronizer import ObservationBuffer
+
+    buffer = ObservationBuffer(pad_first_observation=True)
+    for base in (1_000_000_000, 2_000_000_000):
+        for stamp in (base, base + 33_333_333):
+            buffer.add_image(stamp, np.zeros(core.IMAGE_SHAPE, dtype=np.float32))
+            buffer.add_pose(stamp, np.eye(4))
+            buffer.add_gripper(stamp, 1.0)
+        first, duplicate = buffer.poll(stamp)
+        assert first is duplicate and first.stamp_ns == base
+        previous, latest = buffer.poll(stamp)
+        assert previous is first and latest.stamp_ns == stamp
+        assert buffer.poll(stamp) is None
+        buffer.reset()

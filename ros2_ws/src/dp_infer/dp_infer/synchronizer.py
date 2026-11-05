@@ -10,7 +10,7 @@ from dp_infer.common import Observation
 class ObservationBuffer:
     """无 ROS 依赖的有限长度缓存；由节点的单线程回调访问。"""
 
-    def __init__(self, sync_slop_s=0.05, input_timeout_s=0.2, history_tolerance_s=0.015):
+    def __init__(self, sync_slop_s=0.05, input_timeout_s=0.2, history_tolerance_s=0.015, pad_first_observation=False):
         """设置同步、过期和历史采样容差，单位秒；非法配置抛出 ValueError。"""
         if not all(np.isfinite(value) and value > 0 for value in
                    (sync_slop_s, input_timeout_s, history_tolerance_s)):
@@ -20,6 +20,9 @@ class ObservationBuffer:
         self.slop_ns = round(sync_slop_s * 1e9)  # 三路时间匹配的最大偏差。
         self.timeout_ns = round(input_timeout_s * 1e9)  # 可接受的输入年龄。
         self.history_tolerance_ns = round(history_tolerance_s * 1e9)  # 历史采样误差。
+        if not isinstance(pad_first_observation, bool):
+            raise ValueError("pad_first_observation must be bool")
+        self.pad_first_observation = pad_first_observation
         self.episode_id = 0  # 首轮编号为零，显式重置时递增。
         self.clear()
 
@@ -61,6 +64,7 @@ class ObservationBuffer:
     def poll(self, now_ns):
         """更新同步历史并返回最新的两帧窗口；缺流、过期或历史不足时返回 None。"""
         pending = deque(maxlen=128)  # 暂时缺少状态、仍可等待的图像。
+        first = None  # 保留本轮首次同步的回合起点，即使积压数量超过历史缓存容量。
         for stamp_ns, image in sorted(self.images, key=lambda entry: entry[0]):
             if now_ns - stamp_ns > self.timeout_ns:
                 continue
@@ -78,7 +82,12 @@ class ObservationBuffer:
             self.history.append(observation)
             if self.start_pose is None:
                 self.start_pose = observation.pose.copy()
+                first = observation
         self.images = pending
+        # 固定起点训练用首帧复制填充历史；每回合只提供一次该窗口。
+        if self.pad_first_observation and first is not None:
+            self.last_offered_ns = first.stamp_ns
+            return first, first
         if len(self.history) < 2:
             return None
         latest = self.history[-1]

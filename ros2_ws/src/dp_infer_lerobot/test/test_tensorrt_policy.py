@@ -150,6 +150,33 @@ def test_validate_export_binds_package_to_profile(tmp_path):
         deployment.validate_export(root, profile, "fp16")
 
 
+def test_sampling_report_must_match_deployed_combination(tmp_path):
+    """DDPM100 的默认通过记录不能放行 DDIM；失败重验须覆盖旧结果，且逐精度判断。"""
+    root, profile = _package(tmp_path)
+    default = root / "validation_report.json"
+    report = json.loads(default.read_text())
+    report.update(scheduler="DDPM", num_inference_steps=100)
+    default.write_text(json.dumps(report))
+    deployment.validate_export(root, profile, "fp16", "DDPM", 100)
+    with pytest.raises(ValueError, match="matching validation report"):
+        deployment.validate_export(root, profile, "fp16", "DDIM", 2)
+
+    tool = _tool("build_tensorrt_combination_report")
+    archive = tmp_path / "reports" / "ddim2.json"
+    report.update(scheduler="DDIM", num_inference_steps=2, status="failed")
+    tool.write_validation_report(root, archive, report)
+    deployment.validate_export(root, profile, "fp16", "DDIM", 2)
+    report["backends"]["tensorrt_fp16"]["passed"] = False
+    default.write_text(archive.read_text())  # 同组合旧的默认报告仍显示通过。
+    tool.write_validation_report(root, archive, report)
+    with pytest.raises(ValueError, match="not passed"):
+        deployment.validate_export(root, profile, "fp16", "DDIM", 2)
+    report["package_manifest_sha256"] = "e" * 64
+    tool.write_validation_report(root, archive, report)
+    with pytest.raises(ValueError, match="does not belong"):
+        deployment.validate_export(root, profile, "fp16", "DDIM", 2)
+
+
 def test_runtime_step_override_reaches_tensorrt_sampler(tmp_path):
     """运行时调步写入 TensorRT 采样器，去噪循环次数随之变化。"""
     from types import SimpleNamespace
@@ -164,7 +191,16 @@ def test_runtime_step_override_reaches_tensorrt_sampler(tmp_path):
     engine = PolicyEngine.__new__(PolicyEngine)  # 只测步数路由，不加载模型。
     engine.backend, engine.cfg = "tensorrt_fp16", cfg
     engine.policy = TensorRTPolicy(cfg, manifest, session, "cpu")
+    root, profile = _package(tmp_path)
+    engine.export_dir = root
+    engine.manifest_sha256 = deployment.sha256_file(root / "manifest.json")
+    engine.weights_sha256 = profile["checkpoint_files"]["model.safetensors"]
+    report = json.loads((root / "validation_report.json").read_text())
+    report.update(scheduler="DDIM", num_inference_steps=2)
+    (root / "validation_ddim2.json").write_text(json.dumps(report))
     engine.set_inference_steps(2)
+    with pytest.raises(ValueError, match="matching validation report"):
+        engine.set_inference_steps(8)
     assert engine.description == "tensorrt_fp16:DDIMx2"
     batch = {IMAGE_KEY: torch.rand(1, 2, 3, 224, 224), STATE_KEY: torch.rand(1, 2, 10) * 2 - 1}
     engine.policy.predict_action_chunk(batch, noise=torch.randn(1, cfg.horizon, 10))
@@ -287,8 +323,9 @@ def test_onnx_reference_requires_source_report_for_same_package(tmp_path):
 
 
 @pytest.mark.parametrize("variant", sorted(VARIANTS))
-def test_onnx_reference_engine_predicts_default_action_chunk(tmp_path, monkeypatch, variant):
-    """无权重参考引擎须完成真实采样与后处理，输出有限的 (1, 8, 7) base→TCP 动作。"""
+@pytest.mark.parametrize("pose_frame", ["current_tcp", "episode_start_tcp"])
+def test_onnx_reference_engine_predicts_default_action_chunk(tmp_path, monkeypatch, variant, pose_frame):
+    """无权重参考引擎须完成真实采样与后处理，输出契约坐标动作，predict 使用冻结参考恢复 base→TCP。"""
     from types import SimpleNamespace
 
     import numpy as np
@@ -298,6 +335,23 @@ def test_onnx_reference_engine_predicts_default_action_chunk(tmp_path, monkeypat
     assets.mkdir()
     _write_checkpoint(assets, *_stats())
     cfg = _config(assets, variant=variant)
+    if pose_frame == "episode_start_tcp":
+        from safetensors.numpy import save_file
+        raw = json.loads((assets / "config.json").read_text())
+        raw["use_relative_pose"] = False
+        (assets / "config.json").write_text(json.dumps(raw))
+        for name, remove in (("policy_preprocessor", 3), ("policy_postprocessor", 1)):
+            spec = json.loads((assets / f"{name}.json").read_text())
+            spec["steps"].pop(remove)
+            (assets / f"{name}.json").write_text(json.dumps(spec))
+        pre, post = _stats()
+        for stats in (pre, post):
+            for key, value in stats.items():
+                if value.ndim == 1:
+                    stats[key] = value[:7].copy()
+        save_file(pre, str(assets / "pre.safetensors"))
+        save_file(post, str(assets / "post.safetensors"))
+        cfg = DiffusionConfig.from_file(assets / "config.json", "DDIM", 2, pose_frame)
     manifest = dict(_manifest(cfg), source_package={"path": str(tmp_path)})
     # 仅替换 ONNX 文件执行；保留配置、参考引擎创建、调度器和前后处理，避免漏测初始化字段。
     session = SimpleNamespace(run=lambda stage, inputs: torch.zeros(
@@ -306,14 +360,31 @@ def test_onnx_reference_engine_predicts_default_action_chunk(tmp_path, monkeypat
     monkeypatch.setattr(tool, "check_onnx_reference", lambda *_: "verified")
     args = SimpleNamespace(reference="onnx", output=str(tmp_path), device="cpu",
                            noise_scheduler="DDIM", steps=2, allow_unverified_onnx=False)
-    engine, _ = tool.reference_engine(args, {}, manifest)
+    engine, _ = tool.reference_engine(args, {"contract": {"pose_frame": pose_frame}}, manifest)
     observations = {IMAGE_KEY: np.zeros((1, 2, 3, 224, 224), np.float32),
                     STATE_KEY: np.zeros((1, 2, 7), np.float32)}
     prediction, debug = engine.predict_raw(
-        observations, noise=np.zeros((1, 16, 10), np.float32), return_debug=True)
+        observations, noise=np.zeros((1, 16, cfg.model_action_dim), np.float32), return_debug=True)
     assert engine.action_steps == cfg.n_action_steps
     assert prediction.shape == (1, 8, 7) and np.isfinite(prediction).all()
-    assert debug["model_actions"].shape == (1, 8, 10)
+    assert debug["model_actions"].shape == (1, 8, cfg.model_action_dim)
+    # 固定采样噪声；确保两个公开入口只相差契约指定的坐标变换。
+    from scipy.spatial.transform import Rotation
+    from dp_infer_lerobot.core import raw_to_pose
+
+    start = np.eye(4)
+    start[:3, :3] = Rotation.from_euler("z", 90, degrees=True).as_matrix()
+    start[:3, 3] = [0.1, -0.2, 0.3]
+    noise = torch.zeros((1, 16, cfg.model_action_dim))
+    monkeypatch.setattr(torch, "randn", lambda *args, **kwargs: noise)
+    sequence = engine.predict(observations, SimpleNamespace(reference_pose=start))
+    expected = raw_to_pose(prediction[0])
+    if pose_frame == "episode_start_tcp":
+        expected = start @ expected
+    np.testing.assert_allclose(sequence.positions, expected[:, :3, 3], atol=1e-6)
+    np.testing.assert_allclose(Rotation.from_quat(sequence.quaternions).as_matrix(),
+                               expected[:, :3, :3], atol=1e-6)
+
 
 
 @pytest.mark.parametrize('existing_cache', [False, True])
@@ -376,3 +447,49 @@ def test_build_package_prepares_and_reuses_timing_cache(tmp_path, monkeypatch, e
     saved = json.loads((Path(args.output) / 'manifest.json').read_text())
     assert saved == result
     assert {'encoder_fp16.engine', 'denoiser_fp16.engine'} <= set(saved['files'])
+
+
+def test_fixed_start_synthetic_windows_and_dynamic_noise():
+    """固定起点样本含补齐首帧、二值夹爪；验证器采用配置的七维噪声并可复现。"""
+    from types import SimpleNamespace
+    import numpy as np
+
+    tool = _tool("build_tensorrt_fixed_inputs_test")
+    states = tool.synthetic_states(np.random.default_rng(0), 8, "episode_start_tcp")
+    np.testing.assert_array_equal(states[0, :, :6], 0)
+    assert set(np.unique(states[..., 6])) <= {0.0, 1.0}
+    np.testing.assert_array_equal(states, tool.synthetic_states(
+        np.random.default_rng(0), 8, "episode_start_tcp"))
+    seen = []
+
+    def predict(observations, noise, return_debug):
+        """记录七维噪声；无需真实网络就能捕获硬编码十维的回归。"""
+        seen.append(noise.copy())
+        return np.zeros((1, 8, 7)), {"model_actions": np.zeros((1, 8, 7))}
+
+    engine = SimpleNamespace(cfg=SimpleNamespace(horizon=16, model_action_dim=7),
+                             device=torch.device("cpu"), predict_raw=predict)
+    tool.run_policy(engine, np.zeros((2, 2, 3, 224, 224)), states[:2], [0, 1])
+    assert all(value.shape == (1, 16, 7) for value in seen)
+    np.testing.assert_array_equal(seen[0], seen[2])
+    assert not np.array_equal(seen[0], seen[1])
+
+
+def test_video_inputs_preserve_letterbox_contract(monkeypatch):
+    """非方形视频帧保持宽高比并填黑边，输出 CHW RGB [0,1]，不重复归一化。"""
+    import cv2
+    import numpy as np
+    from types import SimpleNamespace
+
+    tool = _tool("build_tensorrt_video_inputs_test")
+    frame = np.zeros((100, 200, 3), dtype=np.uint8)
+    frame[..., 2] = 255  # BGR 红色。
+    capture = SimpleNamespace(get=lambda _: 2, isOpened=lambda: True,
+                              set=lambda *_: None, read=lambda: (True, frame), release=lambda: None)
+    monkeypatch.setattr(cv2, "VideoCapture", lambda _: capture)
+    images = tool.video_images("fake.mp4", 1)
+    assert images.shape == (1, 2, 3, 224, 224)
+    assert images.max() == 1 and images.min() == 0
+    np.testing.assert_array_equal(images[0, 0, :, 0], 0)
+    np.testing.assert_array_equal(images[0, 0, 0, 112], 1)
+    np.testing.assert_array_equal(images[0, 0, 1:, 112], 0)

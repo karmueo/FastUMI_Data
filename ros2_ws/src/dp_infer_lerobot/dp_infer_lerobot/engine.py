@@ -1,12 +1,14 @@
-"""目标机上的 FP32 PyTorch 或 TensorRT 推理；模型依赖仅在引擎创建时加载。"""
+"""目标机上的 FP32 PyTorch 或 TensorRT 推理；按当前 TCP 或固定回合起点契约处理 10/7 维模型。
+
+模型依赖仅在引擎创建时加载；predict_raw 保留契约坐标，predict 恢复为 base→TCP 序列。"""
 
 from pathlib import Path
 
 import numpy as np
 
-from .config import IMAGE_KEY, MODEL_DIM, RAW_DIM, STATE_KEY, DiffusionConfig, validate_backend, validate_steps
+from .config import IMAGE_KEY, RAW_DIM, STATE_KEY, DiffusionConfig, validate_backend, validate_steps
 from .core import ACTION_STEPS, IMAGE_SHAPE, MAX_ACTION_STEPS, decode_actions, validate_sequence
-from .deployment import validate_checkpoint, validate_export
+from .deployment import sha256_file, validate_checkpoint, validate_export, validate_sampling_report
 
 
 class PolicyEngine:
@@ -46,10 +48,10 @@ class PolicyEngine:
         else:
             if not export_dir:
                 raise ValueError("TensorRT backends require export_dir")
-            manifest = validate_export(export_dir, profile, precision)
             root = Path(export_dir) / "assets"  # 与 checkpoint 指纹一致的配置及处理器统计量。
         self.cfg = DiffusionConfig.from_file(root / "config.json", noise_scheduler or None,
-                                             num_inference_steps or None)
+                                             num_inference_steps or None,
+                                             profile["contract"].get("pose_frame", "current_tcp"))
         limit = min(MAX_ACTION_STEPS, self.cfg.horizon - self.cfg.n_obs_steps + 1)
         if (isinstance(action_steps, bool) or not isinstance(action_steps, int)
                 or not self.cfg.n_action_steps <= action_steps <= limit):
@@ -60,9 +62,14 @@ class PolicyEngine:
         else:
             from .tensorrt_policy import TensorRTPolicy, TensorRTSession
 
+            manifest = validate_export(export_dir, profile, precision, self.cfg.noise_scheduler_type,
+                                       self.cfg.num_inference_steps)
+            self.export_dir = Path(export_dir)
+            self.manifest_sha256 = sha256_file(self.export_dir / "manifest.json")
+            self.weights_sha256 = manifest["checkpoint_sha256"]
             session = TensorRTSession(export_dir, manifest, self.device, precision)
             self.policy = TensorRTPolicy(self.cfg, manifest, session, self.device)
-        self.processors = TorchProcessors(root, self.device)
+        self.processors = TorchProcessors(root, self.device, self.cfg.pose_frame)
         self.postprocessors = tuple(processors)
 
     def _load_torch_policy(self, root):
@@ -96,10 +103,20 @@ class PolicyEngine:
         """日志用的后端、调度器与当前去噪步数描述。"""
         return f"{self.backend}:{self.cfg.noise_scheduler_type}x{self._sampler.num_inference_steps}"
 
+    def validate_inference_steps(self, steps):
+        """校验下一次去噪步数及对应的精度报告，供 ROS 回调在接受参数前只读检查。"""
+        validate_steps(steps, self.cfg.num_train_timesteps)
+        if self.backend.startswith("tensorrt_"):
+            validate_sampling_report(self.export_dir, self.manifest_sha256, self.weights_sha256,
+                                     validate_backend(self.backend), self.cfg.noise_scheduler_type, steps)
+
     def set_inference_steps(self, num_inference_steps):
         """设置下一次去噪步数（1～训练时间步数）；``None`` 保持当前值。"""
         if num_inference_steps is not None:
-            self._sampler.num_inference_steps = validate_steps(num_inference_steps, self.cfg.num_train_timesteps)
+            steps = validate_steps(num_inference_steps, self.cfg.num_train_timesteps)
+            if steps != self._sampler.num_inference_steps:
+                self.validate_inference_steps(steps)
+                self._sampler.num_inference_steps = steps
 
     def warmup(self):
         """用全零观测运行一次，提前完成 cuDNN 算法选择 / TensorRT 初始化与显存分配，避免首个结果过期。"""
@@ -110,11 +127,14 @@ class PolicyEngine:
         self.predict_raw(observations)
 
     def predict_raw(self, observations, noise=None, return_debug=False, num_inference_steps=None):
-        """执行一次推理，返回 CPU ``[1,action_steps,7]`` 原始布局绝对动作（base→TCP）。
+        """返回 CPU ``[1,action_steps,7]`` 动作，含位置（米）、轴角（弧度）和归一化夹爪。
+
+        current_tcp 返回 base→TCP；episode_start_tcp 返回起点 TCP→目标 TCP。
+        需要统一的 base→TCP 序列时调用 predict，由它使用回合参考位姿完成转换。
 
         Args:
             observations: :func:`core.build_observations` 的输出。
-            noise: 可选初始噪声 ``[1,16,10]``，用于离线数值对照。
+            noise: 可选初始噪声 ``[1,16,D]（D 按契约为 7 或 10）``，用于离线数值对照。
             return_debug: 为真时额外返回归一化输入和模型输出，供对照工具使用。
             num_inference_steps: 可选，本次及之后使用的去噪步数。
         """
@@ -132,8 +152,8 @@ class PolicyEngine:
             inputs[key] = torch.as_tensor(value, device=self.device)
         if noise is not None:
             noise = torch.as_tensor(np.asarray(noise, dtype=np.float32), device=self.device)
-            if noise.shape != (1, self.cfg.horizon, MODEL_DIM) or not torch.isfinite(noise).all():
-                raise ValueError("Expected finite [1,16,10] initial noise")
+            if noise.shape != (1, self.cfg.horizon, self.cfg.model_action_dim) or not torch.isfinite(noise).all():
+                raise ValueError("Invalid initial noise shape or values")
         with torch.inference_mode():
             batch, reference = self.processors.preprocess(inputs[IMAGE_KEY], inputs[STATE_KEY])
             model_actions = self.policy.predict_action_chunk(batch, noise=noise, action_steps=self.action_steps)
@@ -149,7 +169,7 @@ class PolicyEngine:
     def predict(self, observations, context, num_inference_steps=None):
         """推理并转换为 base→TCP 序列（action_steps 点），再依次执行后处理扩展；Link7 换算由运行层完成。"""
         prediction = self.predict_raw(observations, num_inference_steps=num_inference_steps)
-        sequence = decode_actions(prediction[0], context)
+        sequence = decode_actions(prediction[0], context, self.cfg.pose_frame)
         for processor in self.postprocessors:
             sequence = validate_sequence(processor.process(sequence, context))
         return sequence

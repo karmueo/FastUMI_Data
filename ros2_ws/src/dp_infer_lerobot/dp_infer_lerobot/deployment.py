@@ -41,6 +41,8 @@ CONTRACT = {
     "image_size": 224,
     "image_preprocessing": "letterbox_inter_area_black_border",
 }
+EPISODE_CONTRACT = {**CONTRACT, "pose_frame": "episode_start_tcp", "gripper_mode": "binary",
+                    "model_state_dim": 7, "model_action_dim": 7}
 BASE_FILES = ("config.json", "model.safetensors", "policy_preprocessor.json",
               "policy_postprocessor.json")  # 另加两份处理器统计 safetensors。
 
@@ -71,7 +73,8 @@ def load_profile(path):
     if not path.is_file():
         raise ValueError(f"deployment_config must name an existing file: {path}")
     profile = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(profile, dict) or profile.get("version") != 1 or profile.get("contract") != CONTRACT:
+    if (not isinstance(profile, dict) or profile.get("version") != 1
+            or profile.get("contract") not in (CONTRACT, EPISODE_CONTRACT)):
         raise ValueError("Unsupported deployment contract")
     urdf = profile.get("urdf_sha256")
     if not isinstance(urdf, str) or len(urdf) != 64:
@@ -95,23 +98,49 @@ def validate_checkpoint(checkpoint, profile):
             raise ValueError(f"Checkpoint fingerprint mismatch: {name}")
 
 
-def validate_export(export_dir, profile, precision):
+def validate_sampling_report(root, manifest_sha256, weights_sha256, precision, scheduler, steps):
+    """核对模型包、源权重及所选采样组合；同组合的独立报告优先于默认报告。"""
+    report_path = root / "validation_report.json"
+    if scheduler is not None:
+        specific = root / f"validation_{scheduler.lower()}{steps}.json"
+        if specific.is_file():
+            report_path = specific
+    if not report_path.is_file():
+        raise ValueError(f"Missing validation report: {report_path}")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if (not isinstance(report, dict) or report.get("package_manifest_sha256") != manifest_sha256
+            or report.get("checkpoint_sha256") != weights_sha256):
+        raise ValueError("Validation report does not belong to this export package")
+    combination = f"{precision} {scheduler}{steps}" if scheduler is not None else precision
+    if scheduler is not None and (report.get("scheduler") != scheduler
+                                  or type(report.get("num_inference_steps")) is not int
+                                  or report["num_inference_steps"] != steps):
+        raise ValueError(f"No matching validation report for {combination}")
+    backends = report.get("backends")
+    result = backends.get(f"tensorrt_{precision}") if isinstance(backends, dict) else None
+    if not isinstance(result, dict) or result.get("passed") is not True:
+        raise ValueError(f"TensorRT {combination} has not passed export validation")
+
+
+def validate_export(export_dir, profile, precision, scheduler=None, steps=None):
     """核对 TensorRT 模型包（``lerobot-export`` 或本机重建）并绑定到部署档，返回 manifest。
 
     模型包不含 ``model.safetensors``：``assets/`` 中其余 checkpoint 文件须与部署档指纹一致，
     manifest 记录的源权重摘要须等于部署档的 ``model.safetensors`` 摘要；manifest 列出的全部文件
-    （含 engine）逐一核对摘要。``validation_report.json`` 必须针对当前 manifest 且所选精度已通过验收。
+    （含 engine）逐一核对摘要。报告必须针对当前 manifest，且所选精度及采样组合已通过验收。
 
     Args:
         export_dir: 模型包根目录（含 ``manifest.json``、``assets/`` 与 engine）。
         profile: :func:`load_profile` 返回的部署档。
         precision: ``fp32`` 或 ``fp16``。
+        scheduler: 部署时实际采用的调度器；省略两项采样参数仅用于离线检查默认报告。
+        steps: 对应的去噪步数。
 
     Raises:
         ValueError: 模型包不完整、被修改、与部署档不符或该精度未通过验证。
     """
     root = Path(export_dir)
-    manifest_path, report_path = root / "manifest.json", root / "validation_report.json"
+    manifest_path = root / "manifest.json"
     if not root.is_dir() or not manifest_path.is_file():
         raise ValueError("export_dir must name a complete lerobot-export package")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -135,15 +164,10 @@ def validate_export(export_dir, profile, precision):
         engine = manifest.get("stages", {}).get(stage, {}).get("engines", {}).get(precision)
         if not engine or f"{engine.get('path')}" not in manifest["files"]:
             raise ValueError(f"Export package lacks a verified {precision} {stage} engine")
-    if not report_path.is_file():
-        raise ValueError("Export package lacks validation_report.json")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    backend = report.get("backends", {}).get(f"tensorrt_{precision}", {})
-    if (report.get("package_manifest_sha256") != sha256_file(manifest_path)
-            or report.get("checkpoint_sha256") != files["model.safetensors"]):
-        raise ValueError("Validation report does not belong to this export package")
-    if backend.get("passed") is not True:
-        raise ValueError(f"TensorRT {precision} engines have not passed export validation")
+    if (scheduler is None) != (steps is None):
+        raise ValueError("Specify both scheduler and steps")
+    validate_sampling_report(root, sha256_file(manifest_path), files["model.safetensors"],
+                             precision, scheduler, steps)
     return manifest
 
 
@@ -268,8 +292,19 @@ def export_checkpoint_files(export_dir):
 def make_profile(checkpoint, dataset_meta, urdf, model_name, export_dir=""):
     """由 checkpoint（或 ``export_dir`` 模型包）与数据集元信息生成部署档字典，并核对 URDF 指纹。"""
     meta = json.loads(Path(dataset_meta).read_text(encoding="utf-8"))
-    contract = {key: meta.get(key) for key in CONTRACT}
-    if contract != CONTRACT:
+    assets = Path(export_dir) / "assets" if export_dir else Path(checkpoint)
+    config = json.loads((assets / "config.json").read_text(encoding="utf-8"))
+    if config.get("use_relative_pose") is True:
+        expected = CONTRACT
+    elif config.get("use_relative_pose") is False:
+        expected = EPISODE_CONTRACT
+    else:
+        raise ValueError("Unsupported checkpoint pose configuration")
+    # 数据集记录坐标契约，内部维度由受支持的处理链派生。
+    contract = {key: meta.get(key) for key in expected if key not in {"model_state_dim", "model_action_dim"}}
+    if expected is EPISODE_CONTRACT:
+        contract.update(model_state_dim=7, model_action_dim=7)
+    if contract != expected:
         raise ValueError(f"Dataset contract differs from the supported one: {contract}")
     if sha256_file(urdf) != meta["urdf_sha256"]:
         raise ValueError("URDF does not match the dataset urdf_sha256")
